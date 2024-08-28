@@ -1,23 +1,23 @@
 #!/bin/bash
 
-HXCFE_CMD="./hxcfe_cmdline/App/hxcfe"  # Location of the hxcfe command-line tool
-AKAIUTIL_CMD="./akaiutil"              # Location of the akaiutil binary
-WORKING_DIR="./"                       # Directory where the IMG file and other temp files will be stored
+HXCFE_CMD="./lib/hxcfe_cmdline/App/hxcfe"  # Location of the hxcfe command-line tool
+AKAIUTIL_CMD="./lib/akaiutil"              # Location of the akaiutil binary
+INPUT_HFE_FILE="./lib/image/DSK.HFE"       # Base Akai s950 HFE file to use for conversion
 
 main() {
     validate_input "$@"
     convert_hfe_to_img
     convert_wav_files
     check_file_size
+    change_file_name
     add_files_to_img
     convert_img_to_hfe
 }
 
 show_help() {
-    echo "Usage: $(basename "$0") [-v] <input_hfe_file> <files_path> [output_hfe_file]"
+    echo "Usage: $(basename "$0") [-v] <files_path> [output_hfe_file]"
     echo
     echo "Positional Arguments:"
-    echo "  <input_hfe_file>  : The input HFE file to process (required)."
     echo "  <files_path>      : Path to the file or directory containing files to add (required)."
     echo "  [output_hfe_file] : The output HFE file path (optional, defaults to current working directory)."
     echo
@@ -25,7 +25,7 @@ show_help() {
     echo "  -v                : Enable verbose mode."
     echo
     echo "Example:"
-    echo "  $(basename "$0") -v /path/to/input_file.hfe /path/to/files_or_directory /optional/path/to/output_file.hfe"
+    echo "  $(basename "$0") -v /path/to/files_or_directory /optional/path/to/output_file.hfe"
     echo
     echo "Notes:"
     echo "  - Ensure that the total size of files in <files_path> does not exceed 2MB."
@@ -34,19 +34,32 @@ show_help() {
 }
 
 validate_input() {
-    if [ $# -lt 2 ]; then
+    if [ $# -lt 1 ]; then
         echo "Error: Not enough arguments provided."
         show_help
         exit 1
     fi
 
-    INPUT_HFE_FILE="$1"
-    FILES_PATH="$2"
-    OUTPUT_HFE_FILE="${3:-$(pwd)/output_file.hfe}"
+    FILES_PATH="$1"
 
-    # Add .hfe extension if not present
-    if [[ "${OUTPUT_HFE_FILE}" != *.hfe ]]; then
-        OUTPUT_HFE_FILE="${OUTPUT_HFE_FILE}.hfe"
+    if [ $# -eq 2 ]; then
+        OUTPUT_HFE_FILE="$2"
+    else
+        BASE_NAME=$(basename "$(find "$FILES_PATH" -type f -name '*.p9' | head -n 1)" .p9)
+        if [ -z "$BASE_NAME" ]; then
+            if [ -t 0 ]; then
+                read -p "No .p9 file found. Please enter the output HFE filename (without extension): " BASE_NAME
+                [ -z "$BASE_NAME" ] && BASE_NAME="OUTPUT"
+            else
+                BASE_NAME="OUTPUT"
+            fi
+        fi
+        OUTPUT_HFE_FILE="$(pwd)/${BASE_NAME}.HFE"
+    fi
+
+    # Ensure the output filename ends in .HFE, and avoid double extensions
+    if [[ "${OUTPUT_HFE_FILE}" != *.HFE ]]; then
+        OUTPUT_HFE_FILE="${OUTPUT_HFE_FILE}.HFE"
     fi
 
     OUTPUT_HFE_FILE=$(echo "$OUTPUT_HFE_FILE" | tr '[:lower:]' '[:upper:]')
@@ -60,12 +73,10 @@ validate_input() {
         echo "Error: '$FILES_PATH' is neither a valid file nor directory."
         exit 1
     fi
-
-    mkdir -p "$WORKING_DIR"
 }
 
 convert_hfe_to_img() {
-    IMG_FILE="$WORKING_DIR/working_file.img"
+    IMG_FILE="$(pwd)/working_file.img"
     $HXCFE_CMD -finput:"$INPUT_HFE_FILE" -conv:RAW_LOADER -foutput:"$IMG_FILE"
 
     if [ ! -f "$IMG_FILE" ]; then
@@ -112,6 +123,16 @@ check_file_size() {
     fi
 }
 
+change_file_name() {
+    for file in "$FILES_PATH"/*; do
+        if [[ "$file" == *.p9.p9 ]]; then
+            new_name=$(echo "$file" | sed 's/.p9.p9$/.p9/')
+            mv "$file" "$new_name"
+            echo "Renamed $file to $new_name" >&3
+        fi
+    done
+}
+
 add_files_to_img() {
     $AKAIUTIL_CMD "$IMG_FILE" <<EOF
 lcd ${FILES_PATH}
@@ -128,7 +149,7 @@ EOF
 }
 
 convert_img_to_hfe() {
-    $HXCFE_CMD -finput:"$IMG_FILE" -conv:HXC_HFE -foutput:"$OUTPUT_HFE_FILE"
+    $HXCFE_CMD -finput:"$IMG_FILE" -uselayout:"AKAIS950_HD_1600KB" -conv:HXC_HFE -foutput:"$OUTPUT_HFE_FILE"
 
     if [ ! -f "$OUTPUT_HFE_FILE" ]; then
         echo "Error: Failed to convert IMG back to HFE." >&3
@@ -152,6 +173,6 @@ elif [[ "$1" == "-v" ]]; then
     main "$@"
 else
     VERBOSE=false
-    exec 3>&1 1>error.log 2>&1
+    exec 3>&1 1>akai.log 2>&1
     main "$@"
 fi
