@@ -1,0 +1,22 @@
+# Binaries
+/s950
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+go.work
+go.work.sum
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test artifacts
+/testdata/local/
+*.wav.tmp
+*.sysex.tmp
