@@ -2,8 +2,6 @@ package sample
 
 import (
 	"math/rand"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -107,35 +105,3 @@ func TestPCM16ToWordsLengthCheck(t *testing.T) {
 	}
 }
 
-func TestWAVRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.wav")
-
-	// Build a 22050 Hz sine-ish signal (just incrementing ramp).
-	pcm := make([]int16, 1000)
-	for i := range pcm {
-		pcm[i] = int16(i*32 - 16000)
-	}
-	if err := SaveWAV(path, pcm, 22050); err != nil {
-		t.Fatalf("SaveWAV: %v", err)
-	}
-	// Re-load.
-	w, err := LoadWAV(path)
-	if err != nil {
-		t.Fatalf("LoadWAV: %v", err)
-	}
-	if w.SampleRate != 22050 {
-		t.Errorf("sample rate: got %d, want 22050", w.SampleRate)
-	}
-	if len(w.PCM) != len(pcm) {
-		t.Fatalf("PCM len: got %d, want %d", len(w.PCM), len(pcm))
-	}
-	for i := range pcm {
-		if w.PCM[i] != pcm[i] {
-			t.Fatalf("PCM[%d] = %d, want %d", i, w.PCM[i], pcm[i])
-		}
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("WAV file vanished: %v", err)
-	}
-}

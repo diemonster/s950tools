@@ -51,7 +51,6 @@ func main() {
 		newPortsCmd(),
 		newCatalogCmd(),
 		newGetParamsCmd(),
-		newGetSampleCmd(),
 		newPutSampleCmd(),
 		newMonitorCmd(),
 	)
@@ -173,105 +172,61 @@ func newGetParamsCmd() *cobra.Command {
 	return cmd
 }
 
-func newGetSampleCmd() *cobra.Command {
-	var outPath string
-	var rawPath string
-	var ackStrategy string
-	var ackInterval time.Duration
-	cmd := &cobra.Command{
-		Use:   "get-sample <sample-num> <out.wav>",
-		Short: "Download a sample to a WAV file",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			num, err := parseSampleNum(args[0])
-			if err != nil {
-				return err
-			}
-			outPath = args[1]
-
-			d, cleanup, err := newDevice()
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-
-			ctx, cancel := signal.NotifyContext(context.Background(),
-				os.Interrupt, syscall.SIGTERM)
-			defer cancel()
-
-			d.DumpTimeout = 10 * time.Minute
-			d.AckPaceInterval = ackInterval
-			fmt.Fprintf(os.Stderr, "downloading sample %d (this can take minutes)...\n", num)
-			var sink func([]byte)
-			if rawPath != "" {
-				sink = func(raw []byte) {
-					if werr := os.WriteFile(rawPath, raw, 0644); werr != nil {
-						fmt.Fprintf(os.Stderr, "warning: could not write raw dump to %s: %v\n", rawPath, werr)
-					} else {
-						fmt.Fprintf(os.Stderr, "wrote raw dump to %s (%d bytes)\n", rawPath, len(raw))
-					}
-				}
-			}
-			var dumpOpts device.GetSampleOpts
-			switch ackStrategy {
-			case "pump":
-				// default
-			case "single":
-				dumpOpts.SingleAck = true
-			case "none":
-				dumpOpts.NoAckPump = true
-			default:
-				return fmt.Errorf("unknown --ack mode %q (use pump|single|none)", ackStrategy)
-			}
-			dump, err := d.GetSample(ctx, num, dumpOpts, sink)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "got %d words, period=%dns (%dHz), loop %d..%d, mode=%d\n",
-				len(dump.Words), dump.Header.PeriodNS,
-				sample.PeriodNSToHz(dump.Header.PeriodNS),
-				dump.Header.LoopStart, dump.Header.LoopEnd, dump.Header.Mode)
-
-			pcm := sample.WordsToPCM16(dump.Words)
-			rate := sample.PeriodNSToHz(dump.Header.PeriodNS)
-			if err := sample.SaveWAV(outPath, pcm, rate); err != nil {
-				return fmt.Errorf("save WAV: %w", err)
-			}
-			fmt.Printf("wrote %s\n", outPath)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&rawPath, "raw", "",
-		"also write the unprocessed SysEx bytes to this path (for debugging)")
-	cmd.Flags().StringVar(&ackStrategy, "ack", "pump",
-		"ACK strategy: pump (continuous, default), single (one ACK only), none (no ACKs)")
-	cmd.Flags().DurationVar(&ackInterval, "ack-interval", 50*time.Millisecond,
-		"interval between ACKs when --ack=pump (empirically optimal: 50ms)")
-	return cmd
-}
-
 func newPutSampleCmd() *cobra.Command {
 	var slot int
 	var loopStart, loopEnd uint32
 	var mode int
 	var maxFrames int
+	var channelStr string
+	var rateStr string
+	var tuneSemitones float64
 	cmd := &cobra.Command{
-		Use:   "put-sample <in.wav>",
-		Short: "Upload a WAV file to the device (open-loop)",
+		Use:   "put-sample <in.wav|in.aiff>",
+		Short: "Upload an audio file (WAV or AIFF) to the device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := args[0]
-			w, err := sample.LoadWAV(path)
+			chMode, err := sample.ParseChannelMode(channelStr)
 			if err != nil {
-				return fmt.Errorf("load WAV: %w", err)
+				return err
 			}
-			fmt.Fprintf(os.Stderr, "loaded %d frames @ %dHz\n", len(w.PCM), w.SampleRate)
-			if maxFrames > 0 && maxFrames < len(w.PCM) {
-				w.PCM = w.PCM[:maxFrames]
-				fmt.Fprintf(os.Stderr, "truncated to %d frames\n", len(w.PCM))
+			storeRate, err := sample.ParseRate(rateStr)
+			if err != nil {
+				return err
+			}
+			a, err := sample.LoadAudio(path, chMode)
+			if err != nil {
+				return fmt.Errorf("load audio: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "loaded %d frames @ %dHz\n", len(a.PCM), a.SampleRate)
+
+			switch {
+			case storeRate != 0:
+				// Explicit user-chosen storage rate: always resample to it.
+				if !sample.InRange(storeRate) {
+					return fmt.Errorf("--rate %d is outside S950 range (%d..%d Hz)",
+						storeRate, sample.MinSampleRateHz, sample.MaxSampleRateHz)
+				}
+				if storeRate != a.SampleRate {
+					orig := a.SampleRate
+					a = sample.ResampleTo(a, storeRate)
+					fmt.Fprintf(os.Stderr, "resampled %dHz -> %dHz (%d frames)\n",
+						orig, a.SampleRate, len(a.PCM))
+				}
+			case !sample.InRange(a.SampleRate):
+				// Source out of range and no explicit --rate: fall back to 44.1k.
+				orig := a.SampleRate
+				a = sample.ResampleToS950Range(a, 0)
+				fmt.Fprintf(os.Stderr, "source %dHz out of S950 range; resampled to %dHz (%d frames)\n",
+					orig, a.SampleRate, len(a.PCM))
 			}
 
-			words, err := sample.PCM16ToWords(w.PCM)
+			if maxFrames > 0 && maxFrames < len(a.PCM) {
+				a.PCM = a.PCM[:maxFrames]
+				fmt.Fprintf(os.Stderr, "truncated to %d frames\n", len(a.PCM))
+			}
+
+			words, err := sample.PCM16ToWords(a.PCM)
 			if err != nil {
 				return fmt.Errorf("convert: %w", err)
 			}
@@ -282,9 +237,29 @@ func newPutSampleCmd() *cobra.Command {
 			}
 			defer cleanup()
 
+			// Auto-pick a slot if the requested one is occupied. Overwriting
+			// an existing sample on the S950 NAKs every block, truncating
+			// the new upload — so we always need a clean target.
+			//
+			// Fail-soft: if the catalog can't be read (S950 stuck after a
+			// prior NAK incident, etc.) fall through with the requested
+			// slot. The NAK detector after the dump will still surface any
+			// real overwrite-induced failure.
+			finalSlot := byte(slot)
+			picked, changed, perr := d.PickSlot(byte(slot))
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not read catalog to auto-pick slot (%v); using --slot %d as-is\n", perr, slot)
+			} else {
+				finalSlot = picked
+				if changed {
+					fmt.Fprintf(os.Stderr, "slot %d is occupied; using slot %d instead\n",
+						slot, finalSlot)
+				}
+			}
+
 			opts := device.PutSampleOpts{
-				Num:          byte(slot),
-				SampleRateHz: w.SampleRate,
+				Num:          finalSlot,
+				SampleRateHz: a.SampleRate,
 				LoopStart:    loopStart,
 				LoopEnd:      loopEnd,
 				Mode:         byte(mode),
@@ -295,10 +270,66 @@ func newPutSampleCmd() *cobra.Command {
 				return fmt.Errorf("upload: %w", err)
 			}
 			fmt.Fprintf(os.Stderr, "queued %d bytes to slot %d; waiting %s for MIDI to drain...\n",
-				sent, slot, drain.Round(100*time.Millisecond))
+				sent, finalSlot, drain.Round(100*time.Millisecond))
 			// rtmidi/CoreMIDI buffers asynchronously; we have to wait for the
 			// OS to actually clock the bytes out at 31250 baud.
 			waitWithProgress(drain)
+
+			// Listen for NAKs the S950 may have emitted during the upload.
+			// Any NAK means a block failed checksum on the device side and
+			// the stored sample is partial — the upload is unrecoverable in
+			// open-loop mode and must be retried.
+			naks := d.CollectNAKs(500 * time.Millisecond)
+			if naks > 0 {
+				return fmt.Errorf("upload received %d NAK(s) from the S950 — sample may be truncated; please retry put-sample", naks)
+			}
+			fmt.Fprintf(os.Stderr, "upload accepted (no NAKs); drain done in %s\n",
+				time.Since(start).Round(time.Millisecond))
+
+			// SPRM rewrite only when there's something explicit to set —
+			// otherwise leave the S950's auto-generated parameters alone.
+			needsSPRM := tuneSemitones != 0 || loopStart != 0 || loopEnd != 0
+			if needsSPRM {
+				time.Sleep(200 * time.Millisecond)
+				p, err := d.GetParams(finalSlot)
+				if err != nil {
+					return fmt.Errorf("read SPRM: %w", err)
+				}
+				if tuneSemitones != 0 {
+					// SNOMP is the keyboard note at which the sample plays at
+					// its native rate ("home pitch"). LOWERING SNOMP shifts
+					// home down, so playing the same key sounds HIGHER. To
+					// match intuitive DAW semantics (--tune +12 = one octave
+					// up), we therefore SUBTRACT N*16 from SNOMP for +N
+					// semitones up. Units are 1/16 semitone.
+					pitch := int32(p.NominalPitch) - int32(tuneSemitones*16)
+					if pitch < 0 {
+						pitch = 0
+					}
+					if pitch > 0xFFFF {
+						pitch = 0xFFFF
+					}
+					p.NominalPitch = uint16(pitch)
+					fmt.Fprintf(os.Stderr, "tuned %+.2f semitones (SNOMP %d)\n",
+						tuneSemitones, p.NominalPitch)
+				}
+				if loopStart != 0 || loopEnd != 0 {
+					p.Start = loopStart
+					p.End = loopEnd
+				}
+				if err := d.SetParams(finalSlot, p); err != nil {
+					return fmt.Errorf("write SPRM: %w", err)
+				}
+				// Verify by reading back immediately on the same connection.
+				time.Sleep(200 * time.Millisecond)
+				v, verr := d.GetParams(finalSlot)
+				if verr != nil {
+					fmt.Fprintf(os.Stderr, "warning: SPRM verify read failed: %v\n", verr)
+				} else {
+					fmt.Fprintf(os.Stderr, "verified SPRM on device: pitch=%d end=%d loop=%d\n",
+						v.NominalPitch, v.End, v.LoopLength)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "done in %s\n", time.Since(start).Round(time.Millisecond))
 			return nil
 		},
@@ -308,6 +339,19 @@ func newPutSampleCmd() *cobra.Command {
 	cmd.Flags().Uint32Var(&loopEnd, "loop-end", 0, "loop end (words); when <= loop-start+5, sample is one-shot")
 	cmd.Flags().IntVar(&mode, "mode", 0, "mode: 0=looping, 1=alternating")
 	cmd.Flags().IntVar(&maxFrames, "max-frames", 0, "truncate input to N frames (0 = no limit)")
+	cmd.Flags().StringVar(&channelStr, "channel-mode", "mix",
+		"how to fold stereo to mono: left|right|mix")
+	cmd.Flags().StringVar(&rateStr, "rate", "",
+		"force-resample to this rate before upload — accepts a number in Hz\n"+
+			"(e.g. 10000) or a named alias for lo-fi character matching.\n"+
+			"Aliases: telephone(8k), lofi(10k), sp1200(26040), mpc60(40k),\n"+
+			"and s950-7/10/12/15/20/26/31/37/40 for the S950's native presets.\n"+
+			"Empty = keep source rate (resample only if out of S950 range)")
+	cmd.Flags().Float64Var(&tuneSemitones, "tune", 0,
+		"transpose the sample's nominal pitch by N semitones (can be negative\n"+
+			"or fractional, e.g. -12 = down one octave, +7 = up a fifth). The\n"+
+			"audio data is unchanged; the S950 plays back from a different key\n"+
+			"as the new \"home\" pitch")
 	return cmd
 }
 
