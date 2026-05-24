@@ -109,3 +109,7 @@ The project is organized as follows:
 The protocol implementation is cross-checked against
 [`dxzl/akai-s950`](https://github.com/dxzl/akai-s950), which has the most
 complete public dump of the S900/S950 PRGHEDR / KEYGROUP / SPRM byte layouts.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
