@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +53,9 @@ func main() {
 		newPortsCmd(),
 		newCatalogCmd(),
 		newGetParamsCmd(),
+		newGetProgramCmd(),
+		newPutProgramCmd(),
+		newProgramTemplateCmd(),
 		newPutSampleCmd(),
 		newMonitorCmd(),
 	)
@@ -172,6 +177,359 @@ func newGetParamsCmd() *cobra.Command {
 	return cmd
 }
 
+func newGetProgramCmd() *cobra.Command {
+	var outPath string
+	cmd := &cobra.Command{
+		Use:   "get-program <program-num>",
+		Short: "Read a program (header + keygroups) from the device as JSON",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			num, err := parseSampleNum(args[0])
+			if err != nil {
+				return err
+			}
+			d, cleanup, err := newDevice()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			d.RequestTimeout = 8 * time.Second // programs are bigger than catalog
+
+			p, err := d.GetProgram(num)
+			if err != nil {
+				return err
+			}
+			j := p.ToJSON()
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if outPath != "" {
+				f, err := os.Create(outPath)
+				if err != nil {
+					return fmt.Errorf("create %s: %w", outPath, err)
+				}
+				defer f.Close()
+				enc = json.NewEncoder(f)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(&j); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "wrote %s\n", outPath)
+				return nil
+			}
+			return enc.Encode(&j)
+		},
+	}
+	cmd.Flags().StringVarP(&outPath, "output", "o", "",
+		"write JSON to this file instead of stdout")
+	return cmd
+}
+
+func newPutProgramCmd() *cobra.Command {
+	var slot int
+	var skipVerify bool
+	var forceSamples bool
+	cmd := &cobra.Command{
+		Use:   "put-program <file.json>",
+		Short: "Write a program (and any bundled samples) to the device from JSON",
+		Long: "Writes a program JSON to a slot. If the JSON contains a `samples` array,\n" +
+			"each listed audio file is uploaded first (auto-picking empty slots),\n" +
+			"with the SPRM Name set to the declared `name` so keygroups can\n" +
+			"reference it. Samples whose `name` already exists in the device\n" +
+			"catalog are skipped (use --force-samples to re-upload anyway).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			buf, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", path, err)
+			}
+			var pj protocol.ProgramJSON
+			if err := json.Unmarshal(buf, &pj); err != nil {
+				return fmt.Errorf("parse JSON: %w", err)
+			}
+			p := &protocol.Program{}
+			if err := p.FromJSON(&pj); err != nil {
+				return fmt.Errorf("decode program: %w", err)
+			}
+
+			d, cleanup, err := newDevice()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			// --- Sample manifest, if any ---
+			if len(pj.Samples) > 0 {
+				kitDir := filepath.Dir(path)
+				existing := map[string]bool{}
+				if cat, err := d.Catalog(); err == nil {
+					for _, e := range cat {
+						if e.Type == 'S' {
+							existing[e.Name] = true
+						}
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: catalog read failed (%v); proceeding without skip-if-present\n", err)
+				}
+
+				for i, spec := range pj.Samples {
+					name := spec.Name
+					if name == "" {
+						base := filepath.Base(spec.File)
+						name = strings.ToUpper(strings.TrimSuffix(base, filepath.Ext(base)))
+						if len(name) > 10 {
+							name = name[:10]
+						}
+					}
+					if existing[name] && !forceSamples {
+						fmt.Fprintf(os.Stderr, "[%d/%d] %s: already on device, skipping\n",
+							i+1, len(pj.Samples), name)
+						continue
+					}
+					filePath := spec.File
+					if !filepath.IsAbs(filePath) {
+						filePath = filepath.Join(kitDir, filePath)
+					}
+					fmt.Fprintf(os.Stderr, "[%d/%d] %s ← %s\n",
+						i+1, len(pj.Samples), name, filePath)
+					if _, err := uploadSample(d, uploadSampleOpts{
+						Path:          filePath,
+						Name:          name,
+						Rate:          spec.Rate,
+						ChannelMode:   spec.ChannelMode,
+						TuneSemitones: spec.Tune,
+						MaxFrames:     spec.MaxFrames,
+						LoopStart:     spec.LoopStart,
+						LoopEnd:       spec.LoopEnd,
+						Mode:          spec.Mode,
+						PreferredSlot: 0, // lowest empty
+					}); err != nil {
+						return fmt.Errorf("sample %q: %w", name, err)
+					}
+				}
+			}
+
+			// --- Program ---
+			d.T.Drain()
+			start := time.Now()
+			if err := d.SetProgram(byte(slot), p); err != nil {
+				return fmt.Errorf("write program: %w", err)
+			}
+			naks := d.CollectNAKs(500 * time.Millisecond)
+			if naks > 0 {
+				return fmt.Errorf("write received %d NAK(s) — program may not have stored cleanly; please retry (and consider power-cycling the S950 if the target slot was already populated)", naks)
+			}
+			fmt.Fprintf(os.Stderr, "wrote program %q (%d keygroup%s) to slot %d in %s\n",
+				p.Name, len(p.Keygroups), plural(len(p.Keygroups)), slot,
+				time.Since(start).Round(time.Millisecond))
+
+			if !skipVerify {
+				time.Sleep(200 * time.Millisecond)
+				v, err := d.GetProgram(byte(slot))
+				if err != nil {
+					return fmt.Errorf("verify (get-program): %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "verified: name=%q keygroups=%d\n",
+					v.Name, len(v.Keygroups))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&slot, "slot", 0, "destination program slot (0..99)")
+	cmd.Flags().BoolVar(&skipVerify, "no-verify", false,
+		"skip the get-program verification read after writing")
+	cmd.Flags().BoolVar(&forceSamples, "force-samples", false,
+		"re-upload samples even when a sample of the same name already exists on the device")
+	return cmd
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// uploadSampleOpts is the input to uploadSample — the shared orchestration
+// used by both put-sample (CLI flags) and put-program (kit JSON manifest).
+//
+// Pitch model: we follow dxzl/akai-s950's reference behavior — leave SNOMP at
+// the S950's default (960 = C3) on upload, and let the user adjust pitch via
+// the --tune flag (or the program JSON's per-keygroup soft_tune field). The
+// S950's actual rate↔pitch math interacts with multiple opaque variables
+// (control_bits flags, internal reference rate, etc.), and the standard
+// community practice is to tune by ear rather than try to compute it.
+type uploadSampleOpts struct {
+	Path          string
+	Name          string  // S950 SPRM name to set after upload (empty = leave default)
+	Rate          string  // "" | "10000" | "sp1200" etc.
+	ChannelMode   string  // "" | "left" | "right" | "mix"
+	TuneSemitones float64 // ± semitones applied to SNOMP (1/16 precision)
+	MaxFrames     int
+	LoopStart     uint32
+	LoopEnd       uint32
+	Mode          byte
+	PreferredSlot int // auto-picks lowest empty if occupied
+}
+
+// uploadSample loads an audio file, resamples + folds to mono per opts,
+// uploads to a slot on the device, verifies via NAK detection, and writes the
+// SPRM (sample name / tune / loop) when any of those is set.
+//
+// Returns the slot it actually landed in.
+func uploadSample(d *device.Device, o uploadSampleOpts) (byte, error) {
+	chMode, err := sample.ParseChannelMode(o.ChannelMode)
+	if err != nil {
+		return 0, err
+	}
+	storeRate, err := sample.ParseRate(o.Rate)
+	if err != nil {
+		return 0, err
+	}
+	a, err := sample.LoadAudio(o.Path, chMode)
+	if err != nil {
+		return 0, fmt.Errorf("load %s: %w", o.Path, err)
+	}
+	fmt.Fprintf(os.Stderr, "  loaded %d frames @ %dHz\n", len(a.PCM), a.SampleRate)
+
+	switch {
+	case storeRate != 0:
+		if !sample.InRange(storeRate) {
+			return 0, fmt.Errorf("rate %d outside S950 range (%d..%d Hz)",
+				storeRate, sample.MinSampleRateHz, sample.MaxSampleRateHz)
+		}
+		if storeRate != a.SampleRate {
+			orig := a.SampleRate
+			a = sample.ResampleTo(a, storeRate)
+			fmt.Fprintf(os.Stderr, "  resampled %dHz -> %dHz (%d frames)\n",
+				orig, a.SampleRate, len(a.PCM))
+		}
+	case !sample.InRange(a.SampleRate):
+		orig := a.SampleRate
+		a = sample.ResampleToS950Range(a, 0)
+		fmt.Fprintf(os.Stderr, "  source %dHz out of range; resampled to %dHz (%d frames)\n",
+			orig, a.SampleRate, len(a.PCM))
+	}
+
+	if o.MaxFrames > 0 && o.MaxFrames < len(a.PCM) {
+		a.PCM = a.PCM[:o.MaxFrames]
+		fmt.Fprintf(os.Stderr, "  truncated to %d frames\n", len(a.PCM))
+	}
+
+	words, err := sample.PCM16ToWords(a.PCM)
+	if err != nil {
+		return 0, fmt.Errorf("convert: %w", err)
+	}
+
+	finalSlot := byte(o.PreferredSlot)
+	if picked, changed, perr := d.PickSlot(finalSlot); perr == nil {
+		finalSlot = picked
+		if changed {
+			fmt.Fprintf(os.Stderr, "  slot %d occupied; using slot %d\n",
+				o.PreferredSlot, finalSlot)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "  warning: catalog read failed (%v); using slot %d as-is\n",
+			perr, o.PreferredSlot)
+	}
+
+	sent, drain, err := d.PutSampleOpenLoop(words, device.PutSampleOpts{
+		Num:          finalSlot,
+		SampleRateHz: a.SampleRate,
+		LoopStart:    o.LoopStart,
+		LoopEnd:      o.LoopEnd,
+		Mode:         o.Mode,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("upload: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  queued %d bytes; waiting %s for MIDI drain...\n",
+		sent, drain.Round(100*time.Millisecond))
+	waitWithProgress(drain)
+
+	if naks := d.CollectNAKs(500 * time.Millisecond); naks > 0 {
+		return 0, fmt.Errorf("%d NAK(s) from S950 — sample may be truncated; please retry", naks)
+	}
+
+	// Patch the SPRM only when there's something explicit to set. We follow
+	// the dxzl reference: leave SNOMP at the device's default (960 = C3) and
+	// let the user adjust pitch via --tune or per-keygroup soft_tune in the
+	// program JSON. The S950's actual rate↔pitch math has enough opaque
+	// interacting variables that programmatic compensation isn't reliable.
+	needsSPRM := o.Name != "" || o.TuneSemitones != 0 ||
+		o.LoopStart != 0 || o.LoopEnd != 0
+	if needsSPRM {
+		time.Sleep(200 * time.Millisecond)
+		p, err := d.GetParams(finalSlot)
+		if err != nil {
+			return 0, fmt.Errorf("read SPRM after upload: %w", err)
+		}
+		if o.Name != "" {
+			p.Name = o.Name
+		}
+		if o.TuneSemitones != 0 {
+			// --tune applies relative to the current SNOMP. Lower SNOMP =
+			// higher playback at the same key, so positive tune SUBTRACTS.
+			pitch := int32(p.NominalPitch) - int32(o.TuneSemitones*16)
+			if pitch < 0 {
+				pitch = 0
+			}
+			if pitch > 0xFFFF {
+				pitch = 0xFFFF
+			}
+			p.NominalPitch = uint16(pitch)
+		}
+		if o.LoopStart != 0 || o.LoopEnd != 0 {
+			p.Start = o.LoopStart
+			p.End = o.LoopEnd
+		}
+		if err := d.SetParams(finalSlot, p); err != nil {
+			return 0, fmt.Errorf("write SPRM: %w", err)
+		}
+	}
+
+	return finalSlot, nil
+}
+
+func newProgramTemplateCmd() *cobra.Command {
+	var name string
+	var nKeygroups int
+	var outPath string
+	cmd := &cobra.Command{
+		Use:   "program-template",
+		Short: "Emit a starter program JSON you can edit then upload via put-program",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p := protocol.NewDefaultProgram(name, nKeygroups)
+			j := p.ToJSON()
+			out := os.Stdout
+			if outPath != "" {
+				f, err := os.Create(outPath)
+				if err != nil {
+					return fmt.Errorf("create %s: %w", outPath, err)
+				}
+				defer f.Close()
+				out = f
+			}
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(&j); err != nil {
+				return err
+			}
+			if outPath != "" {
+				fmt.Fprintf(os.Stderr, "wrote %s (%d keygroup%s, defaults)\n",
+					outPath, nKeygroups, plural(nKeygroups))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "NEW PROG", "program name (max 10 chars)")
+	cmd.Flags().IntVar(&nKeygroups, "keygroups", 1,
+		"number of keygroups to initialise (1..31)")
+	cmd.Flags().StringVarP(&outPath, "output", "o", "",
+		"write JSON to this file instead of stdout")
+	return cmd
+}
+
 func newPutSampleCmd() *cobra.Command {
 	var slot int
 	var loopStart, loopEnd uint32
@@ -185,152 +543,28 @@ func newPutSampleCmd() *cobra.Command {
 		Short: "Upload an audio file (WAV or AIFF) to the device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := args[0]
-			chMode, err := sample.ParseChannelMode(channelStr)
-			if err != nil {
-				return err
-			}
-			storeRate, err := sample.ParseRate(rateStr)
-			if err != nil {
-				return err
-			}
-			a, err := sample.LoadAudio(path, chMode)
-			if err != nil {
-				return fmt.Errorf("load audio: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "loaded %d frames @ %dHz\n", len(a.PCM), a.SampleRate)
-
-			switch {
-			case storeRate != 0:
-				// Explicit user-chosen storage rate: always resample to it.
-				if !sample.InRange(storeRate) {
-					return fmt.Errorf("--rate %d is outside S950 range (%d..%d Hz)",
-						storeRate, sample.MinSampleRateHz, sample.MaxSampleRateHz)
-				}
-				if storeRate != a.SampleRate {
-					orig := a.SampleRate
-					a = sample.ResampleTo(a, storeRate)
-					fmt.Fprintf(os.Stderr, "resampled %dHz -> %dHz (%d frames)\n",
-						orig, a.SampleRate, len(a.PCM))
-				}
-			case !sample.InRange(a.SampleRate):
-				// Source out of range and no explicit --rate: fall back to 44.1k.
-				orig := a.SampleRate
-				a = sample.ResampleToS950Range(a, 0)
-				fmt.Fprintf(os.Stderr, "source %dHz out of S950 range; resampled to %dHz (%d frames)\n",
-					orig, a.SampleRate, len(a.PCM))
-			}
-
-			if maxFrames > 0 && maxFrames < len(a.PCM) {
-				a.PCM = a.PCM[:maxFrames]
-				fmt.Fprintf(os.Stderr, "truncated to %d frames\n", len(a.PCM))
-			}
-
-			words, err := sample.PCM16ToWords(a.PCM)
-			if err != nil {
-				return fmt.Errorf("convert: %w", err)
-			}
-
 			d, cleanup, err := newDevice()
 			if err != nil {
 				return err
 			}
 			defer cleanup()
-
-			// Auto-pick a slot if the requested one is occupied. Overwriting
-			// an existing sample on the S950 NAKs every block, truncating
-			// the new upload — so we always need a clean target.
-			//
-			// Fail-soft: if the catalog can't be read (S950 stuck after a
-			// prior NAK incident, etc.) fall through with the requested
-			// slot. The NAK detector after the dump will still surface any
-			// real overwrite-induced failure.
-			finalSlot := byte(slot)
-			picked, changed, perr := d.PickSlot(byte(slot))
-			if perr != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not read catalog to auto-pick slot (%v); using --slot %d as-is\n", perr, slot)
-			} else {
-				finalSlot = picked
-				if changed {
-					fmt.Fprintf(os.Stderr, "slot %d is occupied; using slot %d instead\n",
-						slot, finalSlot)
-				}
-			}
-
-			opts := device.PutSampleOpts{
-				Num:          finalSlot,
-				SampleRateHz: a.SampleRate,
-				LoopStart:    loopStart,
-				LoopEnd:      loopEnd,
-				Mode:         byte(mode),
-			}
 			start := time.Now()
-			sent, drain, err := d.PutSampleOpenLoop(words, opts)
+			finalSlot, err := uploadSample(d, uploadSampleOpts{
+				Path:          args[0],
+				Rate:          rateStr,
+				ChannelMode:   channelStr,
+				TuneSemitones: tuneSemitones,
+				MaxFrames:     maxFrames,
+				LoopStart:     loopStart,
+				LoopEnd:       loopEnd,
+				Mode:          byte(mode),
+				PreferredSlot: slot,
+			})
 			if err != nil {
-				return fmt.Errorf("upload: %w", err)
+				return err
 			}
-			fmt.Fprintf(os.Stderr, "queued %d bytes to slot %d; waiting %s for MIDI to drain...\n",
-				sent, finalSlot, drain.Round(100*time.Millisecond))
-			// rtmidi/CoreMIDI buffers asynchronously; we have to wait for the
-			// OS to actually clock the bytes out at 31250 baud.
-			waitWithProgress(drain)
-
-			// Listen for NAKs the S950 may have emitted during the upload.
-			// Any NAK means a block failed checksum on the device side and
-			// the stored sample is partial — the upload is unrecoverable in
-			// open-loop mode and must be retried.
-			naks := d.CollectNAKs(500 * time.Millisecond)
-			if naks > 0 {
-				return fmt.Errorf("upload received %d NAK(s) from the S950 — sample may be truncated; please retry put-sample", naks)
-			}
-			fmt.Fprintf(os.Stderr, "upload accepted (no NAKs); drain done in %s\n",
-				time.Since(start).Round(time.Millisecond))
-
-			// SPRM rewrite only when there's something explicit to set —
-			// otherwise leave the S950's auto-generated parameters alone.
-			needsSPRM := tuneSemitones != 0 || loopStart != 0 || loopEnd != 0
-			if needsSPRM {
-				time.Sleep(200 * time.Millisecond)
-				p, err := d.GetParams(finalSlot)
-				if err != nil {
-					return fmt.Errorf("read SPRM: %w", err)
-				}
-				if tuneSemitones != 0 {
-					// SNOMP is the keyboard note at which the sample plays at
-					// its native rate ("home pitch"). LOWERING SNOMP shifts
-					// home down, so playing the same key sounds HIGHER. To
-					// match intuitive DAW semantics (--tune +12 = one octave
-					// up), we therefore SUBTRACT N*16 from SNOMP for +N
-					// semitones up. Units are 1/16 semitone.
-					pitch := int32(p.NominalPitch) - int32(tuneSemitones*16)
-					if pitch < 0 {
-						pitch = 0
-					}
-					if pitch > 0xFFFF {
-						pitch = 0xFFFF
-					}
-					p.NominalPitch = uint16(pitch)
-					fmt.Fprintf(os.Stderr, "tuned %+.2f semitones (SNOMP %d)\n",
-						tuneSemitones, p.NominalPitch)
-				}
-				if loopStart != 0 || loopEnd != 0 {
-					p.Start = loopStart
-					p.End = loopEnd
-				}
-				if err := d.SetParams(finalSlot, p); err != nil {
-					return fmt.Errorf("write SPRM: %w", err)
-				}
-				// Verify by reading back immediately on the same connection.
-				time.Sleep(200 * time.Millisecond)
-				v, verr := d.GetParams(finalSlot)
-				if verr != nil {
-					fmt.Fprintf(os.Stderr, "warning: SPRM verify read failed: %v\n", verr)
-				} else {
-					fmt.Fprintf(os.Stderr, "verified SPRM on device: pitch=%d end=%d loop=%d\n",
-						v.NominalPitch, v.End, v.LoopLength)
-				}
-			}
-			fmt.Fprintf(os.Stderr, "done in %s\n", time.Since(start).Round(time.Millisecond))
+			fmt.Fprintf(os.Stderr, "done in %s (slot %d)\n",
+				time.Since(start).Round(time.Millisecond), finalSlot)
 			return nil
 		},
 	}

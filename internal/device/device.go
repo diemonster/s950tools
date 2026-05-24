@@ -43,6 +43,22 @@ func (d *Device) Catalog() ([]protocol.CatalogEntry, error) {
 	return protocol.ParseCatalog(reply.Payload)
 }
 
+// GetProgram requests program N from the device and parses the PRGM payload
+// into a Program (header + keygroups).
+func (d *Device) GetProgram(num byte) (*protocol.Program, error) {
+	d.T.Drain()
+	if err := d.T.Send(protocol.BuildAkaiRequest(d.Channel, protocol.FuncRPRGM, num)); err != nil {
+		return nil, fmt.Errorf("send RPRGM: %w", err)
+	}
+	// Programs can be up to 31 keygroups → 76+31*140 = 4416 payload bytes →
+	// roughly 4.5 KB on the wire. Allow longer for the receive.
+	reply, err := d.waitForFunction(protocol.FuncPRGM, 8*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("await PRGM: %w", err)
+	}
+	return protocol.ParseProgram(reply.Payload)
+}
+
 // GetParams reads the 120-byte sample-parameter block for sample N.
 func (d *Device) GetParams(num byte) (*protocol.SampleParams, error) {
 	d.T.Drain()
@@ -110,6 +126,23 @@ func (d *Device) CollectNAKs(window time.Duration) int {
 		}
 	}
 	return n
+}
+
+// SetProgram writes a Program (header + keygroups) to the device at slot
+// num. The encoded payload size scales with keygroup count: 76 + N*140 bytes,
+// from ~216 bytes (1 keygroup) up to ~4416 bytes (31 keygroups). At MIDI's
+// 31250 baud that's ~70ms to ~1.4s of wire time.
+//
+// As with SetParams, the S950 does not reply to PRGM writes — caller should
+// verify via GetProgram if it cares.
+func (d *Device) SetProgram(num byte, p *protocol.Program) error {
+	payload := p.EncodePayload()
+	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncPRGM, num, payload)
+	if err := d.T.Send(msg); err != nil {
+		return fmt.Errorf("send PRGM: %w", err)
+	}
+	time.Sleep(ExpectedDrainTime(len(msg)))
+	return nil
 }
 
 // SetParams writes a 120-byte SPRM payload back to the device. Use this
