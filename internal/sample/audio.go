@@ -29,6 +29,49 @@ const (
 	ChannelRight
 )
 
+// LoadedAudio is a mono 16-bit PCM stream plus its source sample rate, ready
+// for S950 conversion.
+type LoadedAudio struct {
+	// PCM is the mono 16-bit signed sample buffer.
+	PCM []int16
+	// SampleRate is the source sample rate in Hz.
+	SampleRate uint32
+}
+
+// MaxSampleRateHz / MinSampleRateHz are the rates corresponding to the S950's
+// MinPeriodNS / MaxPeriodNS limits.
+var (
+	MaxSampleRateHz = uint32(math.Round(1e9 / float64(MinPeriodNS))) // ~65535 Hz
+	MinSampleRateHz = uint32(math.Round(1e9 / float64(MaxPeriodNS))) // 2000 Hz
+)
+
+// RateAliases maps short names to sample rates in Hz. Includes the S950's own
+// preset rates plus a few iconic 12-bit-era machines for character matching.
+var RateAliases = map[string]uint32{
+	// S950 native preset rates, low → high. "s950-N" where N is the kHz tens.
+	"s950-7":  7500,
+	"s950-10": 10000,
+	"s950-12": 12000,
+	"s950-15": 15000,
+	"s950-20": 20000,
+	"s950-26": 26040,
+	"s950-31": 31250,
+	"s950-37": 37500,
+	"s950-40": 40000,
+
+	// Other-machine character aliases.
+	"telephone": 8000,  // POTS-grade, very gritty
+	"lofi":      10000, // generic "very lo-fi"
+	"sp1200":    26040, // E-mu SP-1200, the original 12-bit hip-hop sound
+	"mpc60":     40000, // Akai MPC60 / MPC60-II
+}
+
+// WavAudioFormat constants per the RIFF spec.
+const (
+	wavFormatPCM   uint16 = 0x0001 // signed integer PCM
+	wavFormatFloat uint16 = 0x0003 // IEEE 32/64-bit floating point
+)
+
 // ParseChannelMode maps "mix" | "left" | "right" (case-insensitive) to a
 // ChannelMode. Empty string returns ChannelMix.
 func ParseChannelMode(s string) (ChannelMode, error) {
@@ -44,11 +87,23 @@ func ParseChannelMode(s string) (ChannelMode, error) {
 	}
 }
 
-// LoadedAudio is a mono 16-bit PCM stream plus its source sample rate, ready
-// for S950 conversion.
-type LoadedAudio struct {
-	PCM        []int16
-	SampleRate uint32 // Hz
+// ParseRate accepts either a numeric Hz value ("44100") or a named alias
+// ("sp1200", "lofi") and returns the corresponding sample rate. Returns 0
+// for the empty string (caller's signal for "use source rate as-is").
+func ParseRate(s string) (uint32, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	if hz, ok := RateAliases[s]; ok {
+		return hz, nil
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid sample rate %q (want a number in Hz or one of: %s)",
+			s, sortedAliasNames())
+	}
+	return uint32(n), nil
 }
 
 // LoadAudio reads a WAV or AIFF file and folds it to mono int16 PCM. Format
@@ -66,11 +121,52 @@ func LoadAudio(path string, mode ChannelMode) (*LoadedAudio, error) {
 	}
 }
 
-// WavAudioFormat constants per the RIFF spec.
-const (
-	wavFormatPCM   uint16 = 0x0001 // signed integer PCM
-	wavFormatFloat uint16 = 0x0003 // IEEE 32/64-bit floating point
-)
+// ResampleTo unconditionally linearly resamples a to targetHz. Used both for
+// forcing an out-of-range source into the S950's window and for deliberately
+// resampling an in-range source down to a low rate to get the lo-fi aliasing
+// character the S950 is known for (10 kHz / 12 kHz are classic).
+//
+// The target must be inside [MinSampleRateHz, MaxSampleRateHz]; out-of-range
+// targets are clamped to the nearest boundary.
+//
+// The S950 is a 12-bit sampler so simple linear interpolation is more than
+// adequate; the quantisation noise floor dominates any resampler artifacts.
+// We also do NOT apply an anti-alias filter before decimation — preserving
+// aliasing is the point when downsampling for character.
+func ResampleTo(a *LoadedAudio, targetHz uint32) *LoadedAudio {
+	if a == nil {
+		return nil
+	}
+	target := clampToS950Range(targetHz)
+	if target == a.SampleRate {
+		return a
+	}
+	return &LoadedAudio{
+		PCM:        linearResample(a.PCM, a.SampleRate, target),
+		SampleRate: target,
+	}
+}
+
+// ResampleToS950Range returns a in the S950's accepted rate window: passes
+// through if already in range, otherwise resamples to fallbackHz (clamped to
+// range; 0 means default 44.1 kHz).
+func ResampleToS950Range(a *LoadedAudio, fallbackHz uint32) *LoadedAudio {
+	if a == nil {
+		return nil
+	}
+	if InRange(a.SampleRate) {
+		return a
+	}
+	if fallbackHz == 0 {
+		fallbackHz = 44100
+	}
+	return ResampleTo(a, fallbackHz)
+}
+
+// InRange reports whether hz can be expressed as a valid S950 period.
+func InRange(hz uint32) bool {
+	return hz >= MinSampleRateHz && hz <= MaxSampleRateHz
+}
 
 func loadWAV(path string, mode ChannelMode) (*LoadedAudio, error) {
 	f, err := os.Open(path)
@@ -187,109 +283,6 @@ func intBufferToLoadedAudio(buf *audio.IntBuffer, bits int, mode ChannelMode) (*
 	return &LoadedAudio{PCM: pcm, SampleRate: rate}, nil
 }
 
-// ResampleTo unconditionally linearly resamples a to targetHz. Used both for
-// forcing an out-of-range source into the S950's window and for deliberately
-// resampling an in-range source down to a low rate to get the lo-fi aliasing
-// character the S950 is known for (10 kHz / 12 kHz are classic).
-//
-// The target must be inside [MinSampleRateHz, MaxSampleRateHz]; out-of-range
-// targets are clamped to the nearest boundary.
-//
-// The S950 is a 12-bit sampler so simple linear interpolation is more than
-// adequate; the quantisation noise floor dominates any resampler artifacts.
-// We also do NOT apply an anti-alias filter before decimation — preserving
-// aliasing is the point when downsampling for character.
-func ResampleTo(a *LoadedAudio, targetHz uint32) *LoadedAudio {
-	if a == nil {
-		return nil
-	}
-	target := clampToS950Range(targetHz)
-	if target == a.SampleRate {
-		return a
-	}
-	return &LoadedAudio{
-		PCM:        linearResample(a.PCM, a.SampleRate, target),
-		SampleRate: target,
-	}
-}
-
-// ResampleToS950Range returns a in the S950's accepted rate window: passes
-// through if already in range, otherwise resamples to fallbackHz (clamped to
-// range; 0 means default 44.1 kHz).
-func ResampleToS950Range(a *LoadedAudio, fallbackHz uint32) *LoadedAudio {
-	if a == nil {
-		return nil
-	}
-	if InRange(a.SampleRate) {
-		return a
-	}
-	if fallbackHz == 0 {
-		fallbackHz = 44100
-	}
-	return ResampleTo(a, fallbackHz)
-}
-
-// MaxSampleRateHz / MinSampleRateHz are the rates corresponding to the S950's
-// MinPeriodNS / MaxPeriodNS limits.
-var (
-	MaxSampleRateHz = uint32(math.Round(1e9 / float64(MinPeriodNS))) // ~65535 Hz
-	MinSampleRateHz = uint32(math.Round(1e9 / float64(MaxPeriodNS))) // 2000 Hz
-)
-
-// RateAliases maps short names to sample rates in Hz. Includes the S950's own
-// preset rates plus a few iconic 12-bit-era machines for character matching.
-var RateAliases = map[string]uint32{
-	// S950 native preset rates, low → high. "s950-N" where N is the kHz tens.
-	"s950-7":  7500,
-	"s950-10": 10000,
-	"s950-12": 12000,
-	"s950-15": 15000,
-	"s950-20": 20000,
-	"s950-26": 26040,
-	"s950-31": 31250,
-	"s950-37": 37500,
-	"s950-40": 40000,
-
-	// Other-machine character aliases.
-	"telephone": 8000,  // POTS-grade, very gritty
-	"lofi":      10000, // generic "very lo-fi"
-	"sp1200":    26040, // E-mu SP-1200, the original 12-bit hip-hop sound
-	"mpc60":     40000, // Akai MPC60 / MPC60-II
-}
-
-// ParseRate accepts either a numeric Hz value ("44100") or a named alias
-// ("sp1200", "lofi") and returns the corresponding sample rate. Returns 0
-// for the empty string (caller's signal for "use source rate as-is").
-func ParseRate(s string) (uint32, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" || s == "0" {
-		return 0, nil
-	}
-	if hz, ok := RateAliases[s]; ok {
-		return hz, nil
-	}
-	n, err := strconv.ParseUint(s, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid sample rate %q (want a number in Hz or one of: %s)",
-			s, sortedAliasNames())
-	}
-	return uint32(n), nil
-}
-
-func sortedAliasNames() string {
-	names := make([]string, 0, len(RateAliases))
-	for k := range RateAliases {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
-}
-
-// InRange reports whether hz can be expressed as a valid S950 period.
-func InRange(hz uint32) bool {
-	return hz >= MinSampleRateHz && hz <= MaxSampleRateHz
-}
-
 func clampToS950Range(hz uint32) uint32 {
 	if hz < MinSampleRateHz {
 		return MinSampleRateHz
@@ -327,4 +320,13 @@ func linearResample(src []int16, srcHz, dstHz uint32) []int16 {
 		out[i] = clampInt16(int32(math.Round(s0 + (s1-s0)*frac)))
 	}
 	return out
+}
+
+func sortedAliasNames() string {
+	names := make([]string, 0, len(RateAliases))
+	for k := range RateAliases {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }

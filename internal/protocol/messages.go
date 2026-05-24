@@ -15,6 +15,88 @@ import (
 	"github.com/bivers/s950/internal/sysex"
 )
 
+// AkaiMessage is a decoded AKAI-exclusive SysEx message
+// (F0 47 <chan> <func> 40 <num> 00 ... <cksum> F7).
+type AkaiMessage struct {
+	// Channel is the MIDI channel taken from byte 2 (low 4 bits).
+	Channel byte
+	// Function is the AKAI function code from byte 3 (one of FuncRDRS..FuncCAT).
+	Function byte
+	// Num is the sample/program slot byte from byte 5; 0 for messages that
+	// don't address a particular slot.
+	Num byte
+	// Payload is the body of the message: every byte between the 7-byte
+	// header and the trailing checksum.
+	Payload []byte
+}
+
+// CatalogEntry is one record from a CAT message (function 11): a
+// single-character type plus its slot number and trimmed name.
+type CatalogEntry struct {
+	// Type is 'P' for program entries or 'S' for sample entries.
+	Type byte
+	// Num is the 1-byte slot index in the S950's program/sample table.
+	Num byte
+	// Name is the trimmed (no trailing space/NUL) display name from the entry.
+	Name string
+}
+
+// SampleParams represents the high-level fields of an SPRM (function 10)
+// payload. The raw 120-byte block is preserved in Raw so unknown/reserved
+// fields can be written back unchanged.
+type SampleParams struct {
+	// Raw is the full 120-byte SPRM payload as received. EncodePayload uses
+	// this as the base so any unmodelled fields round-trip untouched.
+	Raw [120]byte
+
+	// Name is the 10-character sample name (SNAME, payload bytes 0..19).
+	Name string
+	// TotalWords is the sample length in 12-bit words (SLNGTH).
+	TotalWords uint32
+	// SampleRateHz is the playback sample rate in Hz (SMRATE).
+	SampleRateHz uint16
+	// NominalPitch is the sample's pitch in 1/16-semitone SNOMP units (SNOMP).
+	// C3 = 960.
+	NominalPitch uint16
+	// LoudOffset is the loudness offset (SDFLDO), signed.
+	LoudOffset int16
+	// ReplayMode selects looping behaviour (SRPLMD): ReplayOneShot,
+	// ReplayLoop, or ReplayAlternating.
+	ReplayMode byte
+	// End is the sample end point in words (SEND).
+	End uint32
+	// Start is the sample start point in words (SSTART).
+	Start uint32
+	// LoopLength is the loop length in words (SLOOP).
+	LoopLength uint32
+	// VelXFade is the velocity-crossfade flag (VC).
+	VelXFade byte
+	// Reversed is the playback-direction flag (NOREV): 'N' = forward,
+	// 'R' = reverse.
+	Reversed byte
+}
+
+// SampleDumpHeader is the 19-byte SDS-style header that precedes the sample
+// data blocks in a sample dump exchange.
+type SampleDumpHeader struct {
+	// Num is the sample slot number (LSB+MSB on the wire; S950 uses 0..99).
+	Num uint16
+	// BitsPerWord is the sample word size. The S950 sends 12; it accepts 8..16.
+	BitsPerWord byte
+	// PeriodNS is the sampling period in nanoseconds. Doc range 15259..500000
+	// (~2 kHz..~65 kHz).
+	PeriodNS uint32
+	// TotalWords is the total sample length in words. Doc range 200..475020.
+	TotalWords uint32
+	// LoopStart is the loop start offset in words, relative to the sample start.
+	LoopStart uint32
+	// LoopEnd is the loop end offset in words, relative to the sample start.
+	// Per the doc this is actually used as the playback end point.
+	LoopEnd uint32
+	// Mode selects loop behaviour: 0 = looping, 1 = alternating.
+	Mode byte
+}
+
 // AKAI manufacturer ID and the S950 device identifier byte.
 const (
 	ManufacturerAKAI byte = 0x47
@@ -47,11 +129,24 @@ const (
 	CodeACKS byte = 0x7F // acknowledge
 )
 
-// EOX / SOX markers.
+// SOX / EOX markers.
 const (
 	SOX byte = 0xF0
 	EOX byte = 0xF7
 )
+
+// ReplayMode constants (ASCII letters per the doc).
+const (
+	ReplayOneShot     byte = 'O'
+	ReplayLoop        byte = 'L'
+	ReplayAlternating byte = 'A'
+)
+
+// WordsPerBlock is the fixed number of 12-bit words per sample-dump data block.
+const WordsPerBlock = 60
+
+// BlockSize is the on-wire size of one block: 1 number + 60*2 data + 1 checksum.
+const BlockSize = 1 + 2*WordsPerBlock + 1 // 122
 
 // BuildAkaiRequest returns the 8-byte request message:
 //
@@ -93,12 +188,15 @@ func BuildAkaiData(channel, function, num byte, payload []byte) []byte {
 	return out
 }
 
-// AkaiMessage is a decoded AKAI-exclusive message.
-type AkaiMessage struct {
-	Channel  byte
-	Function byte
-	Num      byte
-	Payload  []byte // bytes between the 7-byte header and the trailing checksum
+// BuildRequestSampleDump returns the 6-byte RSD message: F0 7E 00 <num> 00 F7.
+func BuildRequestSampleDump(num byte) []byte {
+	return []byte{SOX, UniversalNRT, CodeRSD, num & 0x7F, 0x00, EOX}
+}
+
+// BuildHandshake returns a 4-byte handshake message: F0 7E <code> F7.
+// code must be CodeACKS, CodeNAKS, or CodeASD.
+func BuildHandshake(code byte) []byte {
+	return []byte{SOX, UniversalNRT, code, EOX}
 }
 
 // ParseAkai decodes a complete AKAI-exclusive SysEx message starting with F0
@@ -130,17 +228,6 @@ func ParseAkai(buf []byte) (*AkaiMessage, error) {
 	}, nil
 }
 
-// BuildRequestSampleDump returns the 6-byte RSD message: F0 7E 00 <num> 00 F7.
-func BuildRequestSampleDump(num byte) []byte {
-	return []byte{SOX, UniversalNRT, CodeRSD, num & 0x7F, 0x00, EOX}
-}
-
-// BuildHandshake returns a 4-byte handshake message: F0 7E <code> F7.
-// code must be CodeACKS, CodeNAKS, or CodeASD.
-func BuildHandshake(code byte) []byte {
-	return []byte{SOX, UniversalNRT, code, EOX}
-}
-
 // IsHandshake reports whether buf is one of the 4-byte common handshakes and
 // returns the code. Anything else returns (false, 0).
 func IsHandshake(buf []byte) (bool, byte) {
@@ -154,17 +241,10 @@ func IsHandshake(buf []byte) (bool, byte) {
 	return false, 0
 }
 
-// CatalogEntry is one record from a CAT message: a single-character type
-// ('P' = program, 'S' = sample), a 1-byte slot number, and a 10-char name.
-type CatalogEntry struct {
-	Type byte
-	Num  byte
-	Name string
-}
-
 // ParseCatalog decodes the payload of a CAT message (function 11) into entries.
 // Each on-wire entry is 12 bytes: type, num, then 10 ASCII chars
-// (the doc states the catalog name bytes are sent as plain ASCII, not DB-encoded).
+// (the doc states the catalog name bytes are sent as plain ASCII, not
+// DB-encoded).
 func ParseCatalog(payload []byte) ([]CatalogEntry, error) {
 	const entrySize = 12
 	if len(payload)%entrySize != 0 {
@@ -187,41 +267,21 @@ func ParseCatalog(payload []byte) ([]CatalogEntry, error) {
 	return out, nil
 }
 
-// SampleParams represents the high-level fields of an SPRM (function 10)
-// payload. The raw 120-byte block is preserved in Raw so unknown/reserved
-// fields can be written back unchanged.
-type SampleParams struct {
-	Raw [120]byte
-
-	Name         string // SNAME, bytes 0..19 of payload
-	TotalWords   uint32 // SLNGTH, bytes 32..39
-	SampleRateHz uint16 // SMRATE, bytes 40..43
-	NominalPitch uint16 // SNOMP, 1/16 semitone, C3 = 960
-	LoudOffset   int16  // SDFLDO, signed
-	ReplayMode   byte   // SRPLMD: 'O', 'L', 'A'
-	End          uint32 // SEND
-	Start        uint32 // SSTART
-	LoopLength   uint32 // SLOOP
-	VelXFade     byte   // VC
-	Reversed     byte   // NOREV: 'N' or 'R'
-}
-
-// Offsets within the 120-byte payload (the message's bytes 7..126 mapped to
-// 0..119). Derived from the reference doc, section "AKAI EXCLUSIVE SAMPLE
-// PARAMETER," with the S900 doc's message-relative offsets (7..126) re-based
-// to 0..119.
+// Offsets within the 120-byte SPRM payload (the message's bytes 7..126 mapped
+// to 0..119). Derived from the reference doc, section "AKAI EXCLUSIVE SAMPLE
+// PARAMETER," with the S900 doc's message-relative offsets re-based to 0..119.
 const (
-	offSNAME  = 0   // 20 bytes (DB* — 10 chars)
-	offSLNGTH = 32  // 8 bytes (DD)
-	offSMRATE = 40  // 4 bytes (DW)
-	offSNOMP  = 44  // 4 bytes (DW)
-	offSDFLDO = 48  // 4 bytes (DW, signed)
-	offSRPLMD = 52  // 2 bytes (DB)
-	offSEND   = 56  // 8 bytes (DD)
-	offSSTART = 64  // 8 bytes (DD)
-	offSLOOP  = 72  // 8 bytes (DD)
-	offVC     = 84  // 2 bytes (DB)
-	offNOREV  = 86  // 2 bytes (DB)
+	offSNAME  = 0  // 20 bytes (DB* — 10 chars)
+	offSLNGTH = 32 // 8 bytes (DD)
+	offSMRATE = 40 // 4 bytes (DW)
+	offSNOMP  = 44 // 4 bytes (DW)
+	offSDFLDO = 48 // 4 bytes (DW, signed)
+	offSRPLMD = 52 // 2 bytes (DB)
+	offSEND   = 56 // 8 bytes (DD)
+	offSSTART = 64 // 8 bytes (DD)
+	offSLOOP  = 72 // 8 bytes (DD)
+	offVC     = 84 // 2 bytes (DB)
+	offNOREV  = 86 // 2 bytes (DB)
 )
 
 // ParseSampleParams decodes an SPRM payload.
@@ -286,24 +346,6 @@ func (p *SampleParams) EncodePayload() []byte {
 	return out
 }
 
-// ReplayMode constants (ASCII letters per the doc).
-const (
-	ReplayOneShot     byte = 'O'
-	ReplayLoop        byte = 'L'
-	ReplayAlternating byte = 'A'
-)
-
-// SampleDumpHeader is the 19-byte SDS-style header.
-type SampleDumpHeader struct {
-	Num         uint16 // sample number (LSB+MSB; S950 uses 0..99)
-	BitsPerWord byte   // S950 sends 12; accepts 8..16
-	PeriodNS    uint32 // sampling period, ns. Range 15259..500000.
-	TotalWords  uint32 // 200..475020
-	LoopStart   uint32 // relative to start of sample
-	LoopEnd     uint32 // doc: actually used as the end point
-	Mode        byte   // 0 = looping, 1 = alternating
-}
-
 // EncodeHeader writes the 19-byte sample-dump header (including the F0 7E 01
 // prefix; F7 is NOT included since the dump SysEx continues into data blocks).
 func (h SampleDumpHeader) EncodeHeader() []byte {
@@ -348,12 +390,6 @@ func ParseHeader(buf []byte) (*SampleDumpHeader, error) {
 	}
 	return h, nil
 }
-
-// WordsPerBlock is the fixed number of 12-bit words per data block.
-const WordsPerBlock = 60
-
-// BlockSize is the on-wire size of one block: 1 number + 60*2 data + 1 checksum.
-const BlockSize = 1 + 2*WordsPerBlock + 1 // 122
 
 // EncodeBlock builds one 122-byte sample-data block. blockNum is the 0-based
 // index; only the 7-bit LSB is sent on the wire (blocks wrap at 128). words

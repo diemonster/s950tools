@@ -19,6 +19,20 @@ const (
 	MaxPeriodNS uint32 = 500000
 )
 
+// SilenceWord is the S950's offset-binary value for true silence (12-bit
+// midpoint, 0x800).
+const SilenceWord uint16 = 0x800
+
+// ErrSampleRate indicates a sample rate outside the S950's accepted range
+// (approximately 2 kHz to 65.5 kHz).
+var ErrSampleRate = errors.New("sample rate outside S950 range (~2kHz..65.5kHz)")
+
+// ErrLengthTooShort indicates fewer than MinTotalWords samples.
+var ErrLengthTooShort = errors.New("sample too short for S950 (min 200 words)")
+
+// ErrLengthTooLong indicates more than MaxTotalWords samples.
+var ErrLengthTooLong = errors.New("sample too long for S950 (max 475020 words)")
+
 // PCM16toSW maps a signed 16-bit PCM sample to a 12-bit offset-binary S950 word.
 // 16→12 conversion is an arithmetic right shift by 4; silence then sits at 0x800.
 func PCM16toSW(s int16) uint16 {
@@ -60,16 +74,6 @@ func PeriodNSToHz(ns uint32) uint32 {
 	return uint32(math.Round(1e9 / float64(ns)))
 }
 
-// ErrSampleRate indicates a sample rate outside the S950's accepted range
-// (approximately 2 kHz to 65.5 kHz).
-var ErrSampleRate = errors.New("sample rate outside S950 range (~2kHz..65.5kHz)")
-
-// ErrLengthTooShort indicates fewer than MinTotalWords samples.
-var ErrLengthTooShort = errors.New("sample too short for S950 (min 200 words)")
-
-// ErrLengthTooLong indicates more than MaxTotalWords samples.
-var ErrLengthTooLong = errors.New("sample too long for S950 (max 475020 words)")
-
 // PCM16ToWords converts a mono 16-bit PCM slice to S950 12-bit words and
 // validates the length against S950 limits.
 func PCM16ToWords(pcm []int16) ([]uint16, error) {
@@ -94,6 +98,3 @@ func WordsToPCM16(words []uint16) []int16 {
 	}
 	return out
 }
-
-// SilenceWord is the S950's offset-binary value for true silence.
-const SilenceWord uint16 = 0x800

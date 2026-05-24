@@ -13,13 +13,41 @@ import (
 )
 
 // Device is a thin orchestrator on top of a Transport and a MIDI channel.
+// All high-level S950 operations (Catalog, GetProgram, SetParams,
+// PutSampleOpenLoop, ...) hang off this type.
 type Device struct {
-	T       *transport.Transport
-	Channel byte // S950 MIDI channel (0..15)
-
-	// RequestTimeout bounds simple request-response cycles (catalog, params).
+	// T is the underlying MIDI transport. The Device does not own it; the
+	// caller is responsible for opening and closing the transport.
+	T *transport.Transport
+	// Channel is the S950's MIDI channel (0..15) — the low 4 bits of byte 2
+	// in every AKAI-exclusive message we send.
+	Channel byte
+	// RequestTimeout bounds simple request-response cycles (Catalog,
+	// GetParams). Long-running flows (GetProgram, sample dumps) use their own
+	// longer deadlines internally.
 	RequestTimeout time.Duration
 }
+
+// PutSampleOpts controls a single sample upload via PutSampleOpenLoop.
+type PutSampleOpts struct {
+	// Num is the S950 slot to write to (0..99).
+	Num byte
+	// SampleRateHz is the source rate in Hz; converted to the S950's ns
+	// period via sample.HzToPeriodNS.
+	SampleRateHz uint32
+	// LoopStart is the first word of the loop, in words. When LoopEnd-LoopStart
+	// is less than 5, the upload is treated as one-shot and the S950's
+	// "loop_start >= total-5" non-looping sentinel is encoded automatically.
+	LoopStart uint32
+	// LoopEnd is the last word of the loop, in words. See LoopStart for the
+	// one-shot fallback behaviour.
+	LoopEnd uint32
+	// Mode selects loop behaviour: 0 = looping, 1 = alternating.
+	Mode byte
+}
+
+// MIDI byte rate at 31250 baud (10 bits / byte framing).
+const midiBytesPerSecond = 3125
 
 // New constructs a Device with sensible defaults.
 func New(t *transport.Transport, channel byte) *Device {
@@ -75,6 +103,41 @@ func (d *Device) GetParams(num byte) (*protocol.SampleParams, error) {
 	return protocol.ParseSampleParams(reply.Payload)
 }
 
+// SetProgram writes a Program (header + keygroups) to the device at slot
+// num. The encoded payload size scales with keygroup count: 76 + N*140 bytes,
+// from ~216 bytes (1 keygroup) up to ~4416 bytes (31 keygroups). At MIDI's
+// 31250 baud that's ~70ms to ~1.4s of wire time.
+//
+// As with SetParams, the S950 does not reply to PRGM writes — caller should
+// verify via GetProgram if it cares.
+func (d *Device) SetProgram(num byte, p *protocol.Program) error {
+	payload := p.EncodePayload()
+	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncPRGM, num, payload)
+	if err := d.T.Send(msg); err != nil {
+		return fmt.Errorf("send PRGM: %w", err)
+	}
+	time.Sleep(ExpectedDrainTime(len(msg)))
+	return nil
+}
+
+// SetParams writes a 120-byte SPRM payload back to the device. Use this
+// after a sample dump to override the S950's auto-computed SSTART/SEND/SLOOP
+// defaults (which it sometimes leaves stale when overwriting a slot), or to
+// adjust SNOMP for retuning. num must match the slot you're targeting; the
+// SPRM's encoded sample number doesn't matter to the S950 — the message-
+// header num does.
+func (d *Device) SetParams(num byte, p *protocol.SampleParams) error {
+	payload := p.EncodePayload()
+	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncSPRM, num, payload)
+	if err := d.T.Send(msg); err != nil {
+		return fmt.Errorf("send SPRM: %w", err)
+	}
+	// The S950 doesn't reply to SPRM writes, but the bytes still take wall-
+	// clock time to drain at MIDI rate (129 bytes ~= 41 ms).
+	time.Sleep(ExpectedDrainTime(len(msg)))
+	return nil
+}
+
 // PickSlot returns preferred when that slot is unoccupied; otherwise the
 // lowest empty slot in [0, 99]. The S950's boot-time "TONE" placeholder is
 // treated as empty since it's safe to overwrite — only user-stored samples
@@ -127,83 +190,6 @@ func (d *Device) CollectNAKs(window time.Duration) int {
 	}
 	return n
 }
-
-// SetProgram writes a Program (header + keygroups) to the device at slot
-// num. The encoded payload size scales with keygroup count: 76 + N*140 bytes,
-// from ~216 bytes (1 keygroup) up to ~4416 bytes (31 keygroups). At MIDI's
-// 31250 baud that's ~70ms to ~1.4s of wire time.
-//
-// As with SetParams, the S950 does not reply to PRGM writes — caller should
-// verify via GetProgram if it cares.
-func (d *Device) SetProgram(num byte, p *protocol.Program) error {
-	payload := p.EncodePayload()
-	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncPRGM, num, payload)
-	if err := d.T.Send(msg); err != nil {
-		return fmt.Errorf("send PRGM: %w", err)
-	}
-	time.Sleep(ExpectedDrainTime(len(msg)))
-	return nil
-}
-
-// SetParams writes a 120-byte SPRM payload back to the device. Use this
-// after a sample dump to override the S950's auto-computed SSTART/SEND/SLOOP
-// defaults (which it sometimes leaves stale when overwriting a slot), or to
-// adjust SNOMP for retuning. num must match the slot you're targeting; the
-// SPRM's encoded sample number doesn't matter to the S950 — the message-
-// header num does.
-func (d *Device) SetParams(num byte, p *protocol.SampleParams) error {
-	payload := p.EncodePayload()
-	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncSPRM, num, payload)
-	if err := d.T.Send(msg); err != nil {
-		return fmt.Errorf("send SPRM: %w", err)
-	}
-	// The S950 doesn't reply to SPRM writes, but the bytes still take wall-
-	// clock time to drain at MIDI rate (129 bytes ~= 41 ms).
-	time.Sleep(ExpectedDrainTime(len(msg)))
-	return nil
-}
-
-// waitForFunction drains incoming SysEx until one decodes as an AKAI message
-// with the expected function code, or the timeout fires.
-func (d *Device) waitForFunction(fn byte, timeout time.Duration) (*protocol.AkaiMessage, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		left := time.Until(deadline)
-		if left <= 0 {
-			return nil, errors.New("timeout")
-		}
-		raw, err := d.T.RecvSysEx(left)
-		if err != nil {
-			return nil, err
-		}
-		// Skip non-AKAI messages (stray handshakes etc).
-		msg, perr := protocol.ParseAkai(raw)
-		if perr != nil {
-			continue
-		}
-		if msg.Function != fn {
-			continue
-		}
-		return msg, nil
-	}
-}
-
-// PutSampleOpts controls a sample upload.
-type PutSampleOpts struct {
-	// Num is the S950 slot to write to (0..99).
-	Num byte
-	// SampleRateHz is the source rate in Hz; converted to the S950's ns period.
-	SampleRateHz uint32
-	// LoopStart / LoopEnd: when LoopEnd-LoopStart < 5, treated as one-shot
-	// (and the S950 fills loop-start to total-5 to signal non-looping).
-	LoopStart uint32
-	LoopEnd   uint32
-	// Mode is 0 (looping) or 1 (alternating).
-	Mode byte
-}
-
-// MIDI byte rate at 31250 baud (10 bits / byte framing).
-const midiBytesPerSecond = 3125
 
 // ExpectedDrainTime estimates how long it takes the MIDI output to actually
 // transmit n bytes at MIDI's native baud rate. Used to wait after a put-sample
@@ -280,4 +266,29 @@ func (d *Device) PutSampleOpenLoop(words []uint16, opts PutSampleOpts) (sent int
 		return 0, 0, err
 	}
 	return len(buf), ExpectedDrainTime(len(buf)), nil
+}
+
+// waitForFunction drains incoming SysEx until one decodes as an AKAI message
+// with the expected function code, or the timeout fires.
+func (d *Device) waitForFunction(fn byte, timeout time.Duration) (*protocol.AkaiMessage, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return nil, errors.New("timeout")
+		}
+		raw, err := d.T.RecvSysEx(left)
+		if err != nil {
+			return nil, err
+		}
+		// Skip non-AKAI messages (stray handshakes etc).
+		msg, perr := protocol.ParseAkai(raw)
+		if perr != nil {
+			continue
+		}
+		if msg.Function != fn {
+			continue
+		}
+		return msg, nil
+	}
 }

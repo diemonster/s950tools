@@ -7,31 +7,30 @@ import (
 	"github.com/bivers/s950/internal/sysex"
 )
 
-// Program / Keygroup byte layouts derived from dxzl/akai-s950's PRGHEDR and
-// KEYGROUP structs (src/ProgramsForm.h). All offsets below are WIRE offsets
-// within the PRGM payload — each "logical" byte takes 2 wire bytes (DB
-// encoding); DW is 4 wire bytes (uint16); DD is 8 wire bytes (uint32).
-//
-// Program header: 76 wire bytes.
-// Keygroup:       140 wire bytes each.
-// One PRGM payload: header + N*keygroup, where 1 ≤ N ≤ 31.
-
-const (
-	ProgramHeaderSize = 76
-	KeygroupSize      = 140
-	MaxKeygroups      = 31
-	NameWidth         = 10
-)
-
-// Program is the high-level decoded view of a PRGM payload.
+// Program is the high-level decoded view of a PRGM payload (the program
+// header plus its N keygroups).
 type Program struct {
-	Name              string     // 10 ASCII chars, trailing-space trimmed
-	KeyTilt           int16      // -50..+50, key-vs-loudness scaling
-	PositionalXFade   bool       // 0=off, 1=on
-	NumKeygroups      uint8      // 1..31
-	MidiProgramNumber uint8      // 0..127
-	EnableMidiProgram bool       // S950 only; 0 disables, 255 enables
-	Keygroups         []Keygroup // length matches NumKeygroups
+	// Name is the 10-character ASCII program name (trailing-space trimmed
+	// after decode; re-padded on encode).
+	Name string
+	// KeyTilt is the program-wide key-vs-loudness scaling, range -50..+50.
+	KeyTilt int16
+	// PositionalXFade enables positional crossfading between adjacent
+	// keygroups (false = off, true = on; wire value 0 / 1).
+	PositionalXFade bool
+	// NumKeygroups is the number of active keygroups, range 1..MaxKeygroups.
+	// On decode this is reconciled with the actual body length so the value
+	// always matches len(Keygroups).
+	NumKeygroups uint8
+	// MidiProgramNumber is the MIDI program-change number the S950 responds
+	// to for this program, 0..127.
+	MidiProgramNumber uint8
+	// EnableMidiProgram is the S950-only flag that lets MidiProgramNumber
+	// select this program over MIDI (wire 0 = disabled, 255 = enabled).
+	EnableMidiProgram bool
+	// Keygroups holds the per-zone sample assignment and modulation settings.
+	// Length always matches NumKeygroups after a successful decode.
+	Keygroups []Keygroup
 
 	// RawHeader preserves the 76-byte wire payload of the program header.
 	// On encode, RawHeader is used as the base and only known fields are
@@ -41,175 +40,188 @@ type Program struct {
 }
 
 // Keygroup is the high-level decoded view of one 140-byte keygroup block.
-// Every named field has its name from dxzl's KEYGROUP struct; comments give
-// the documented value ranges where they matter.
+// Field names follow dxzl's KEYGROUP struct (src/ProgramsForm.h); per-field
+// comments below give the documented value ranges where they matter.
 type Keygroup struct {
-	// Key range and velocity routing.
-	LowerKey       uint8 // 24..127 MIDI note
-	UpperKey       uint8 // 24..127
-	VelocitySwitch uint8 // 0..128 (above this, "loud" sample plays)
+	// LowerKey is the lowest MIDI note for this zone (24..127).
+	LowerKey uint8
+	// UpperKey is the highest MIDI note for this zone (24..127).
+	UpperKey uint8
+	// VelocitySwitch is the velocity threshold above which the LoudSample
+	// replaces the SoftSample (0..128; 128 = soft only).
+	VelocitySwitch uint8
 
-	// Amplitude envelope (0..99 unless noted).
-	AttackTime   uint8
-	DecayTime    uint8
+	// AttackTime is the amplitude envelope attack (0..99).
+	AttackTime uint8
+	// DecayTime is the amplitude envelope decay (0..99).
+	DecayTime uint8
+	// SustainLevel is the amplitude envelope sustain level (0..99).
 	SustainLevel uint8
-	ReleaseTime  uint8
+	// ReleaseTime is the amplitude envelope release (0..99).
+	ReleaseTime uint8
 
-	// Filter envelope (the filter's own ADSR, separate from amp).
-	FilterAttackTime   uint8
-	FilterDecayTime    uint8
+	// FilterAttackTime is the VCF envelope attack (0..99).
+	FilterAttackTime uint8
+	// FilterDecayTime is the VCF envelope decay (0..99).
+	FilterDecayTime uint8
+	// FilterSustainLevel is the VCF envelope sustain level (0..99).
 	FilterSustainLevel uint8
-	FilterReleaseTime  uint8
+	// FilterReleaseTime is the VCF envelope release (0..99).
+	FilterReleaseTime uint8
 
-	// Filter/velocity routing.
-	FilterVelInt        uint8 // amount velocity opens the filter
-	FilterKeyTracking   uint8 // 0..99, 50=1V/oct equivalent
-	AttackVelInt        uint8 // 0..99
-	VelReleaseInt       int8  // signed, ±50 (stored 0..255)
-	LoudnessVelInt      uint8 // 0..99
-	PitchWarpVelInt     uint8
-	PitchWarpOffset     int8 // ±50
-	PitchWarpRecovery   uint8
-	AdsrEnvToVcfFilter  int8  // ±50, how much amp ADSR modulates VCF
-	AftertouchDepthMod  uint8 // 0..99
-	ModWheelLfoDepthMod uint8 // 0..99
+	// FilterVelInt is the amount velocity opens the filter (0..99).
+	FilterVelInt uint8
+	// FilterKeyTracking is filter key-follow (0..99, 50 ≈ 1V/oct).
+	FilterKeyTracking uint8
+	// AttackVelInt is velocity-to-attack-time amount (0..99).
+	AttackVelInt uint8
+	// VelReleaseInt is velocity-to-release amount, signed ±50 (wire 0..255).
+	VelReleaseInt int8
+	// LoudnessVelInt is velocity-to-loudness amount (0..99).
+	LoudnessVelInt uint8
+	// PitchWarpVelInt is velocity-to-pitch-warp amount.
+	PitchWarpVelInt uint8
+	// PitchWarpOffset is the pitch-warp offset, signed ±50.
+	PitchWarpOffset int8
+	// PitchWarpRecovery is the pitch-warp recovery rate (0..99).
+	PitchWarpRecovery uint8
+	// AdsrEnvToVcfFilter routes the amp ADSR into the VCF, signed ±50.
+	AdsrEnvToVcfFilter int8
+	// AftertouchDepthMod is aftertouch-to-LFO-depth amount (0..99).
+	AftertouchDepthMod uint8
+	// ModWheelLfoDepthMod is mod-wheel-to-LFO-depth amount (0..99).
+	ModWheelLfoDepthMod uint8
 
-	// LFO.
-	LfoBuildTime uint8 // 0..99
-	LfoRate      uint8 // 0..99
-	LfoDepth     uint8 // 0..99
+	// LfoBuildTime is the LFO ramp-in time (0..99).
+	LfoBuildTime uint8
+	// LfoRate is the LFO frequency (0..99).
+	LfoRate uint8
+	// LfoDepth is the LFO modulation depth (0..99).
+	LfoDepth uint8
 
-	// Misc per-keygroup config.
-	ControlBits     uint8 // bit flags: 0=transpose, 1=vel-xfade, 2=vibrato-desync,
-	//                          // 3=one-shot trig, 4=vel-release-mode, 5=vel-xfade-curve
-	VoiceOutAssign uint8 // 0=mono/0-9, 8=left group, 9=right group, 255=ALL
-	MidiOffset     uint8 // 0..15
-	VelXfade50pct  uint8 // 0..127 velocity-crossfade 50% point
+	// ControlBits is a bit-field of behaviour flags (dxzl reference):
+	//   bit 0 (1): transpose OFF (clear = transpose on, default)
+	//   bit 1 (2): velocity-xfade on
+	//   bit 2 (4): vibrato-desync on (set by default)
+	//   bit 3 (8): one-shot trigger mode
+	//   bit 4 (16): velocity-release mode (1 = note-on triggers release)
+	//   bit 5 (32): velocity-xfade curve modification
+	// Default value (4) = vibrato-desync on, transpose enabled.
+	ControlBits uint8
+	// VoiceOutAssign selects the keygroup's output: 0=mono / individual 0..9,
+	// 8=left group, 9=right group, 255=ALL outputs.
+	VoiceOutAssign uint8
+	// MidiOffset is the per-keygroup MIDI channel offset (0..15).
+	MidiOffset uint8
+	// VelXfade50pct is the velocity-crossfade 50% point (0..127).
+	VelXfade50pct uint8
 
-	// "Soft" (lower-velocity) sample — the primary one.
-	SoftSampleName   string  // 10 chars; the S950 finds the sample by name
-	SoftTransposeRaw int16   // 1/16-semitone units, signed
-	SoftFilter       uint8   // 0..99, 99=brightest
-	SoftLoudness     int8    // ±50, .375dB per unit
+	// SoftSampleName is the 10-char name of the primary (low-velocity)
+	// sample. The S950 looks the sample up by this name at load time.
+	SoftSampleName string
+	// SoftTransposeRaw is the soft-sample transpose offset in 1/16-semitone
+	// units, signed.
+	SoftTransposeRaw int16
+	// SoftFilter is the soft-sample brightness/filter cutoff (0..99,
+	// 99 = brightest).
+	SoftFilter uint8
+	// SoftLoudness is the soft-sample level offset, signed ±50 (0.375 dB
+	// per unit).
+	SoftLoudness int8
 
-	// "Loud" (higher-velocity) sample — alternative selected above VelocitySwitch.
-	LoudSampleName   string
+	// LoudSampleName is the 10-char name of the alternate (high-velocity)
+	// sample selected when velocity exceeds VelocitySwitch.
+	LoudSampleName string
+	// LoudTransposeRaw is the loud-sample transpose offset in 1/16-semitone
+	// units, signed.
 	LoudTransposeRaw int16
-	LoudFilter       uint8
-	LoudLoudness     int8
+	// LoudFilter is the loud-sample brightness/filter cutoff (0..99).
+	LoudFilter uint8
+	// LoudLoudness is the loud-sample level offset, signed ±50.
+	LoudLoudness int8
 
 	// RawBytes preserves the 140-byte wire payload of this keygroup. Same
-	// strategy as Program.RawHeader.
+	// round-trip strategy as Program.RawHeader.
 	RawBytes [KeygroupSize]byte
 }
 
+// Program / Keygroup byte layouts derived from dxzl/akai-s950's PRGHEDR and
+// KEYGROUP structs (src/ProgramsForm.h). Offsets below are WIRE offsets
+// within the PRGM payload — each "logical" byte takes 2 wire bytes (DB
+// encoding); DW is 4 wire bytes (uint16); DD is 8 wire bytes (uint32).
+//
+// Program header: 76 wire bytes.
+// Keygroup:       140 wire bytes each.
+// One PRGM payload: header + N*keygroup, where 1 ≤ N ≤ 31.
+const (
+	ProgramHeaderSize = 76
+	KeygroupSize      = 140
+	MaxKeygroups      = 31
+	NameWidth         = 10
+)
+
 // Wire-byte offsets within the PRGM payload (program header section).
 const (
-	pHdrName      = 0  // 10 chars × DB = 20 wire bytes (0..19)
-	pHdrUndef1    = 20 // DD (8 bytes)
-	pHdrUndef2    = 28 // DW (4 bytes)
-	pHdrKeyTilt   = 32 // DW signed (4 bytes)
-	pHdrUndef3    = 36 // DW
-	pHdrUndef4    = 40 // DB
-	pHdrPosXFade  = 42 // DB
-	pHdrReser1    = 44 // DB (=255)
-	pHdrNumKgs    = 46 // DB
-	pHdrUndef5    = 48 // DW
-	pHdrMidiPgm   = 52 // DB
-	pHdrEnableMP  = 54 // DB (255=enabled)
-	pHdrReser2    = 56 // DW
-	pHdrReser3    = 60 // DD
-	pHdrReser4    = 68 // DD
+	pHdrName     = 0  // 10 chars × DB = 20 wire bytes (0..19)
+	pHdrUndef1   = 20 // DD (8 bytes)
+	pHdrUndef2   = 28 // DW (4 bytes)
+	pHdrKeyTilt  = 32 // DW signed (4 bytes)
+	pHdrUndef3   = 36 // DW
+	pHdrUndef4   = 40 // DB
+	pHdrPosXFade = 42 // DB
+	pHdrReser1   = 44 // DB (=255)
+	pHdrNumKgs   = 46 // DB
+	pHdrUndef5   = 48 // DW
+	pHdrMidiPgm  = 52 // DB
+	pHdrEnableMP = 54 // DB (255=enabled)
+	pHdrReser2   = 56 // DW
+	pHdrReser3   = 60 // DD
+	pHdrReser4   = 68 // DD
 )
 
 // Wire-byte offsets within a keygroup block.
 const (
-	kgUMK       = 0   // upper MIDI key (DB)
-	kgLMK       = 2   // lower MIDI key (DB)
-	kgVST       = 4   // velocity switch threshold (DB)
-	kgATK       = 6   // attack time (DB)
-	kgDCY       = 8   // decay (DB)
-	kgSSTN      = 10  // sustain level (DB)
-	kgRLSE      = 12  // release time (DB)
-	kgFVI       = 14  // filter vel int (DB)
-	kgFKI       = 16  // filter key tracking (DB)
-	kgAVI       = 18  // attack vel int (DB)
-	kgRVI       = 20  // vel release int (signed, DB)
-	kgLVI       = 22  // loudness vel int (DB)
-	kgPVI       = 24  // pitch warp vel int (DB)
-	kgPAO       = 26  // pitch warp offset (signed, DB)
-	kgPST       = 28  // pitch warp recovery (DB)
-	kgVBDLY     = 30  // LFO build time (DB)
-	kgVBRATE    = 32  // LFO rate (DB)
-	kgVBDPTH    = 34  // LFO depth (DB)
-	kgKBITS     = 36  // control bits (DB)
-	kgOPVOICE   = 38  // voice out assign (DB)
-	kgKMDCHN    = 40  // MIDI offset (DB)
-	kgAFDI      = 42  // aftertouch depth mod (DB)
-	kgMWDI      = 44  // mod wheel LFO depth mod (DB)
-	kgVCFAMNT   = 46  // ADSR→VCF (signed, DB)
-	kgNAMEFS    = 48  // soft sample name (10 chars × DB = 20 wire bytes, 48..67)
-	kgVCFAK     = 68  // filter ADSR attack (DB)
-	kgVCFDY     = 70  // filter ADSR decay (DB)
-	kgVCFST     = 72  // filter ADSR sustain (DB)
-	kgVCFRL     = 74  // filter ADSR release (DB)
-	kgVTMX      = 76  // vel xfade 50% (DB)
+	kgUMK     = 0  // upper MIDI key (DB)
+	kgLMK     = 2  // lower MIDI key (DB)
+	kgVST     = 4  // velocity switch threshold (DB)
+	kgATK     = 6  // attack time (DB)
+	kgDCY     = 8  // decay (DB)
+	kgSSTN    = 10 // sustain level (DB)
+	kgRLSE    = 12 // release time (DB)
+	kgFVI     = 14 // filter vel int (DB)
+	kgFKI     = 16 // filter key tracking (DB)
+	kgAVI     = 18 // attack vel int (DB)
+	kgRVI     = 20 // vel release int (signed, DB)
+	kgLVI     = 22 // loudness vel int (DB)
+	kgPVI     = 24 // pitch warp vel int (DB)
+	kgPAO     = 26 // pitch warp offset (signed, DB)
+	kgPST     = 28 // pitch warp recovery (DB)
+	kgVBDLY   = 30 // LFO build time (DB)
+	kgVBRATE  = 32 // LFO rate (DB)
+	kgVBDPTH  = 34 // LFO depth (DB)
+	kgKBITS   = 36 // control bits (DB)
+	kgOPVOICE = 38 // voice out assign (DB)
+	kgKMDCHN  = 40 // MIDI offset (DB)
+	kgAFDI    = 42 // aftertouch depth mod (DB)
+	kgMWDI    = 44 // mod wheel LFO depth mod (DB)
+	kgVCFAMNT = 46 // ADSR→VCF (signed, DB)
+	kgNAMEFS  = 48 // soft sample name (10 chars × DB = 20 wire bytes, 48..67)
+	kgVCFAK   = 68 // filter ADSR attack (DB)
+	kgVCFDY   = 70 // filter ADSR decay (DB)
+	kgVCFST   = 72 // filter ADSR sustain (DB)
+	kgVCFRL   = 74 // filter ADSR release (DB)
+	kgVTMX    = 76 // vel xfade 50% (DB)
 	// 78..83: reserved (KyUndef1 DB + KyUndef2 DW, kept in RawBytes)
-	kgTROFFS    = 84  // soft sample transpose offset (signed, DW = 4 wire bytes)
-	kgFLTFS     = 88  // soft sample filter (DB)
-	kgLOUDFS    = 90  // soft sample loudness (signed, DB)
-	kgNAMESS    = 92  // loud sample name (10 chars × DB = 20 wire bytes, 92..111)
+	kgTROFFS = 84 // soft sample transpose offset (signed, DW = 4 wire bytes)
+	kgFLTFS  = 88 // soft sample filter (DB)
+	kgLOUDFS = 90 // soft sample loudness (signed, DB)
+	kgNAMESS = 92 // loud sample name (10 chars × DB = 20 wire bytes, 92..111)
 	// 112..127: reserved (KyUndef3 DD + KyUndef4 DD)
-	kgTROFSS    = 128 // loud sample transpose offset (signed, DW)
-	kgFLTSS     = 132 // loud sample filter (DB)
-	kgLOUDSS    = 134 // loud sample loudness (signed, DB)
+	kgTROFSS = 128 // loud sample transpose offset (signed, DW)
+	kgFLTSS  = 132 // loud sample filter (DB)
+	kgLOUDSS = 134 // loud sample loudness (signed, DB)
 	// 136..139: reserved (KyUndef5 DW)
 )
-
-// ParseProgram decodes a PRGM payload (header + 1..31 keygroups).
-func ParseProgram(payload []byte) (*Program, error) {
-	if len(payload) < ProgramHeaderSize+KeygroupSize {
-		return nil, fmt.Errorf("PRGM payload too short: %d bytes (need at least %d)",
-			len(payload), ProgramHeaderSize+KeygroupSize)
-	}
-	hdr := payload[:ProgramHeaderSize]
-	body := payload[ProgramHeaderSize:]
-	if len(body)%KeygroupSize != 0 {
-		return nil, fmt.Errorf("PRGM body is %d bytes, not a multiple of keygroup size %d",
-			len(body), KeygroupSize)
-	}
-	n := len(body) / KeygroupSize
-	if n < 1 || n > MaxKeygroups {
-		return nil, fmt.Errorf("PRGM has %d keygroups (want 1..%d)", n, MaxKeygroups)
-	}
-
-	p := &Program{
-		Keygroups: make([]Keygroup, n),
-	}
-	copy(p.RawHeader[:], hdr)
-
-	p.Name = sysex.DecodeName(*(*[20]byte)(hdr[pHdrName : pHdrName+20]))
-	p.KeyTilt = int16(sysex.DecodeDW(*(*[4]byte)(hdr[pHdrKeyTilt : pHdrKeyTilt+4])))
-	p.PositionalXFade = sysex.DecodeDB(hdr[pHdrPosXFade], hdr[pHdrPosXFade+1]) != 0
-	p.NumKeygroups = sysex.DecodeDB(hdr[pHdrNumKgs], hdr[pHdrNumKgs+1])
-	p.MidiProgramNumber = sysex.DecodeDB(hdr[pHdrMidiPgm], hdr[pHdrMidiPgm+1])
-	p.EnableMidiProgram = sysex.DecodeDB(hdr[pHdrEnableMP], hdr[pHdrEnableMP+1]) != 0
-
-	if int(p.NumKeygroups) != n {
-		// Don't fail — the wire data is authoritative — but note the mismatch
-		// so the user can spot it in JSON.
-		p.NumKeygroups = uint8(n)
-	}
-
-	for i := 0; i < n; i++ {
-		kg, err := parseKeygroup(body[i*KeygroupSize : (i+1)*KeygroupSize])
-		if err != nil {
-			return nil, fmt.Errorf("keygroup %d: %w", i, err)
-		}
-		p.Keygroups[i] = *kg
-	}
-	return p, nil
-}
 
 // NewDefaultProgram returns a Program initialized with safe defaults the
 // S950 has been observed to accept: the field values match dxzl/akai-s950's
@@ -288,7 +300,7 @@ func newDefaultKeygroup() Keygroup {
 		LfoRate:      42,
 		LfoDepth:     0,
 
-		ControlBits:    4, // vibrato desync on, transpose off (drum-style)
+		ControlBits:    4,   // vibrato desync on, transpose on (bit 0 inverted)
 		VoiceOutAssign: 255, // ALL outputs
 		MidiOffset:     0,
 		VelXfade50pct:  64,
@@ -312,6 +324,51 @@ func newDefaultKeygroup() Keygroup {
 	kg.RawBytes[83] = 0x01
 
 	return kg
+}
+
+// ParseProgram decodes a PRGM payload (header + 1..31 keygroups).
+func ParseProgram(payload []byte) (*Program, error) {
+	if len(payload) < ProgramHeaderSize+KeygroupSize {
+		return nil, fmt.Errorf("PRGM payload too short: %d bytes (need at least %d)",
+			len(payload), ProgramHeaderSize+KeygroupSize)
+	}
+	hdr := payload[:ProgramHeaderSize]
+	body := payload[ProgramHeaderSize:]
+	if len(body)%KeygroupSize != 0 {
+		return nil, fmt.Errorf("PRGM body is %d bytes, not a multiple of keygroup size %d",
+			len(body), KeygroupSize)
+	}
+	n := len(body) / KeygroupSize
+	if n < 1 || n > MaxKeygroups {
+		return nil, fmt.Errorf("PRGM has %d keygroups (want 1..%d)", n, MaxKeygroups)
+	}
+
+	p := &Program{
+		Keygroups: make([]Keygroup, n),
+	}
+	copy(p.RawHeader[:], hdr)
+
+	p.Name = sysex.DecodeName(*(*[20]byte)(hdr[pHdrName : pHdrName+20]))
+	p.KeyTilt = int16(sysex.DecodeDW(*(*[4]byte)(hdr[pHdrKeyTilt : pHdrKeyTilt+4])))
+	p.PositionalXFade = sysex.DecodeDB(hdr[pHdrPosXFade], hdr[pHdrPosXFade+1]) != 0
+	p.NumKeygroups = sysex.DecodeDB(hdr[pHdrNumKgs], hdr[pHdrNumKgs+1])
+	p.MidiProgramNumber = sysex.DecodeDB(hdr[pHdrMidiPgm], hdr[pHdrMidiPgm+1])
+	p.EnableMidiProgram = sysex.DecodeDB(hdr[pHdrEnableMP], hdr[pHdrEnableMP+1]) != 0
+
+	if int(p.NumKeygroups) != n {
+		// Don't fail — the wire data is authoritative — but note the mismatch
+		// so the user can spot it in JSON.
+		p.NumKeygroups = uint8(n)
+	}
+
+	for i := 0; i < n; i++ {
+		kg, err := parseKeygroup(body[i*KeygroupSize : (i+1)*KeygroupSize])
+		if err != nil {
+			return nil, fmt.Errorf("keygroup %d: %w", i, err)
+		}
+		p.Keygroups[i] = *kg
+	}
+	return p, nil
 }
 
 func parseKeygroup(buf []byte) (*Keygroup, error) {

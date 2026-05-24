@@ -25,25 +25,13 @@ import (
 	_ "gitlab.com/gomidi/midi/v2/drivers/rtmididrv"
 )
 
-// DefaultSysExBufferBytes is large enough to hold a maximum-size S950 sample
-// dump (~966KB) with comfortable headroom.
-const DefaultSysExBufferBytes = 2 * 1024 * 1024
-
-// PortInfo is a name + numeric index pair.
+// PortInfo is a name + numeric index pair returned by ListPorts.
 type PortInfo struct {
+	// Index is the driver's port index (stable for the lifetime of the
+	// process; useful for selection by position).
 	Index int
-	Name  string
-}
-
-// ListPorts returns the names of available MIDI input and output ports.
-func ListPorts() (ins, outs []PortInfo, err error) {
-	for i, p := range midi.GetInPorts() {
-		ins = append(ins, PortInfo{Index: i, Name: p.String()})
-	}
-	for i, p := range midi.GetOutPorts() {
-		outs = append(outs, PortInfo{Index: i, Name: p.String()})
-	}
-	return ins, outs, nil
+	// Name is the human-readable port name as reported by the OS / driver.
+	Name string
 }
 
 // Options controls how Open opens the in/out ports and configures listening.
@@ -51,18 +39,21 @@ type Options struct {
 	// In is a substring matched (case-insensitive) against MIDI input port
 	// names. If empty, the first available input port is used.
 	In string
-	// Out is the same for output.
+	// Out is the same substring match for the output port.
 	Out string
-	// SysExBufferBytes sets the inbound SysEx buffer size. 0 means default.
+	// SysExBufferBytes sets the inbound SysEx buffer size. 0 means
+	// DefaultSysExBufferBytes.
 	SysExBufferBytes uint32
-	// Verbose, if true, hex-dumps every inbound SysEx to stderr via the
-	// LogFunc (caller-supplied logger).
+	// Verbose, if true, hex-dumps every inbound and outbound SysEx via the
+	// LogFunc. No effect when LogFunc is nil.
 	Verbose bool
-	// LogFunc is the destination for verbose hex dumps. If nil, no logs.
+	// LogFunc receives Printf-style verbose hex dumps. If nil, no logs are
+	// emitted regardless of Verbose.
 	LogFunc func(format string, args ...interface{})
 }
 
-// Transport is one open MIDI in/out pair ready for SysEx I/O.
+// Transport is one open MIDI in/out pair ready for SysEx I/O. Each Transport
+// owns its driver listener; Close releases both ports.
 type Transport struct {
 	in   drivers.In
 	out  drivers.Out
@@ -70,12 +61,17 @@ type Transport struct {
 	opts Options
 
 	mu  sync.Mutex
-	rxQ []byte           // pending complete SysEx messages, concatenated
-	rxC chan struct{}    // signalled whenever rxQ grows
-	rxM []chan struct{}  // waiters
+	rxQ []byte          // pending complete SysEx messages, concatenated
+	rxC chan struct{}   // signalled whenever rxQ grows
+	rxM []chan struct{} // waiters
 }
 
-// Open opens the MIDI in and out ports matching the names in opts.
+// DefaultSysExBufferBytes is large enough to hold a maximum-size S950 sample
+// dump (~966KB) with comfortable headroom.
+const DefaultSysExBufferBytes = 2 * 1024 * 1024
+
+// Open opens the MIDI in and out ports matching the names in opts and starts
+// the listener that delivers complete SysEx envelopes via RecvSysEx.
 func Open(opts Options) (*Transport, error) {
 	if opts.SysExBufferBytes == 0 {
 		opts.SysExBufferBytes = DefaultSysExBufferBytes
@@ -127,73 +123,15 @@ func Open(opts Options) (*Transport, error) {
 	return t, nil
 }
 
-func pickPortIn(ports []drivers.In, want string) (drivers.In, error) {
-	if want == "" {
-		return ports[0], nil
+// ListPorts returns the names of available MIDI input and output ports.
+func ListPorts() (ins, outs []PortInfo, err error) {
+	for i, p := range midi.GetInPorts() {
+		ins = append(ins, PortInfo{Index: i, Name: p.String()})
 	}
-	w := strings.ToLower(want)
-	for _, p := range ports {
-		if strings.Contains(strings.ToLower(p.String()), w) {
-			return p, nil
-		}
+	for i, p := range midi.GetOutPorts() {
+		outs = append(outs, PortInfo{Index: i, Name: p.String()})
 	}
-	names := make([]string, 0, len(ports))
-	for _, p := range ports {
-		names = append(names, p.String())
-	}
-	return nil, fmt.Errorf("no input port matches %q (have: %s)", want, strings.Join(names, ", "))
-}
-
-func pickPortOut(ports []drivers.Out, want string) (drivers.Out, error) {
-	if want == "" {
-		return ports[0], nil
-	}
-	w := strings.ToLower(want)
-	for _, p := range ports {
-		if strings.Contains(strings.ToLower(p.String()), w) {
-			return p, nil
-		}
-	}
-	names := make([]string, 0, len(ports))
-	for _, p := range ports {
-		names = append(names, p.String())
-	}
-	return nil, fmt.Errorf("no output port matches %q (have: %s)", want, strings.Join(names, ", "))
-}
-
-// handleMessage is invoked by gomidi for each parsed inbound message.
-// For SysEx, data is the full F0..F7 envelope. We append it to rxQ verbatim.
-func (t *Transport) handleMessage(msg midi.Message, _ int32) {
-	data := []byte(msg)
-	if len(data) == 0 {
-		return
-	}
-	// We only care about SysEx for the S950 protocol.
-	if data[0] != 0xF0 {
-		return
-	}
-	if t.opts.Verbose && t.opts.LogFunc != nil {
-		t.opts.LogFunc("RX (%d bytes): % X\n", len(data), prefixForLog(data))
-	}
-	t.mu.Lock()
-	t.rxQ = append(t.rxQ, data...)
-	waiters := t.rxM
-	t.rxM = nil
-	t.mu.Unlock()
-	for _, w := range waiters {
-		select {
-		case w <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func prefixForLog(b []byte) []byte {
-	const max = 64
-	if len(b) <= max {
-		return b
-	}
-	return b[:max]
+	return ins, outs, nil
 }
 
 // Send writes raw MIDI bytes to the output port. For SysEx, b must be a full
@@ -229,31 +167,6 @@ func (t *Transport) RecvSysEx(timeout time.Duration) ([]byte, error) {
 	}
 }
 
-// popOneSysEx removes and returns the first complete SysEx from rxQ.
-func (t *Transport) popOneSysEx() ([]byte, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(t.rxQ) == 0 {
-		return nil, false
-	}
-	if t.rxQ[0] != 0xF0 {
-		// Shouldn't happen since we only push F0-prefixed payloads.
-		t.rxQ = t.rxQ[:0]
-		return nil, false
-	}
-	// Find F7. The driver only pushes complete SysEx, so a terminator is
-	// expected somewhere — but be defensive.
-	for i := 1; i < len(t.rxQ); i++ {
-		if t.rxQ[i] == 0xF7 {
-			out := make([]byte, i+1)
-			copy(out, t.rxQ[:i+1])
-			t.rxQ = append([]byte(nil), t.rxQ[i+1:]...)
-			return out, true
-		}
-	}
-	return nil, false
-}
-
 // Drain discards any pending inbound bytes. Useful before starting a new
 // request/response cycle.
 func (t *Transport) Drain() {
@@ -280,6 +193,102 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// InName / OutName expose the names of the currently-open ports.
-func (t *Transport) InName() string  { return t.in.String() }
+// InName returns the name of the open input port.
+func (t *Transport) InName() string { return t.in.String() }
+
+// OutName returns the name of the open output port.
 func (t *Transport) OutName() string { return t.out.String() }
+
+// handleMessage is invoked by gomidi for each parsed inbound message.
+// For SysEx, data is the full F0..F7 envelope. We append it to rxQ verbatim.
+func (t *Transport) handleMessage(msg midi.Message, _ int32) {
+	data := []byte(msg)
+	if len(data) == 0 {
+		return
+	}
+	// We only care about SysEx for the S950 protocol.
+	if data[0] != 0xF0 {
+		return
+	}
+	if t.opts.Verbose && t.opts.LogFunc != nil {
+		t.opts.LogFunc("RX (%d bytes): % X\n", len(data), prefixForLog(data))
+	}
+	t.mu.Lock()
+	t.rxQ = append(t.rxQ, data...)
+	waiters := t.rxM
+	t.rxM = nil
+	t.mu.Unlock()
+	for _, w := range waiters {
+		select {
+		case w <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// popOneSysEx removes and returns the first complete SysEx from rxQ.
+func (t *Transport) popOneSysEx() ([]byte, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.rxQ) == 0 {
+		return nil, false
+	}
+	if t.rxQ[0] != 0xF0 {
+		// Shouldn't happen since we only push F0-prefixed payloads.
+		t.rxQ = t.rxQ[:0]
+		return nil, false
+	}
+	// Find F7. The driver only pushes complete SysEx, so a terminator is
+	// expected somewhere — but be defensive.
+	for i := 1; i < len(t.rxQ); i++ {
+		if t.rxQ[i] == 0xF7 {
+			out := make([]byte, i+1)
+			copy(out, t.rxQ[:i+1])
+			t.rxQ = append([]byte(nil), t.rxQ[i+1:]...)
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+func pickPortIn(ports []drivers.In, want string) (drivers.In, error) {
+	if want == "" {
+		return ports[0], nil
+	}
+	w := strings.ToLower(want)
+	for _, p := range ports {
+		if strings.Contains(strings.ToLower(p.String()), w) {
+			return p, nil
+		}
+	}
+	names := make([]string, 0, len(ports))
+	for _, p := range ports {
+		names = append(names, p.String())
+	}
+	return nil, fmt.Errorf("no input port matches %q (have: %s)", want, strings.Join(names, ", "))
+}
+
+func pickPortOut(ports []drivers.Out, want string) (drivers.Out, error) {
+	if want == "" {
+		return ports[0], nil
+	}
+	w := strings.ToLower(want)
+	for _, p := range ports {
+		if strings.Contains(strings.ToLower(p.String()), w) {
+			return p, nil
+		}
+	}
+	names := make([]string, 0, len(ports))
+	for _, p := range ports {
+		names = append(names, p.String())
+	}
+	return nil, fmt.Errorf("no output port matches %q (have: %s)", want, strings.Join(names, ", "))
+}
+
+func prefixForLog(b []byte) []byte {
+	const max = 64
+	if len(b) <= max {
+		return b
+	}
+	return b[:max]
+}
