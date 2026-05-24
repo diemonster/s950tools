@@ -1,0 +1,617 @@
+/* shared.css — common shell, list items, form controls, and modals.
+   Page-specific layouts (the Keygroup canvas, the Program kg-table,
+   the Sample waveform) stay in each page's <style>. The :root vars
+   defined here are available everywhere that links this stylesheet. */
+
+:root {
+  --black: #212121;
+  --grey-dark: #555555;
+  --grey-medium: #AAAAAA;
+  --grey-light: #EAEAEA;
+  --white: #FFFFFF;
+
+  --rb-red: #E91B29;
+  --rb-orange: #FC8917;
+  --rb-yellow: #FDF000;
+  --rb-green: #2BD62A;
+  --rb-cyan: #4AC9E3;
+  --rb-blue: #4485FD;
+  --rb-purple: #D08FF8;
+  --rb-magenta: #EA3BAA;
+  --rb-pink: #FF3E96;
+
+  --canvas: #1A1A1A;
+  --canvas-grid: #2A2A2A;
+  --canvas-grid-strong: #3A3A3A;
+  --canvas-text: #DDDDDD;
+
+  --bw: 1.75px;
+  --r: 5px;
+  --font-sans: "Space Grotesk", "Antique Olive", Helvetica, sans-serif;
+  --font-mono: "Space Mono", "Automate OT", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-weight: 300;
+  color: var(--black);
+  background: var(--grey-light);
+}
+
+/* ---------- App shell ----------
+   Two variants:
+   - .app--3row: topbar / sidebar+main / statusbar (Program, Sample)
+   - .app--canvas: same plus a resizable canvas/splitter/properties
+     stack on the right (Keygroup), driven by --props-h. */
+.app {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+  gap: 0;
+}
+/* minmax(0, 1fr) instead of bare 1fr — without it, a 1fr row's
+   intrinsic min size is `auto` (== content's min-content), so tall
+   content silently pushes the grid past the viewport. With min=0,
+   the row stays at its proportional share and overflow is owned by
+   the cell's own overflow rule. */
+.app--3row {
+  grid-template-rows: 56px minmax(0, 1fr) 28px;
+  grid-template-areas:
+    "topbar  topbar"
+    "sidebar main"
+    "statusbar statusbar";
+}
+.app--canvas {
+  /* 480px default leaves enough room for both property rows to
+     fit their natural content; can still be dragged via splitter. */
+  grid-template-rows: 56px minmax(0, 1fr) 6px var(--props-h, 480px) 28px;
+  grid-template-areas:
+    "topbar  topbar"
+    "sidebar canvas"
+    "sidebar splitter"
+    "sidebar properties"
+    "statusbar statusbar";
+}
+
+/* ---------- Topbar ---------- */
+.topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--white);
+  border-bottom: var(--bw) solid var(--black);
+  /* Hard no-wrap; long port names get truncated rather than pushing
+     items to a second line. */
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+.logo {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 14px;
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  padding: 4px 10px;
+  background: var(--black);
+  color: var(--rb-yellow);
+}
+.tabs { display: flex; gap: 4px; margin-left: 24px; }
+.tab {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  padding: 6px 12px;
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  background: var(--white);
+  color: var(--black);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.tab.active { background: var(--rb-yellow); }
+.tab[disabled],
+.tab.is-disabled {
+  color: var(--grey-medium);
+  background: var(--grey-light);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.spacer { flex: 1; }
+.chip {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  padding: 4px 10px;
+  border: var(--bw) solid var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chip.on { background: var(--black); color: var(--rb-yellow); }
+.chip.accent { background: var(--rb-magenta); color: var(--white); }
+.chip__label { color: var(--grey-dark); margin-right: 4px; }
+
+/* Tight mode for narrower windows — kicks in below 1280px. Shrinks
+   the chip text and hides the "MIDI in/out" labels so port names
+   keep room. The status badge + slot count stay visible. */
+@media (max-width: 1280px) {
+  .topbar { gap: 8px; padding: 0 10px; }
+  .tabs { margin-left: 12px; gap: 3px; }
+  .tab { font-size: 11px; padding: 5px 9px; }
+  .chip { font-size: 10px; padding: 3px 8px; }
+  .chip__label { display: none; }
+  .logo { font-size: 12px; padding: 3px 8px; }
+}
+@media (max-width: 1100px) {
+  /* Below this, MIDI port chips would still get cramped — collapse
+     port name to fixed-width with ellipsis so they don't push other
+     chips off-screen. */
+  .topbar .chip strong {
+    display: inline-block;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+  }
+}
+.chip--status { display: inline-flex; align-items: center; gap: 6px; }
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--rb-green);
+  border: 1px solid var(--black);
+}
+.chip--dirty   .status-dot { background: var(--rb-orange); }
+.chip--sending .status-dot { background: var(--rb-yellow); animation: status-pulse 1s infinite; }
+.chip--error   .status-dot { background: var(--rb-red); }
+@keyframes status-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* ---------- Statusbar ---------- */
+.statusbar {
+  grid-area: statusbar;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  background: var(--white);
+  border-top: var(--bw) solid var(--black);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.statusbar__hint { display: inline-flex; gap: 6px; align-items: center; }
+.statusbar__hint kbd {
+  background: var(--grey-light);
+  border: 1px solid var(--grey-medium);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--black);
+}
+.statusbar__spacer { flex: 1; }
+
+/* ---------- Sidebar shell ---------- */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--white);
+  border-right: var(--bw) solid var(--black);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: var(--bw) solid var(--black);
+}
+.sidebar__title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  font-weight: 700;
+}
+.sidebar__count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--grey-dark);
+}
+
+/* Sample / program list items share the same shape (slot · name ·
+   meta). The two suffix classes (.sample__rate, .program__kg) just
+   render different right-side text. */
+.sample-list, .program-list { flex: 1; overflow-y: auto; padding: 6px; }
+.sample, .program {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: var(--bw) solid transparent;
+  border-radius: var(--r);
+  margin-bottom: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.sample:hover, .program:hover { background: var(--grey-light); border-color: var(--black); }
+.sample.selected, .program.selected { background: var(--rb-yellow); border-color: var(--black); }
+.sample__slot, .program__slot {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
+  color: var(--grey-dark);
+  border: 1px solid var(--grey-medium);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+.sample__name, .program__name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sample__rate, .program__kg {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+}
+.dropzone-hint {
+  margin: 8px;
+  padding: 14px;
+  border: dashed var(--bw) var(--grey-medium);
+  border-radius: var(--r);
+  color: var(--grey-dark);
+  font-size: 12px;
+  text-align: center;
+  font-style: italic;
+}
+
+/* ---------- Cards (Program + Sample) ---------- */
+.card {
+  background: var(--white);
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.card__title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  font-weight: 700;
+}
+.card__subtitle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- Form controls ---------- */
+.row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.row label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--grey-dark);
+}
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--grey-light);
+}
+.field--wide { width: 100%; }
+.field--yellow { background: var(--rb-yellow); }
+.field--cyan { background: var(--rb-cyan); }
+.field.is-disabled {
+  color: var(--grey-medium);
+  border-color: var(--grey-medium);
+}
+.field input {
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  width: 100%;
+  outline: none;
+}
+.stepper {
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  padding: 0 4px;
+  color: var(--grey-dark);
+}
+.toggle {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  padding: 3px 9px;
+  border: var(--bw) solid var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  cursor: pointer;
+}
+.toggle.on { background: var(--black); color: var(--rb-yellow); }
+.seg {
+  display: inline-flex;
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.seg button {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  padding: 4px 10px;
+  border: none;
+  border-right: 1px solid var(--black);
+  background: var(--white);
+  color: var(--black);
+  cursor: pointer;
+}
+.seg button:last-child { border-right: none; }
+.seg button.on { background: var(--black); color: var(--rb-yellow); }
+
+/* ---------- Buttons ---------- */
+.btn {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  padding: 6px 12px;
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  background: var(--white);
+  color: var(--black);
+  cursor: pointer;
+}
+.btn--primary { background: var(--rb-yellow); color: var(--black); }
+.btn--dark    { background: var(--black); color: var(--white); }
+.btn--danger  { background: var(--white); color: var(--rb-red); border-color: var(--rb-red); }
+.btn[disabled],
+.btn.is-disabled {
+  color: var(--grey-medium);
+  border-color: var(--grey-medium);
+  background: var(--grey-light);
+  cursor: not-allowed;
+}
+
+.panel__divider {
+  margin: 14px 0 8px 0;
+  border: none;
+  border-top: 1px solid var(--grey-light);
+}
+
+/* ---------- Modal (transfer + pre-flight) ----------
+   Same shell for both: backdrop + .modal container with head / body /
+   foot regions. .modal--preflight gives the body padding a bit more
+   room for the checklist. Each backdrop opens via .is-open. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(33, 33, 33, 0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-backdrop.is-open,
+body.modal-open .modal-backdrop { display: flex; }
+.modal {
+  background: var(--white);
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  width: 540px;
+  max-width: 92vw;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.modal__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 18px;
+  background: var(--black);
+  color: var(--white);
+}
+.modal__title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 12px;
+  margin: 0;
+}
+.modal__title strong { color: var(--rb-yellow); }
+.modal__route {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.modal__body { padding: 16px 18px; }
+.modal__step {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.modal__step strong {
+  color: var(--black);
+  font-size: 13px;
+  display: block;
+  margin-top: 2px;
+  letter-spacing: 0;
+}
+.progress {
+  position: relative;
+  height: 18px;
+  background: var(--grey-light);
+  border: var(--bw) solid var(--black);
+  border-radius: var(--r);
+  margin: 10px 0;
+  overflow: hidden;
+}
+.progress__bar {
+  height: 100%;
+  background: var(--rb-yellow);
+  border-right: var(--bw) solid var(--black);
+}
+.progress__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--black);
+}
+.modal__times {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+.log {
+  background: var(--canvas);
+  color: #DDDDDD;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 10px 12px;
+  border-radius: var(--r);
+  height: 100px;
+  overflow-y: auto;
+  border: 1px solid var(--black);
+}
+.log__row { display: flex; gap: 8px; padding: 1px 0; }
+.log__row.ok      { color: var(--rb-green); }
+.log__row.run     { color: var(--rb-yellow); }
+.log__row.warn    { color: var(--rb-orange); }
+.log__row.pending { color: var(--grey-medium); }
+.modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--grey-light);
+  background: var(--grey-light);
+}
+
+/* ---------- Pre-flight checklist ----------
+   Used in the pre-flight modal body. Each .preflight__item has one of
+   ok / warn / error states. Errors block the Continue button via the
+   .btn[disabled] style above. */
+.preflight {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.preflight__item {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--grey-light);
+  border-radius: var(--r);
+}
+.preflight__item--ok    { border-color: color-mix(in srgb, var(--rb-green) 35%, var(--grey-light)); }
+.preflight__item--warn  { border-color: color-mix(in srgb, var(--rb-orange) 60%, var(--grey-light)); background: color-mix(in srgb, var(--rb-orange) 6%, var(--white)); }
+.preflight__item--error { border-color: color-mix(in srgb, var(--rb-red) 60%, var(--grey-light));    background: color-mix(in srgb, var(--rb-red) 6%, var(--white)); }
+.preflight__icon {
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.5;
+}
+.preflight__item--ok    .preflight__icon { color: var(--rb-green); }
+.preflight__item--warn  .preflight__icon { color: var(--rb-orange); }
+.preflight__item--error .preflight__icon { color: var(--rb-red); }
+.preflight__body { display: flex; flex-direction: column; gap: 2px; }
+.preflight__title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  color: var(--black);
+}
+.preflight__detail {
+  font-size: 11px;
+  color: var(--grey-dark);
+}
+.preflight__action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.preflight__action .btn {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+.preflight__estimate {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--grey-light);
+  margin-top: 10px;
+}

@@ -175,6 +175,205 @@
     gap: 16px;
   }
 
+  /* ---------- Slice mode ----------
+     Slicing pre-processes a long sample into N short ones uploaded
+     to consecutive slots, then auto-generates a program mapping each
+     slice chromatically. Visible state in this mockup: 8 slices
+     auto-detected at transients, slice 03 selected. */
+
+  /* Toolbar on the right side of the Waveform card head.
+     flex-wrap on both the outer toolbar and each group so narrow
+     windows collapse the controls onto multiple lines instead of
+     pushing them off-screen. */
+  .slice-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--grey-dark);
+    min-width: 0;
+  }
+  .slice-tools .seg { font-size: 10px; flex-wrap: nowrap; }
+  .slice-tools .seg button { padding: 3px 7px; white-space: nowrap; }
+  .slice-tools__group {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+  .slice-tools__label { color: var(--grey-dark); white-space: nowrap; }
+
+  /* Beats sub-picker — appears below the main slice toolbar when
+     "Slice by → Beats" is chosen. BPM + division → slice count. */
+  .slice-beats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin: 8px 0 4px;
+    padding: 8px 10px;
+    background: var(--grey-light);
+    border-radius: var(--r);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--grey-dark);
+  }
+  .slice-beats__label { color: var(--grey-dark); }
+  .slice-beats__count {
+    margin-left: auto;
+    color: var(--black);
+    font-weight: 700;
+  }
+
+  /* Slice marker — a small numbered tab at the top of the strip with
+     a thin vertical guide cutting through the waveform below. */
+  .slice-marker {
+    position: absolute;
+    top: 0; bottom: 18px;
+    left: var(--x);
+    width: 0;
+    pointer-events: auto;
+    z-index: 2;
+  }
+  .slice-marker__head {
+    position: absolute;
+    top: 2px;
+    left: 0;
+    transform: translateX(-50%);
+    background: var(--rb-yellow);
+    color: var(--black);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border: 1px solid var(--black);
+    border-radius: 3px;
+    cursor: grab;
+    pointer-events: auto;
+  }
+  .slice-marker__line {
+    position: absolute;
+    top: 18px; bottom: 0;
+    left: 0;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.35);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .slice-marker:hover .slice-marker__line { background: rgba(255, 255, 255, 0.6); }
+
+  /* Selected slice — pop the head + thicken the line. */
+  .slice-marker.is-selected .slice-marker__head {
+    background: var(--rb-magenta);
+    color: var(--white);
+    border-color: var(--white);
+  }
+  .slice-marker.is-selected .slice-marker__line {
+    background: var(--rb-magenta);
+    width: 2px;
+    margin-left: -0.5px;
+  }
+
+  /* Slice properties card has dense rows since it competes for the
+     same column width as the other control cards. */
+  .slice-list {
+    margin: -4px 0 8px;
+    max-height: 96px;
+    overflow-y: auto;
+    border: 1px solid var(--grey-light);
+    border-radius: var(--r);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .slice-list__row {
+    display: grid;
+    /* num · range · loop-mode · play-button */
+    grid-template-columns: 28px 1fr auto 22px;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .slice-list__row + .slice-list__row { border-top: 1px solid var(--grey-light); }
+  .slice-list__row:hover { background: var(--grey-light); }
+  .slice-list__row.is-selected { background: var(--rb-yellow); }
+  .slice-list__row.is-selected .slice-list__loop { color: var(--black); }
+  .slice-list__num { font-weight: 700; color: var(--grey-dark); }
+  .slice-list__loop { color: var(--grey-dark); font-size: 10px; }
+  /* Inline play button — auditions just that slice. Spacebar also
+     previews the currently selected slice (per statusbar hint). */
+  .slice-list__play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px; height: 20px;
+    border: 1px solid var(--black);
+    border-radius: 3px;
+    background: var(--white);
+    color: var(--black);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .slice-list__play:hover { background: var(--rb-yellow); }
+  .slice-list__row.is-selected .slice-list__play { background: var(--white); }
+
+  /* When slice mode is active, dim the start/end/loop overlay so
+     slice markers visually dominate without removing the existing
+     UI entirely. */
+  .waveform--slicing .marker,
+  .waveform--slicing .waveform__loop,
+  .waveform--slicing .waveform__inactive {
+    opacity: 0.25;
+    pointer-events: none;
+  }
+
+  /* Hover playhead — tracks the mouse across the waveform. Mouse
+     wheel zooms in/out anchored at this position; cmd/alt+drag also
+     adjusts zoom. The badge sits just to the right of the cursor
+     line near the bottom (above the ruler) so it doesn't collide
+     with slice-marker heads. Static position in this mockup; real
+     impl reads live mouse coords. */
+  .waveform__cursor {
+    position: absolute;
+    top: 0;
+    bottom: 18px;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.55);
+    pointer-events: none;
+    z-index: 1;
+    /* Subtle dashed look so it reads as ephemeral, not a real marker. */
+    background-image: linear-gradient(
+      to bottom,
+      rgba(255,255,255,0.55) 0,
+      rgba(255,255,255,0.55) 3px,
+      transparent 3px,
+      transparent 6px
+    );
+    background-size: 100% 6px;
+    background-color: transparent;
+  }
+  .waveform__cursor__badge {
+    position: absolute;
+    left: 3px;
+    bottom: 4px;
+    background: var(--rb-cyan);
+    color: var(--black);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--black);
+    white-space: nowrap;
+  }
+
   /* Vertical-stack action variant for the Device card — buttons fill
      the column width and left-align so they read as a menu. */
   .actions--stack {
@@ -282,7 +481,7 @@
         <div class="identity__cell">
           <label>Name</label>
           <span class="field field--wide field--yellow">
-            <input type="text" value="SNARE" maxlength="10" />
+            <input type="text" value="SNARE" maxlength="10" aria-label="Sample name" />
           </span>
         </div>
         <div class="identity__cell">
@@ -310,10 +509,70 @@
          Keyzones canvas. -->
     <section class="card">
       <div class="card__head">
-        <div class="card__title">Waveform</div>
-        <div class="card__subtitle">drag markers to set start / end / loop · scroll to zoom</div>
+        <div>
+          <div class="card__title">Waveform</div>
+          <div class="card__subtitle">slice mode · click a slice to select · drag head to move</div>
+        </div>
+        <!-- Slice toolbar — visible only when Slice mode is active.
+             "Slice by" picks the strategy (Auto detects transients,
+             Beats divides evenly, Manual lets the user click). Snap
+             nudges placements to the nearest zero crossing to kill
+             clicks. Max 64 slices = one full 88-key page minus a few. -->
+        <div class="slice-tools">
+          <button type="button" class="toggle on">● Slice</button>
+          <div class="slice-tools__group">
+            <span class="slice-tools__label">by</span>
+            <span class="seg">
+              <button type="button">Manual</button>
+              <button type="button">Auto</button>
+              <button type="button" class="on">Beats</button>
+            </span>
+          </div>
+          <div class="slice-tools__group">
+            <span class="slice-tools__label">snap</span>
+            <span class="seg">
+              <button type="button" class="on">Zero ✓</button>
+              <button type="button">Off</button>
+            </span>
+          </div>
+          <div class="slice-tools__group">
+            <span class="slice-tools__label">zoom</span>
+            <span class="seg">
+              <button type="button">50%</button>
+              <button type="button" class="on">100%</button>
+              <button type="button">Fit</button>
+            </span>
+          </div>
+        </div>
       </div>
-      <div class="waveform"
+      <!-- Sub-picker for the active "Slice by" mode. Visibility rule:
+             - Manual: hidden entirely (user clicks waveform to add)
+             - Auto:   shows a transient-sensitivity slider + "Re-analyze"
+                       (not mocked here; one knob, ~10 lines)
+             - Beats:  the tempo × bars × division strip below.
+           Mocked here in the Beats state since it's the most involved. -->
+      <div class="slice-beats">
+        <div class="slice-tools__group">
+          <span class="slice-beats__label">tempo</span>
+          <span class="field"><span class="stepper">−</span>120 BPM<span class="stepper">+</span></span>
+        </div>
+        <div class="slice-tools__group">
+          <span class="slice-beats__label">bars</span>
+          <span class="field"><span class="stepper">−</span>2<span class="stepper">+</span></span>
+        </div>
+        <div class="slice-tools__group">
+          <span class="slice-beats__label">division</span>
+          <span class="seg">
+            <button type="button">1/4</button>
+            <button type="button">1/8</button>
+            <button type="button" class="on">1/16</button>
+            <button type="button">1/32</button>
+          </span>
+        </div>
+        <span class="slice-beats__count">→ 8 slices</span>
+      </div>
+
+      <div class="waveform waveform--slicing"
            style="--start: 2%; --end: 96%; --loop-start: 35%; --loop-width: 23%;">
         <svg class="waveform__svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
           <!-- Top and bottom halves of the waveform are filled by JS on
@@ -343,6 +602,49 @@
             <span class="marker__handle marker__handle--right">7,192</span>
           </div>
 
+          <!-- Slice markers. With "Slice by → Beats" active, slices
+               are spaced evenly at 1/16-note intervals across 2 bars
+               at 120 BPM (8 slice positions). Slice 03 is selected. -->
+          <div class="slice-marker" style="--x: 0%;">
+            <span class="slice-marker__head">01</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 12.5%;">
+            <span class="slice-marker__head">02</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker is-selected" style="--x: 25%;">
+            <span class="slice-marker__head">03</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 37.5%;">
+            <span class="slice-marker__head">04</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 50%;">
+            <span class="slice-marker__head">05</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 62.5%;">
+            <span class="slice-marker__head">06</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 75%;">
+            <span class="slice-marker__head">07</span>
+            <span class="slice-marker__line"></span>
+          </div>
+          <div class="slice-marker" style="--x: 87.5%;">
+            <span class="slice-marker__head">08</span>
+            <span class="slice-marker__line"></span>
+          </div>
+
+          <!-- Hover playhead — shows where the mouse currently is on
+               the waveform. Scrolling here zooms anchored at this x.
+               Static at 42% in the mockup. -->
+          <div class="waveform__cursor" style="left: 42%;">
+            <span class="waveform__cursor__badge">5,208 · scroll to zoom</span>
+          </div>
+
           <div class="waveform__ruler">
             <span style="left: 5%">0.05s</span>
             <span style="left: 20%">0.10s</span>
@@ -355,39 +657,64 @@
         </div>
       </div>
       <div class="waveform__legend">
+        <span><span class="legend-swatch" style="--swatch: var(--rb-yellow)"></span>Slice</span>
+        <span><span class="legend-swatch" style="--swatch: var(--rb-magenta)"></span>Selected</span>
         <span><span class="legend-swatch" style="--swatch: var(--rb-green)"></span>Start</span>
         <span><span class="legend-swatch" style="--swatch: var(--rb-red)"></span>End</span>
-        <span><span class="legend-swatch" style="--swatch: var(--rb-cyan)"></span>Loop region</span>
-        <span style="margin-left:auto;">26.04 kHz · 12,400 words · ~0.48 s</span>
+        <span style="margin-left:auto;">8 slices · 2 bars × 1/16 @ 120 BPM · 26.04 kHz · 12,400 words · ~0.48 s</span>
       </div>
     </section>
 
     <!-- Three columns: markers / playback / device actions. -->
     <section class="controls">
 
-      <!-- Markers card. Numeric editing of the same four values shown
-           on the waveform — useful when the user wants to nudge by
-           exact sample counts rather than dragging. -->
+      <!-- Slices card. List of all slices on top (scrollable up to
+           64 entries), per-slice properties for the selected one
+           below. Each slice carries its own loop config — including
+           ping-pong — since the S950 supports per-sample replay
+           modes (one-shot 'O' / loop 'L' / alt 'A'). -->
       <div class="card">
         <div class="card__head">
-          <div class="card__title">Markers</div>
-          <div class="card__subtitle">in sample words</div>
+          <div class="card__title">Slices</div>
+          <div class="card__subtitle">8 / 64</div>
+        </div>
+        <div class="slice-list">
+          <div class="slice-list__row"><span class="slice-list__num">01</span><span>0 — 1,550</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 1">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">02</span><span>1,550 — 3,100</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 2">▶</button></div>
+          <div class="slice-list__row is-selected"><span class="slice-list__num">03</span><span>3,100 — 4,650</span><span class="slice-list__loop">ping-pong</span><button type="button" class="slice-list__play" aria-label="Preview slice 3">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">04</span><span>4,650 — 6,200</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 4">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">05</span><span>6,200 — 7,750</span><span class="slice-list__loop">loop</span><button type="button" class="slice-list__play" aria-label="Preview slice 5">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">06</span><span>7,750 — 9,300</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 6">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">07</span><span>9,300 — 10,850</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 7">▶</button></div>
+          <div class="slice-list__row"><span class="slice-list__num">08</span><span>10,850 — 12,400</span><span class="slice-list__loop">one-shot</span><button type="button" class="slice-list__play" aria-label="Preview slice 8">▶</button></div>
+        </div>
+        <div class="row">
+          <label>Slice</label>
+          <span class="field"><span class="stepper">−</span>03 of 8<span class="stepper">+</span></span>
         </div>
         <div class="row">
           <label>Start</label>
-          <span class="field"><span class="stepper">−</span>248<span class="stepper">+</span></span>
+          <span class="field"><span class="stepper">−</span>3,100<span class="stepper">+</span></span>
         </div>
         <div class="row">
-          <label>End</label>
-          <span class="field"><span class="stepper">−</span>11,904<span class="stepper">+</span></span>
+          <label>Length</label>
+          <span class="field"><span class="stepper">−</span>1,550<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>Loop mode</label>
+          <span class="seg">
+            <button type="button">Off</button>
+            <button type="button">Loop</button>
+            <button type="button" class="on">Ping-pong</button>
+          </span>
         </div>
         <div class="row">
           <label>Loop start</label>
-          <span class="field"><span class="stepper">−</span>4,340<span class="stepper">+</span></span>
+          <span class="field"><span class="stepper">−</span>200<span class="stepper">+</span></span>
         </div>
         <div class="row">
           <label>Loop length</label>
-          <span class="field"><span class="stepper">−</span>2,852<span class="stepper">+</span></span>
+          <span class="field"><span class="stepper">−</span>800<span class="stepper">+</span></span>
         </div>
       </div>
 
@@ -435,9 +762,14 @@
           <div class="card__subtitle">MRCC Port 03 · slot 01</div>
         </div>
         <div class="actions actions--stack">
+          <!-- Apply Slicing — the headline action when in Slice mode.
+               Uploads N samples to free slots, then auto-creates a
+               program with N keygroups mapped chromatically. -->
+          <button type="button" class="btn btn--primary" data-modal-open="upload">Apply slicing → 8 samples + program</button>
+          <hr class="panel__divider" />
           <!-- Long transfers (audio data) trigger the blocking modal.
                SPRM I/O is fast (120 bytes) — no modal needed for those. -->
-          <button type="button" class="btn btn--primary" data-modal-open="upload">Import .wav / .aiff…</button>
+          <button type="button" class="btn" data-modal-open="upload">Import .wav / .aiff…</button>
           <button type="button" class="btn" data-modal-open="download">Replace from S950</button>
           <button type="button" class="btn" data-modal-open="download">Download .wav…</button>
           <hr class="panel__divider" />
@@ -459,12 +791,14 @@
 
   <!-- Status bar -->
   <div class="statusbar">
-    <span class="statusbar__hint"><kbd>drag</kbd> marker to nudge</span>
-    <span class="statusbar__hint"><kbd>scroll</kbd> zoom waveform</span>
-    <span class="statusbar__hint"><kbd>space</kbd> preview</span>
-    <span class="statusbar__hint"><kbd>⌘↵</kbd> send to s950</span>
+    <span class="statusbar__hint"><kbd>click</kbd> slice head to select</span>
+    <span class="statusbar__hint"><kbd>drag</kbd> slice head to move</span>
+    <span class="statusbar__hint"><kbd>shift+click</kbd> waveform to add slice</span>
+    <span class="statusbar__hint"><kbd>scroll</kbd> zoom at cursor</span>
+    <span class="statusbar__hint"><kbd>space</kbd> preview slice</span>
+    <span class="statusbar__hint"><kbd>delete</kbd> remove slice</span>
     <span class="statusbar__spacer"></span>
-    <span>SNARE · slot 01 · loop on · 12,400 words</span>
+    <span>SNARE · 8 / 64 slices · slice 03 selected · zoom 100%</span>
   </div>
 </div>
 
