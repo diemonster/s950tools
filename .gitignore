@@ -24,6 +24,5 @@ go.work.sum
 /kit/
 /docs/
 
-# Claude Code: per-user / runtime files (commit .claude/settings.json only)
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
+# Claude Code: personal config / runtime files
+.claude/
