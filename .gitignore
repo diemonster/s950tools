@@ -20,3 +20,6 @@ go.work.sum
 /testdata/local/
 *.wav.tmp
 *.sysex.tmp
+
+/kit/
+/docs/
