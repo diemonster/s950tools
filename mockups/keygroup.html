@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>s950 · Keygroup (mockup)</title>
+<meta name="viewport" content="width=1400" />
+<!--
+  Static mockup of the Keyzones screen for the planned Wails UI.
+  Borrows palette + typography from /Users/brandonivers/Development/pb/website.
+  Uses Google-hosted stand-ins (Space Grotesk for Antique Olive,
+  Space Mono for Automate OT) so the file is portable; swap to local
+  woff2 when integrated into the real frontend.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<!-- Shared shell + form controls + modal styles. See shared.css. -->
+<link rel="stylesheet" href="shared.css" />
+<style>
+  /* Page-specific styles only — the 2D zone canvas, the resizable
+     properties panel, and modulation row helpers. Everything in
+     shared.css covers the topbar / sidebar / form controls / modal. */
+
+  /* Horizontal splitter between the canvas and properties panel.
+     Dragging it grows/shrinks --props-h (set on .app--canvas) so the
+     loud layer + modulation rows can be revealed without scrolling. */
+  .splitter {
+    grid-area: splitter;
+    background: var(--black);
+    cursor: row-resize;
+    position: relative;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .splitter::after {
+    content: "";
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 36px; height: 2px;
+    background: var(--grey-medium);
+    border-radius: 2px;
+    transform: translate(-50%, -50%);
+  }
+  .splitter:hover::after { background: var(--rb-yellow); }
+  .app.is-resizing { cursor: row-resize; }
+  .app.is-resizing * {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+
+  /* Subtle "(KICK)" sample tag next to layer headings — helps clarify
+     that filter/loudness below are scoped to that layer's sample. */
+  .panel__title .panel__tag {
+    color: var(--black);
+    background: var(--rb-yellow);
+    border: 1px solid var(--black);
+    border-radius: 3px;
+    padding: 0 5px;
+    margin-left: 6px;
+    letter-spacing: 0.04em;
+  }
+  .panel__title .panel__tag--muted {
+    color: var(--grey-dark);
+    background: var(--grey-light);
+    border-color: var(--grey-medium);
+  }
+  .layer-hint {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--grey-dark);
+    margin: -4px 0 8px 0;
+    letter-spacing: 0.04em;
+  }
+  .panel__divider {
+    margin: 14px 0 8px 0;
+    border: none;
+    border-top: 1px solid var(--grey-light);
+  }
+
+  /* The keygroup sample sidebar uses cursor: grab (drag-to-zone) — a
+     small tweak on top of the shared .sample list-item style. */
+  .sidebar .sample { cursor: grab; }
+
+  /* ---------- Canvas (the 2D grid) ---------- */
+  .canvas {
+    grid-area: canvas;
+    background: var(--canvas);
+    color: var(--canvas-text);
+    position: relative;
+    display: grid;
+    grid-template-rows: auto 1fr 28px 56px;
+    grid-template-columns: 38px 1fr 38px;
+    grid-template-areas:
+      "canvas-head canvas-head canvas-head"
+      "y-left      grid         y-right"
+      ".           keys-strip   ."
+      "kb-pad      keyboard     kb-pad-r";
+    overflow: hidden;
+  }
+  .canvas__head {
+    grid-area: canvas-head;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #111;
+    border-bottom: 1px solid var(--canvas-grid-strong);
+  }
+  .canvas__head .group { display: flex; gap: 6px; align-items: center; }
+  .head-chip {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+    padding: 3px 8px;
+    border: 1px solid var(--canvas-grid-strong);
+    border-radius: 999px;
+    color: var(--canvas-text);
+    background: transparent;
+  }
+  .head-chip.on { background: var(--rb-yellow); color: var(--black); border-color: var(--rb-yellow); }
+
+  .y-axis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 4px 6px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--grey-dark);
+    text-align: right;
+    background: #161616;
+  }
+  .y-axis.left { grid-area: y-left; }
+  .y-axis.right { grid-area: y-right; text-align: left; }
+
+  .grid {
+    grid-area: grid;
+    position: relative;
+    background:
+      repeating-linear-gradient(to right,
+        transparent 0 calc(100% / 88 - 1px),
+        var(--canvas-grid) calc(100% / 88 - 1px) calc(100% / 88)),
+      repeating-linear-gradient(to bottom,
+        transparent 0 calc(100% / 8 - 1px),
+        var(--canvas-grid) calc(100% / 8 - 1px) calc(100% / 8));
+    background-color: var(--canvas);
+    border-left: 1px solid var(--canvas-grid-strong);
+    border-right: 1px solid var(--canvas-grid-strong);
+  }
+  /* C-key markers — slightly brighter vertical lines every 12 semitones. */
+  .grid::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(to right,
+        transparent 0 calc(100% / 88 * 12 - 1px),
+        var(--canvas-grid-strong) calc(100% / 88 * 12 - 1px) calc(100% / 88 * 12));
+  }
+  /* Velocity-switch midline (loud / soft separator) — dashed. */
+  .grid::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0;
+    top: 50%;
+    border-top: 1px dashed var(--canvas-grid-strong);
+    pointer-events: none;
+  }
+
+  .keys-strip {
+    grid-area: keys-strip;
+    position: relative;
+    background: #111;
+    border-top: 1px solid var(--canvas-grid-strong);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--grey-medium);
+  }
+  .keys-strip span {
+    position: absolute;
+    transform: translateX(-50%);
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* The 2D zones live inside .grid as absolute boxes.
+     Coordinates use a CSS variable system:
+       --x: left edge as % (0..100)
+       --w: width as %
+       --y-top / --y-bottom: vertical span as % from top
+  */
+  .zone {
+    position: absolute;
+    left: var(--x);
+    width: var(--w);
+    top: var(--y-top);
+    bottom: var(--y-bottom);
+    border: var(--bw) solid var(--zone-bg, var(--rb-yellow));
+    background: color-mix(in srgb, var(--zone-bg, var(--rb-yellow)) 22%, transparent);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 4px 6px;
+    overflow: hidden;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4);
+  }
+  .zone__label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--white);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .zone__meta {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--grey-medium);
+  }
+  .zone.selected {
+    box-shadow:
+      inset 0 0 0 1px rgba(0,0,0,0.6),
+      0 0 0 2px var(--rb-yellow);
+  }
+  .zone .soft-loud-divider {
+    position: absolute;
+    left: 0; right: 0;
+    top: var(--vsplit, 50%);
+    border-top: 1px dashed rgba(255,255,255,0.5);
+  }
+
+  /* Keyboard strip at the very bottom — 88 keys (A0..C8) at MIDI 21..108.
+     For the mockup we show 24..127 (the S950's range), 104 keys, but render
+     a stylized 7-octave keyboard for visual familiarity. */
+  .keyboard {
+    grid-area: keyboard;
+    position: relative;
+    background: #fafafa;
+    border-top: 1px solid var(--canvas-grid-strong);
+    overflow: hidden;
+  }
+  .keyboard__bg {
+    position: absolute; inset: 0;
+    background:
+      repeating-linear-gradient(to right,
+        var(--white) 0 calc(100% / 88 - 1px),
+        #d0d0d0 calc(100% / 88 - 1px) calc(100% / 88));
+  }
+  .keyboard__sharps {
+    position: absolute;
+    top: 0; bottom: 50%;
+    left: 0; right: 0;
+    pointer-events: none;
+  }
+  .keyboard__sharps span {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: calc(100% / 88 * 0.66);
+    background: #212121;
+    transform: translateX(-50%);
+  }
+  .kb-pad, .kb-pad-r { background: var(--canvas); }
+
+  /* Highlighted keys (assigned to a keygroup) tint the keyboard. */
+  .keyboard__assigned {
+    position: absolute; inset: 0;
+    pointer-events: none;
+  }
+  .keyboard__assigned span {
+    position: absolute;
+    top: 50%; bottom: 0;
+    background: var(--zone-bg, var(--rb-yellow));
+    opacity: 0.5;
+  }
+
+  /* ---------- Properties panel ----------
+     Two rows: row 1 is per-zone (Keygroup / Soft / Loud) and row 2
+     is per-keygroup modulation (Amp env / Filter env / LFO & dynamics).
+     Inter-column rules apply per row; row 2 gets a thin top rule to
+     separate it from row 1. --props-h on .app drives total height —
+     drag the splitter to reveal more rows or hide them. */
+  .properties {
+    grid-area: properties;
+    background: var(--white);
+    border-top: var(--bw) solid var(--black);
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-auto-rows: auto;
+    gap: 0;
+    overflow: auto;
+  }
+  .panel {
+    padding: 12px 16px;
+    border-right: var(--bw) solid var(--black);
+    overflow: hidden;
+  }
+  .panel:nth-child(3n) { border-right: none; }
+  .panel:nth-child(n+4) { border-top: 1px solid var(--grey-light); }
+  .panel__title {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 10px;
+    color: var(--grey-dark);
+    margin-bottom: 8px;
+  }
+  /* Tighter label column inside the properties panels — values get
+     more breathing room than the shared 120px default. */
+  .properties .row { grid-template-columns: 110px 1fr; }
+
+  /* Row of chip-style behavior toggles (one-shot, const-pitch,
+     key-filter). Reuses shared .toggle styling. */
+  .toggle-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  /* ADSR mini-graph */
+  .adsr {
+    grid-column: 2;
+    height: 48px;
+    border: var(--bw) solid var(--black);
+    border-radius: var(--r);
+    background: var(--canvas);
+    position: relative;
+    overflow: hidden;
+  }
+  .adsr svg { display: block; width: 100%; height: 100%; }
+
+  /* Modulation row helpers — compact form rows so the LFO/velocity
+     block can fit a lot of small knobs in one column. */
+  .row--compact {
+    grid-template-columns: 96px 1fr;
+    padding: 2px 0;
+  }
+  /* Horizontal ADSR strip — four small "A · D · S · R" cells in a row
+     so an envelope only costs one line of vertical space instead of
+     four. Each cell stays individually clickable. */
+  .adsr-strip {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 6px;
+    margin: 2px 0 8px;
+  }
+  .adsr-cell {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--grey-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .adsr-cell > .field {
+    flex: 1;
+    padding: 1px 6px;
+    font-size: 11px;
+    justify-content: center;
+    text-align: center;
+  }
+  .panel__subtitle {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 9px;
+    color: var(--grey-dark);
+    margin: 10px 0 2px;
+  }
+  .panel__subtitle:first-of-type { margin-top: 0; }
+  .field--xs {
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+  /* Two-column knob grid for velocity routing — each cell is a tiny
+     "vel → target = N" line. Saves vertical space in the LFO panel. */
+  .vel-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+    margin-top: 2px;
+  }
+  .vel-grid .vel-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--grey-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .vel-grid .vel-row .field { padding: 1px 6px; font-size: 11px; }
+
+</style>
+</head>
+<body>
+<div class="app app--canvas">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="logo">s950-tools</div>
+    <nav class="tabs">
+      <a class="tab" href="program.html">Program</a>
+      <a class="tab active" href="keygroup.html">Keygroup</a>
+      <a class="tab" href="sample.html">Sample</a>
+    </nav>
+    <div class="spacer"></div>
+    <!-- MIDI interface picker: user selects from any enumerated in/out
+         port (Web MIDI navigator.requestMIDIAccess(), or Go-side rtmidi
+         GetInPorts()/GetOutPorts() — the UI shape is the same). -->
+    <span class="chip">
+      <span class="chip__label">MIDI in</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">
+      <span class="chip__label">MIDI out</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">Ch · 0 ▾</span>
+    <!-- Live-sync state: knob tweaks resend PRGM ~400ms after the
+         last edit. Green dot = on-device matches editor. -->
+    <span class="chip chip--status"><span class="status-dot"></span>Synced</span>
+    <span class="chip accent">15 / 100 slots</span>
+  </header>
+
+  <!-- Sample list -->
+  <aside class="sidebar">
+    <div class="sidebar__head">
+      <div class="sidebar__title">Samples</div>
+      <div class="sidebar__count">15 / 100</div>
+    </div>
+    <div class="sample-list">
+      <!-- Mocked R8-kit catalog. .selected = currently focused. -->
+      <div class="sample selected">
+        <span class="sample__slot">00</span>
+        <span class="sample__name">KICK</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">01</span>
+        <span class="sample__name">SNARE</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">02</span>
+        <span class="sample__name">RIM</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">03</span>
+        <span class="sample__name">CLAP</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">04</span>
+        <span class="sample__name">CONGA</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">05</span>
+        <span class="sample__name">808 KICK</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">06</span>
+        <span class="sample__name">808 TOM</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">07</span>
+        <span class="sample__name">808 HHC</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">08</span>
+        <span class="sample__name">909 TOM</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">09</span>
+        <span class="sample__name">CR78 HHO</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">10</span>
+        <span class="sample__name">909 HHO</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">11</span>
+        <span class="sample__name">808 HHO</span>
+        <span class="sample__rate">26k</span>
+      </div>
+    </div>
+    <div class="dropzone-hint">
+      drag .wav / .aiff files here<br/>to add to the bank
+    </div>
+  </aside>
+
+  <!-- 2D canvas -->
+  <section class="canvas">
+    <div class="canvas__head">
+      <div class="group">
+        <button class="head-chip on">Drum Kit</button>
+        <button class="head-chip">Ranged</button>
+      </div>
+      <div class="group">
+        <button class="head-chip">Distribute</button>
+        <button class="head-chip">Add Zone</button>
+        <button class="head-chip">Clear</button>
+      </div>
+    </div>
+
+    <!-- Velocity axis (0..127, shown at both sides) -->
+    <div class="y-axis left">
+      <span>127</span><span>96</span><span>64</span><span>32</span><span>0</span>
+    </div>
+    <div class="y-axis right">
+      <span>127</span><span>96</span><span>64</span><span>32</span><span>0</span>
+    </div>
+
+    <!-- The 2D grid + zones. Coordinates use percent-of-keyboard (88 keys).
+         For 7 zones around C2..C3, x is centered around 24-50% of the strip. -->
+    <div class="grid">
+      <!-- KICK @ MIDI 36 (C2), one-key zone, full velocity, currently selected -->
+      <div class="zone selected"
+           style="--x: 17.0%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-yellow);">
+        <span class="zone__label">KICK</span>
+        <span class="zone__meta">C2 · +24st</span>
+      </div>
+      <!-- SNARE @ MIDI 38 (D2) -->
+      <div class="zone"
+           style="--x: 19.3%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-magenta);">
+        <span class="zone__label">SNARE</span>
+        <span class="zone__meta">D2</span>
+      </div>
+      <!-- HHC @ MIDI 42 (F#2) -->
+      <div class="zone"
+           style="--x: 23.8%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-cyan);">
+        <span class="zone__label">HHC</span>
+        <span class="zone__meta">F#2</span>
+      </div>
+      <!-- HHO @ MIDI 46 (A#2) -->
+      <div class="zone"
+           style="--x: 28.4%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-green);">
+        <span class="zone__label">HHO</span>
+        <span class="zone__meta">A#2</span>
+      </div>
+      <!-- TOM @ MIDI 48 (C3) -->
+      <div class="zone"
+           style="--x: 30.7%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-orange);">
+        <span class="zone__label">TOM</span>
+        <span class="zone__meta">C3</span>
+      </div>
+      <!-- 808 KICK @ MIDI 50 (D3), soft/loud split shown -->
+      <div class="zone"
+           style="--x: 33.0%; --w: 1.13%; --y-top: 0%; --y-bottom: 0%; --zone-bg: var(--rb-red);">
+        <span class="zone__label">808 KICK</span>
+        <span class="zone__meta">D3</span>
+      </div>
+      <!-- CLAP across F3..G3 (53..55), wider ranged zone, demonstrates ranged mode -->
+      <div class="zone"
+           style="--x: 36.4%; --w: 3.4%; --y-top: 0%; --y-bottom: 50%; --zone-bg: var(--rb-purple);">
+        <span class="zone__label">CLAP</span>
+        <span class="zone__meta">F3..G3 · soft</span>
+      </div>
+      <div class="zone"
+           style="--x: 36.4%; --w: 3.4%; --y-top: 50%; --y-bottom: 0%; --zone-bg: var(--rb-pink);">
+        <span class="zone__label">CLAP (loud)</span>
+        <span class="zone__meta">F3..G3 · vel ≥ 64</span>
+      </div>
+    </div>
+
+    <!-- Octave markers along the bottom of the grid. -->
+    <div class="keys-strip">
+      <span style="left: 3.4%">C0</span>
+      <span style="left: 17.0%">C2</span>
+      <span style="left: 30.7%">C3</span>
+      <span style="left: 44.3%">C4</span>
+      <span style="left: 58.0%">C5</span>
+      <span style="left: 71.6%">C6</span>
+      <span style="left: 85.2%">C7</span>
+    </div>
+
+    <!-- Piano keyboard strip. -->
+    <div class="kb-pad"></div>
+    <div class="keyboard">
+      <div class="keyboard__bg"></div>
+      <div class="keyboard__sharps" aria-hidden="true">
+        <!-- Hand-placed sharps; positions are illustrative. -->
+        <span style="left: 4.5%"></span><span style="left: 6.8%"></span>
+        <span style="left: 11.4%"></span><span style="left: 13.6%"></span><span style="left: 15.9%"></span>
+        <span style="left: 18.2%"></span><span style="left: 20.5%"></span>
+        <span style="left: 25.0%"></span><span style="left: 27.3%"></span><span style="left: 29.5%"></span>
+        <span style="left: 31.8%"></span><span style="left: 34.1%"></span>
+        <span style="left: 38.6%"></span><span style="left: 40.9%"></span><span style="left: 43.2%"></span>
+        <span style="left: 45.5%"></span><span style="left: 47.7%"></span>
+      </div>
+      <div class="keyboard__assigned">
+        <span style="left: 17.0%; width: 1.13%; --zone-bg: var(--rb-yellow);"></span>
+        <span style="left: 19.3%; width: 1.13%; --zone-bg: var(--rb-magenta);"></span>
+        <span style="left: 23.8%; width: 1.13%; --zone-bg: var(--rb-cyan);"></span>
+        <span style="left: 28.4%; width: 1.13%; --zone-bg: var(--rb-green);"></span>
+        <span style="left: 30.7%; width: 1.13%; --zone-bg: var(--rb-orange);"></span>
+        <span style="left: 33.0%; width: 1.13%; --zone-bg: var(--rb-red);"></span>
+        <span style="left: 36.4%; width: 3.4%; --zone-bg: var(--rb-purple);"></span>
+      </div>
+    </div>
+    <div class="kb-pad-r"></div>
+  </section>
+
+  <!-- Drag handle between canvas and properties. -->
+  <div class="splitter" role="separator" aria-orientation="horizontal" title="Drag to resize"></div>
+
+  <!-- Properties panel (selected: KICK keygroup).
+       Layout: Keygroup-level params + behavior toggles on the left,
+       then Soft layer and Loud layer side-by-side so both are visible
+       without scrolling. Envelopes / LFO / modulation routings live
+       on the Modulation tab. -->
+  <section class="properties">
+    <!-- Keygroup-level: zone mapping, MIDI routing, behavior toggles. -->
+    <div class="panel">
+      <div class="panel__title">Keygroup · selected</div>
+      <div class="row">
+        <label>Lower key</label>
+        <span class="field"><span class="stepper">−</span>C2 (36)<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Upper key</label>
+        <span class="field"><span class="stepper">−</span>C2 (36)<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Vel switch</label>
+        <span class="field"><span class="stepper">−</span>128<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>MIDI channel</label>
+        <span class="field"><span class="stepper">−</span>OMNI<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Voice out</label>
+        <span class="field">ALL ▾</span>
+      </div>
+
+      <hr class="panel__divider" />
+
+      <div class="panel__title">Behavior</div>
+      <!-- S950 per-keygroup flags. One-shot ignores note-off (drum hits
+           ring out), Const-pitch plays back at the sample's recorded
+           pitch regardless of which key triggers it (good for chromatic
+           kits where you don't want pitch tracking), Key-filter ties
+           filter cutoff to keyboard position. -->
+      <div class="toggle-row">
+        <button type="button" class="toggle on">One-shot</button>
+        <button type="button" class="toggle">Const-pitch</button>
+        <button type="button" class="toggle">Key-filter</button>
+      </div>
+    </div>
+
+    <!-- Soft layer: sample that plays below the velocity switch. -->
+    <div class="panel">
+      <div class="panel__title">
+        Soft layer <span class="panel__tag">vel &lt; 128</span>
+      </div>
+      <div class="layer-hint">plays at velocities below the switch</div>
+      <div class="row">
+        <label>Sample</label>
+        <span class="field field--yellow">KICK ▾</span>
+      </div>
+      <!-- Transpose combines the S950's coarse TRANSPOSE (±50 st) with
+           FINE (cents) into a single floating-point value — the integer
+           part is semitones, the decimal part is cents/100. -->
+      <div class="row">
+        <label>Transpose</label>
+        <span class="field"><span class="stepper">−</span>+24.00 st<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Filter</label>
+        <span class="field"><span class="stepper">−</span>99<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Loudness</label>
+        <span class="field"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+      </div>
+    </div>
+
+    <!-- Loud layer: sample that plays at or above the velocity switch.
+         Disabled until a second sample is bound to the zone. -->
+    <div class="panel">
+      <div class="panel__title">
+        Loud layer <span class="panel__tag panel__tag--muted">vel ≥ 128</span>
+      </div>
+      <div class="layer-hint">assign a sample to enable this layer</div>
+      <div class="row">
+        <label>Sample</label>
+        <span class="field">(none) ▾</span>
+      </div>
+      <div class="row">
+        <label>Transpose</label>
+        <span class="field is-disabled">+0.00 st</span>
+      </div>
+      <div class="row">
+        <label>Filter</label>
+        <span class="field is-disabled">—</span>
+      </div>
+      <div class="row">
+        <label>Loudness</label>
+        <span class="field is-disabled">—</span>
+      </div>
+    </div>
+
+    <!-- ===== Row 2: per-keygroup modulation =====
+         Amp env / Filter env / LFO & dynamics. These were originally on
+         a separate Modulation tab — folded in here since they belong to
+         the selected keygroup. Drag the splitter up to see them all. -->
+
+    <!-- Amp envelope: compact ADSR strip + curve preview. -->
+    <div class="panel">
+      <div class="panel__title">Amp envelope</div>
+      <div class="adsr-strip">
+        <div class="adsr-cell">A<span class="field">0</span></div>
+        <div class="adsr-cell">D<span class="field">80</span></div>
+        <div class="adsr-cell">S<span class="field">99</span></div>
+        <div class="adsr-cell">R<span class="field">30</span></div>
+      </div>
+      <div class="adsr">
+        <svg viewBox="0 0 200 50" preserveAspectRatio="none">
+          <path d="M 0 50 L 8 4 L 60 16 L 150 16 L 200 50"
+                fill="none" stroke="#FDF000" stroke-width="2"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Filter envelope: same compact strip pattern, cyan curve so the
+         two envelopes are distinguishable at a glance. Routing knobs
+         (env→VCF, key-track) live in the LFO & dynamics panel since
+         they're modulation, not envelope shape. -->
+    <div class="panel">
+      <div class="panel__title">Filter envelope</div>
+      <div class="adsr-strip">
+        <div class="adsr-cell">A<span class="field">20</span></div>
+        <div class="adsr-cell">D<span class="field">20</span></div>
+        <div class="adsr-cell">S<span class="field">20</span></div>
+        <div class="adsr-cell">R<span class="field">20</span></div>
+      </div>
+      <div class="adsr">
+        <svg viewBox="0 0 200 50" preserveAspectRatio="none">
+          <path d="M 0 50 L 18 10 L 70 24 L 150 24 L 200 50"
+                fill="none" stroke="#4AC9E3" stroke-width="2"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- LFO + velocity routing + warp.
+         Velocity mappings live in a 2-column compact grid since each is
+         just "source → target = value". Warp is collapsed to a single
+         amount knob (S950's vel-int / offset / recovery rolled into one
+         curve, per design discussion). -->
+    <div class="panel">
+      <div class="panel__title">LFO &amp; dynamics</div>
+
+      <div class="panel__subtitle">LFO</div>
+      <div class="row row--compact">
+        <label>Rate</label>
+        <span class="field field--xs"><span class="stepper">−</span>42<span class="stepper">+</span></span>
+      </div>
+      <div class="row row--compact">
+        <label>Depth</label>
+        <span class="field field--xs"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+      </div>
+      <!-- S950 calls this "BUILD TIME" — it's the LFO depth ramp-up
+           time from 0 to full after a note triggers (not a pre-delay
+           where the LFO sits silent then snaps in). "Fade in" is the
+           common synth term for the same behavior. -->
+      <div class="row row--compact">
+        <label>Fade in</label>
+        <span class="field field--xs"><span class="stepper">−</span>64<span class="stepper">+</span></span>
+      </div>
+      <div class="row row--compact">
+        <label>Mod-wheel → depth</label>
+        <span class="field field--xs"><span class="stepper">−</span>50<span class="stepper">+</span></span>
+      </div>
+      <div class="row row--compact">
+        <label>Aftertouch → depth</label>
+        <span class="field field--xs"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+      </div>
+
+      <div class="panel__subtitle">Filter routing</div>
+      <div class="row row--compact">
+        <label>Env → VCF</label>
+        <span class="field field--xs"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+      </div>
+      <div class="row row--compact">
+        <label>Key track</label>
+        <span class="field field--xs"><span class="stepper">−</span>50<span class="stepper">+</span></span>
+      </div>
+
+      <div class="panel__subtitle">Velocity routing</div>
+      <div class="vel-grid">
+        <div class="vel-row">→ filter <span class="field field--xs">10</span></div>
+        <div class="vel-row">→ loudness <span class="field field--xs">30</span></div>
+        <div class="vel-row">→ attack <span class="field field--xs">0</span></div>
+        <div class="vel-row">→ release <span class="field field--xs">0</span></div>
+      </div>
+
+      <div class="panel__subtitle">Pitch warp</div>
+      <div class="row row--compact">
+        <label>Amount</label>
+        <span class="field field--xs"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Status bar: a real grid row at the bottom of the app so hints
+       don't float over the properties panel. -->
+  <div class="statusbar">
+    <span class="statusbar__hint"><kbd>dblclick</kbd> new zone</span>
+    <span class="statusbar__hint"><kbd>drag</kbd> edges to resize</span>
+    <span class="statusbar__hint"><kbd>drop</kbd> wav / aiff to add sample</span>
+    <span class="statusbar__spacer"></span>
+    <span>Drum Kit mode · multi-drop will distribute one zone per file</span>
+  </div>
+</div>
+<script>
+  // Draggable splitter between the canvas and properties panel.
+  // Clamps so neither neighbor collapses; updates --props-h on .app.
+  (function () {
+    var app = document.querySelector('.app');
+    var splitter = document.querySelector('.splitter');
+    if (!app || !splitter) return;
+    var dragging = false;
+    var startY = 0;
+    var startH = 240;
+    var MIN_PROPS = 140;
+    var MIN_CANVAS = 220;
+
+    function currentPropsHeight() {
+      var v = getComputedStyle(app).getPropertyValue('--props-h').trim();
+      var n = parseFloat(v);
+      return isNaN(n) ? 240 : n;
+    }
+
+    splitter.addEventListener('mousedown', function (e) {
+      dragging = true;
+      startY = e.clientY;
+      startH = currentPropsHeight();
+      app.classList.add('is-resizing');
+      e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      var dy = startY - e.clientY;
+      var next = startH + dy;
+      var maxProps = window.innerHeight - 56 - 28 - 6 - MIN_CANVAS;
+      if (next < MIN_PROPS) next = MIN_PROPS;
+      if (next > maxProps) next = maxProps;
+      app.style.setProperty('--props-h', next + 'px');
+    });
+
+    window.addEventListener('mouseup', function () {
+      if (!dragging) return;
+      dragging = false;
+      app.classList.remove('is-resizing');
+    });
+  })();
+</script>
+</body>
+</html>

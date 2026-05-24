@@ -105,6 +105,12 @@ const (
 )
 
 // AKAI function codes (byte 3 of an AKAI exclusive message).
+//
+// TODO(delete-sample): the documented S900/S950 SysEx surface has no
+// delete-sample / delete-program opcode — the front-panel DELETE
+// functions appear to be local-only. Before exposing a Delete action
+// in the UI, check dxzl/akai-s950 for any undocumented opcode the
+// V2.0 spec doesn't list, and verify on hardware.
 const (
 	FuncRDRS  byte = 0  // request drum settings
 	FuncROVS  byte = 1  // request overall settings

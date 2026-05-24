@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>s950 · Sample (mockup)</title>
+<meta name="viewport" content="width=1400" />
+<!--
+  Static mockup of the Sample tab — the per-sample editor. The S950
+  exposes a sample as (1) the raw 12-bit audio data and (2) an SPRM
+  parameter block (name, loop points, replay mode, tune, loudness,
+  velocity-crossfade flag, reverse flag).
+
+  This page is dominated by the waveform display — the only place a
+  user can practically pick loop points. SPRM-tuning controls cluster
+  beneath. Audio replacement (import a wav, fetch from device) is the
+  device toolbar.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<!-- Shared shell + form controls + modal styles. See shared.css. -->
+<link rel="stylesheet" href="shared.css" />
+<style>
+  /* Page-specific styles only. Everything else lives in shared.css. */
+
+  /* Main pane: single-column stack of cards. */
+  .main {
+    grid-area: main;
+    overflow: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    background: var(--grey-light);
+  }
+
+  /* Identity strip — a single row of compact fields summarizing the
+     sample so the user always sees what they're editing. */
+  .identity {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+    gap: 14px;
+    align-items: center;
+  }
+  .identity__cell { display: flex; flex-direction: column; gap: 3px; }
+  .identity__cell > label {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: var(--grey-dark);
+  }
+  .identity__cell > .field { padding: 4px 8px; }
+
+  /* ---------- Waveform display ---------- */
+  .waveform {
+    position: relative;
+    height: 280px;
+    background: var(--canvas);
+    border: var(--bw) solid var(--black);
+    border-radius: var(--r);
+    overflow: hidden;
+  }
+  .waveform__svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  /* Center line — quiet reference. */
+  .waveform::before {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; top: 50%;
+    border-top: 1px dashed rgba(255,255,255,0.12);
+    pointer-events: none;
+  }
+
+  .waveform__overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  /* Loop region — translucent fill between loop-start and loop-end so
+     the loop is immediately visible as a band, not just two lines. */
+  .waveform__loop {
+    position: absolute;
+    top: 0; bottom: 18px;
+    left: var(--loop-start);
+    width: var(--loop-width);
+    background: color-mix(in srgb, var(--rb-cyan) 14%, transparent);
+    border-left: 1px solid var(--rb-cyan);
+    border-right: 1px solid var(--rb-cyan);
+  }
+  /* Pre-start / post-end dim — areas outside [start..end] are greyed
+     out so the active region pops. */
+  .waveform__inactive {
+    position: absolute;
+    top: 0; bottom: 18px;
+    background: rgba(0,0,0,0.55);
+  }
+  .waveform__inactive--pre  { left: 0; width: var(--start); }
+  .waveform__inactive--post { right: 0; width: calc(100% - var(--end)); }
+
+  /* Vertical marker lines (start, end, loop start, loop end). */
+  .marker {
+    position: absolute;
+    top: 0; bottom: 18px;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--marker-color, var(--rb-green));
+    pointer-events: auto;
+    cursor: ew-resize;
+  }
+  .marker--start { left: var(--start); --marker-color: var(--rb-green); }
+  .marker--end   { left: var(--end);   --marker-color: var(--rb-red); }
+  .marker--loop-start { left: var(--loop-start); --marker-color: var(--rb-cyan); }
+  .marker--loop-end   { left: calc(var(--loop-start) + var(--loop-width)); --marker-color: var(--rb-cyan); }
+  .marker__handle {
+    position: absolute;
+    top: 0;
+    background: var(--marker-color);
+    color: var(--black);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 0 0 3px 3px;
+    transform: translateX(-50%);
+    left: 1px;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: ew-resize;
+  }
+  .marker__handle--right { transform: translateX(calc(-100% + 1px)); }
+
+  /* Ruler at the bottom of the waveform — time markers. */
+  .waveform__ruler {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 18px;
+    background: rgba(0,0,0,0.55);
+    border-top: 1px solid var(--canvas-grid-strong);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--grey-medium);
+  }
+  .waveform__ruler span {
+    position: absolute;
+    top: 4px;
+    transform: translateX(-50%);
+  }
+  .waveform__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-top: 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--grey-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .waveform__legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch {
+    display: inline-block;
+    width: 12px; height: 3px;
+    background: var(--swatch);
+    border-radius: 1px;
+  }
+
+  /* Three-column grid for the cards below the waveform (markers,
+     playback, device). */
+  .controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* Vertical-stack action variant for the Device card — buttons fill
+     the column width and left-align so they read as a menu. */
+  .actions--stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .actions--stack .btn { text-align: left; }
+</style>
+</head>
+<!-- Modal shown by default in the static mockup so the component reads
+     at a glance. The script at the end of the file toggles the class. -->
+<body class="modal-open">
+<div class="app app--3row">
+
+  <!-- Top bar (shared shell with Program / Keygroup) -->
+  <header class="topbar">
+    <div class="logo">s950-tools</div>
+    <nav class="tabs">
+      <a class="tab" href="program.html">Program</a>
+      <a class="tab" href="keygroup.html">Keygroup</a>
+      <a class="tab active" href="sample.html">Sample</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="chip">
+      <span class="chip__label">MIDI in</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">
+      <span class="chip__label">MIDI out</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">Ch · 0 ▾</span>
+    <!-- Sample tab sync: SPRM parameter tweaks (loop points, tune,
+         loudness, mode flags) live-sync at ~400ms; replacing the raw
+         audio data triggers the blocking transfer modal. -->
+    <span class="chip chip--status"><span class="status-dot"></span>Synced</span>
+    <span class="chip accent">15 / 100 samples</span>
+  </header>
+
+  <!-- Samples sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar__head">
+      <div class="sidebar__title">Samples</div>
+      <div class="sidebar__count">15 / 100</div>
+    </div>
+    <div class="sample-list">
+      <div class="sample">
+        <span class="sample__slot">00</span>
+        <span class="sample__name">KICK</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample selected">
+        <span class="sample__slot">01</span>
+        <span class="sample__name">SNARE</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">02</span>
+        <span class="sample__name">RIM</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">03</span>
+        <span class="sample__name">CLAP</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">04</span>
+        <span class="sample__name">CONGA</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">05</span>
+        <span class="sample__name">808 KICK</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">06</span>
+        <span class="sample__name">808 TOM</span>
+        <span class="sample__rate">26k</span>
+      </div>
+      <div class="sample">
+        <span class="sample__slot">07</span>
+        <span class="sample__name">808 HHC</span>
+        <span class="sample__rate">26k</span>
+      </div>
+    </div>
+    <div class="dropzone-hint">
+      drag .wav / .aiff files here<br/>to replace this sample
+    </div>
+  </aside>
+
+  <!-- Main editor pane -->
+  <main class="main">
+
+    <!-- Identity strip — name + read-only stats. Sample rate / length /
+         nominal pitch come straight from the SPRM block. -->
+    <section class="card">
+      <div class="card__head">
+        <div class="card__title">Sample</div>
+        <div class="card__subtitle">slot 01 · SPRM block synced</div>
+      </div>
+      <div class="identity">
+        <div class="identity__cell">
+          <label>Name</label>
+          <span class="field field--wide field--yellow">
+            <input type="text" value="SNARE" maxlength="10" />
+          </span>
+        </div>
+        <div class="identity__cell">
+          <label>Slot</label>
+          <span class="field"><span class="stepper">−</span>01<span class="stepper">+</span></span>
+        </div>
+        <div class="identity__cell">
+          <label>Rate</label>
+          <span class="field">26.04 kHz</span>
+        </div>
+        <div class="identity__cell">
+          <label>Length</label>
+          <span class="field">12,400 words</span>
+        </div>
+        <div class="identity__cell">
+          <label>Nominal pitch</label>
+          <span class="field">C3 (960)</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Waveform card — the centerpiece. Markers are absolute-positioned
+         by CSS variables (--start, --end, --loop-start, --loop-width)
+         expressed as percentages of the strip, identical pattern to the
+         Keyzones canvas. -->
+    <section class="card">
+      <div class="card__head">
+        <div class="card__title">Waveform</div>
+        <div class="card__subtitle">drag markers to set start / end / loop · scroll to zoom</div>
+      </div>
+      <div class="waveform"
+           style="--start: 2%; --end: 96%; --loop-start: 35%; --loop-width: 23%;">
+        <svg class="waveform__svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
+          <!-- Top and bottom halves of the waveform are filled by JS on
+               load (see <script> below) — gives a realistic snare-like
+               decay envelope without hand-tweaking 200 control points. -->
+          <path id="wf-top" fill="#FDF000" />
+          <path id="wf-bot" fill="#FDF000" />
+        </svg>
+
+        <div class="waveform__overlay">
+          <!-- Dim the regions outside [start..end]. -->
+          <div class="waveform__inactive waveform__inactive--pre"></div>
+          <div class="waveform__inactive waveform__inactive--post"></div>
+          <!-- Loop region band. -->
+          <div class="waveform__loop"></div>
+          <!-- Markers with handle labels. -->
+          <div class="marker marker--start">
+            <span class="marker__handle">Start · 248</span>
+          </div>
+          <div class="marker marker--end">
+            <span class="marker__handle marker__handle--right">End · 11,904</span>
+          </div>
+          <div class="marker marker--loop-start">
+            <span class="marker__handle">Loop · 4,340</span>
+          </div>
+          <div class="marker marker--loop-end">
+            <span class="marker__handle marker__handle--right">7,192</span>
+          </div>
+
+          <div class="waveform__ruler">
+            <span style="left: 5%">0.05s</span>
+            <span style="left: 20%">0.10s</span>
+            <span style="left: 35%">0.17s</span>
+            <span style="left: 50%">0.24s</span>
+            <span style="left: 65%">0.30s</span>
+            <span style="left: 80%">0.36s</span>
+            <span style="left: 95%">0.42s</span>
+          </div>
+        </div>
+      </div>
+      <div class="waveform__legend">
+        <span><span class="legend-swatch" style="--swatch: var(--rb-green)"></span>Start</span>
+        <span><span class="legend-swatch" style="--swatch: var(--rb-red)"></span>End</span>
+        <span><span class="legend-swatch" style="--swatch: var(--rb-cyan)"></span>Loop region</span>
+        <span style="margin-left:auto;">26.04 kHz · 12,400 words · ~0.48 s</span>
+      </div>
+    </section>
+
+    <!-- Three columns: markers / playback / device actions. -->
+    <section class="controls">
+
+      <!-- Markers card. Numeric editing of the same four values shown
+           on the waveform — useful when the user wants to nudge by
+           exact sample counts rather than dragging. -->
+      <div class="card">
+        <div class="card__head">
+          <div class="card__title">Markers</div>
+          <div class="card__subtitle">in sample words</div>
+        </div>
+        <div class="row">
+          <label>Start</label>
+          <span class="field"><span class="stepper">−</span>248<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>End</label>
+          <span class="field"><span class="stepper">−</span>11,904<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>Loop start</label>
+          <span class="field"><span class="stepper">−</span>4,340<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>Loop length</label>
+          <span class="field"><span class="stepper">−</span>2,852<span class="stepper">+</span></span>
+        </div>
+      </div>
+
+      <!-- Playback card: mode + per-sample tune + loudness offset +
+           reverse + velocity-crossfade flag. -->
+      <div class="card">
+        <div class="card__head">
+          <div class="card__title">Playback</div>
+          <div class="card__subtitle">SPRM replay flags</div>
+        </div>
+        <div class="row">
+          <label>Mode</label>
+          <span class="seg">
+            <button type="button">One-shot</button>
+            <button type="button" class="on">Loop</button>
+            <button type="button">Alt</button>
+          </span>
+        </div>
+        <div class="row">
+          <label>Reverse</label>
+          <button type="button" class="toggle">Off</button>
+        </div>
+        <div class="row">
+          <label>Vel x-fade</label>
+          <button type="button" class="toggle">Off</button>
+        </div>
+
+        <hr class="panel__divider" />
+
+        <div class="row">
+          <label>Tune</label>
+          <span class="field"><span class="stepper">−</span>+0.00 st<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>Loudness</label>
+          <span class="field"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+        </div>
+      </div>
+
+      <!-- Device & file actions. Import / replace triggers the same
+           blocking transfer modal pattern as the Program tab. -->
+      <div class="card">
+        <div class="card__head">
+          <div class="card__title">Device &amp; file</div>
+          <div class="card__subtitle">MRCC Port 03 · slot 01</div>
+        </div>
+        <div class="actions actions--stack">
+          <!-- Long transfers (audio data) trigger the blocking modal.
+               SPRM I/O is fast (120 bytes) — no modal needed for those. -->
+          <button type="button" class="btn btn--primary" data-modal-open="upload">Import .wav / .aiff…</button>
+          <button type="button" class="btn" data-modal-open="download">Replace from S950</button>
+          <button type="button" class="btn" data-modal-open="download">Download .wav…</button>
+          <hr class="panel__divider" />
+          <button type="button" class="btn">Send SPRM to S950</button>
+          <button type="button" class="btn">Get SPRM from S950</button>
+          <!-- TODO: device-side Delete is omitted until we confirm the
+               protocol supports it. AKAI-exclusive function codes 0–11
+               (see internal/protocol/messages.go) don't include a delete
+               operation; the S950's front-panel DELETE SAMPLE / PROGRAM
+               functions may not be exposed over SysEx. Investigate
+               dxzl/akai-s950 for any undocumented opcode before adding
+               this button back. -->
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Status bar -->
+  <div class="statusbar">
+    <span class="statusbar__hint"><kbd>drag</kbd> marker to nudge</span>
+    <span class="statusbar__hint"><kbd>scroll</kbd> zoom waveform</span>
+    <span class="statusbar__hint"><kbd>space</kbd> preview</span>
+    <span class="statusbar__hint"><kbd>⌘↵</kbd> send to s950</span>
+    <span class="statusbar__spacer"></span>
+    <span>SNARE · slot 01 · loop on · 12,400 words</span>
+  </div>
+</div>
+
+<!-- Transfer modal — same component as the Program tab. Sample-flavored
+     content: a single-sample audio upload, with per-block ACK progress
+     (S950 acks every 60-word block in closed-loop mode). The activity
+     log includes a warning row to demo the slot-collision case where
+     the device NAKs and the UI offers a fallback. -->
+<div class="modal-backdrop" role="dialog" aria-modal="true">
+  <div class="modal">
+    <header class="modal__head">
+      <h2 class="modal__title">Uploading <strong>SNARE</strong> to S950</h2>
+      <div class="modal__route">MRCC Port 03 · Ch 0 · slot 01</div>
+    </header>
+    <div class="modal__body">
+      <div class="modal__step">
+        Sample data · block 104 of 207
+        <strong>SNARE → slot 01 (6,240 / 12,400 words)</strong>
+      </div>
+      <div class="progress">
+        <div class="progress__bar" style="width: 50%;"></div>
+        <div class="progress__label">50%</div>
+      </div>
+      <div class="modal__times">
+        <span>Elapsed 0m 32s</span>
+        <span>~0m 32s remaining</span>
+      </div>
+      <div class="log">
+        <div class="log__row ok">✓ Connected to S950 on MRCC Port 03</div>
+        <div class="log__row warn">⚠ Slot 01 occupied (OLD SNARE) — overwriting</div>
+        <div class="log__row ok">✓ Sample header accepted (ACK)</div>
+        <div class="log__row run">▶ Sending blocks 1–207 · ACK 103/207</div>
+        <div class="log__row pending">· SPRM update pending</div>
+      </div>
+    </div>
+    <footer class="modal__foot">
+      <button type="button" class="btn" data-modal-close>Cancel transfer</button>
+    </footer>
+  </div>
+</div>
+
+<script>
+  // Modal open/close (same shape as program.html — extract to a shared
+  // component in the real build).
+  (function () {
+    var body = document.body;
+    document.querySelectorAll('[data-modal-open]').forEach(function (b) {
+      b.addEventListener('click', function () { body.classList.add('modal-open'); });
+    });
+    document.querySelectorAll('[data-modal-close]').forEach(function (b) {
+      b.addEventListener('click', function () { body.classList.remove('modal-open'); });
+    });
+  })();
+
+  // Generate a snare-like waveform path on load. Two filled paths
+  // (top half and bottom half mirrored) produce the classic audio
+  // waveform look. Decay envelope = exp(-3.5 * t), randomly jittered
+  // per slice so it doesn't look perfectly synthetic.
+  (function () {
+    var N = 280;
+    var top = ['M 0,100'];
+    var bot = ['M 0,100'];
+    var seed = 0x9E37; // simple LCG for repeatability across reloads
+    function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    for (var i = 1; i <= N; i++) {
+      var t = i / N;
+      var envelope = 92 * Math.exp(-3.2 * t);
+      // Bias upward at the very front for the transient
+      if (t < 0.04) envelope *= (1 + (0.04 - t) * 8);
+      var jitter = 0.35 + 0.65 * rnd();
+      var amp = envelope * jitter;
+      var x = (i / N) * 1000;
+      top.push('L ' + x.toFixed(1) + ',' + (100 - amp).toFixed(1));
+      bot.push('L ' + x.toFixed(1) + ',' + (100 + amp).toFixed(1));
+    }
+    top.push('L 1000,100 Z');
+    bot.push('L 1000,100 Z');
+    document.getElementById('wf-top').setAttribute('d', top.join(' '));
+    document.getElementById('wf-bot').setAttribute('d', bot.join(' '));
+  })();
+</script>
+</body>
+</html>

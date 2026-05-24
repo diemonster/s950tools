@@ -1,4 +1,4 @@
-// Command s950 is a CLI for talking to an Akai S900/S950 sampler over MIDI.
+// Command s950-tools is a CLI for talking to an Akai S900/S950 sampler over MIDI.
 package main
 
 import (
@@ -31,10 +31,10 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "s950",
+		Use:   "s950-tools",
 		Short: "Akai S900/S950 sampler MIDI control CLI",
-		Long: "s950 is a command-line tool for managing samples and parameters on an\n" +
-			"Akai S900/S950 sampler over a standard MIDI connection.",
+		Long: "s950-tools is a command-line tool for managing samples and parameters on\n" +
+			"an Akai S900/S950 sampler over a standard MIDI connection.",
 		SilenceUsage: true,
 	}
 

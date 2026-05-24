@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>s950 · Program (mockup)</title>
+<meta name="viewport" content="width=1400" />
+<!--
+  Static mockup of the Program tab — the entry-level view of a bank.
+  Lets the user pick a program from the bank, edit program-level
+  fields (name, slot, MIDI program change, key tilt, positional
+  crossfade), see a one-line summary of each keygroup, and run
+  device I/O (get/send/open/save).
+
+  Shares the same shell (topbar, sidebar, statusbar, palette) as
+  the Keyzones mockup so navigating between them feels continuous.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<!-- Shared shell + form controls + modal styles. See shared.css. -->
+<link rel="stylesheet" href="shared.css" />
+<style>
+  /* Page-specific styles only. Everything else lives in shared.css. */
+
+  /* Main pane: single-column stack of cards. */
+  .main {
+    grid-area: main;
+    overflow: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    background: var(--grey-light);
+  }
+  /* The identity card is form-heavy and doesn't need 1100px of width —
+     constrain it so labels stay close to fields. */
+  .card--form { max-width: 560px; }
+
+  /* Keygroup overview table — the table itself is unique to this page,
+     reusing the shared .card frame and form colors. */
+  .kg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .kg-table th, .kg-table td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--grey-light);
+  }
+  .kg-table th {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+    color: var(--grey-dark);
+    border-bottom: var(--bw) solid var(--black);
+  }
+  .kg-table td.mono { font-family: var(--font-mono); font-size: 12px; }
+  .kg-table tr:hover td { background: var(--grey-light); }
+  .kg-swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    border: 1px solid var(--black);
+    margin-right: 6px;
+    vertical-align: -1px;
+  }
+  .kg-link {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--black);
+    text-decoration: none;
+    border: 1px solid var(--black);
+    border-radius: 3px;
+    padding: 2px 8px;
+    background: var(--white);
+  }
+  .kg-link:hover { background: var(--rb-yellow); }
+
+  /* Horizontal device-action toolbar — three button groups separated
+     by thin rules, plus a trailing sync hint. */
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .actions__group { display: inline-flex; gap: 6px; }
+  .actions__sep {
+    width: 1px;
+    height: 24px;
+    background: var(--grey-medium);
+    margin: 0 4px;
+  }
+  .hint {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--grey-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* "Advanced" disclosure — buries the rare key-tilt + positional
+     crossfade knobs inside the Program card. */
+  details.advanced { margin-top: 8px; }
+  details.advanced summary {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+    color: var(--grey-dark);
+    cursor: pointer;
+    list-style: none;
+    padding: 6px 0;
+    border-top: 1px solid var(--grey-light);
+  }
+  details.advanced summary::after { content: " ▸"; }
+  details.advanced[open] summary::after { content: " ▾"; }
+</style>
+</head>
+<!-- Modal visible by default in the static mockup so the design reads
+     at a glance. The script below toggles `modal-open` on real clicks. -->
+<body class="modal-open">
+<div class="app app--3row">
+
+  <!-- Top bar (shared across tabs) -->
+  <header class="topbar">
+    <div class="logo">s950-tools</div>
+    <nav class="tabs">
+      <a class="tab active" href="program.html">Program</a>
+      <a class="tab" href="keygroup.html">Keygroup</a>
+      <a class="tab" href="sample.html">Sample</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="chip">
+      <span class="chip__label">MIDI in</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">
+      <span class="chip__label">MIDI out</span>
+      <strong>MRCC Port 03 ▾</strong>
+    </span>
+    <span class="chip">Ch · 0 ▾</span>
+    <!-- Program-tab sync: explicit Send commits the whole program +
+         optional sample uploads. Orange dot = local edits pending. -->
+    <span class="chip chip--status chip--dirty"><span class="status-dot"></span>Unsaved</span>
+    <span class="chip accent">3 / 100 programs</span>
+  </header>
+
+  <!-- Program browser -->
+  <aside class="sidebar">
+    <div class="sidebar__head">
+      <div class="sidebar__title">Programs</div>
+      <div class="sidebar__count">3 / 100</div>
+    </div>
+    <div class="program-list">
+      <div class="program selected">
+        <span class="program__slot">02</span>
+        <span class="program__name">EX KIT</span>
+        <span class="program__kg">7 kg</span>
+      </div>
+      <div class="program">
+        <span class="program__slot">05</span>
+        <span class="program__name">PIANO</span>
+        <span class="program__kg">16 kg</span>
+      </div>
+      <div class="program">
+        <span class="program__slot">12</span>
+        <span class="program__name">BASS</span>
+        <span class="program__kg">4 kg</span>
+      </div>
+    </div>
+    <div class="dropzone-hint">
+      drop .json program file here<br/>or click + to create
+    </div>
+  </aside>
+
+  <!-- Main editor pane -->
+  <main class="main">
+
+    <!-- Program identity / global settings.
+         Tilt and positional-xfade are obscure tweaks (most users never
+         touch them) — buried in an Advanced disclosure to keep the
+         main form focused. -->
+    <section class="card card--form">
+      <div class="card__head">
+        <div class="card__title">Program</div>
+        <div class="card__subtitle">slot 02 · 7 keygroups</div>
+      </div>
+
+      <div class="row">
+        <label>Name</label>
+        <span class="field field--wide field--yellow">
+          <input type="text" value="EX KIT" maxlength="12" />
+        </span>
+      </div>
+      <div class="row">
+        <label>Slot</label>
+        <span class="field"><span class="stepper">−</span>02<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>MIDI prog #</label>
+        <span class="field"><span class="stepper">−</span>001<span class="stepper">+</span></span>
+      </div>
+      <div class="row">
+        <label>Respond to PC</label>
+        <button type="button" class="toggle on">Enabled</button>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="row">
+          <label>Key tilt</label>
+          <span class="field"><span class="stepper">−</span>0<span class="stepper">+</span></span>
+        </div>
+        <div class="row">
+          <label>Positional xfade</label>
+          <button type="button" class="toggle">Off</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- Keygroup overview table -->
+    <section class="card">
+      <div class="card__head">
+        <div class="card__title">Keygroups (7)</div>
+        <div class="card__subtitle">jump into Keyzones to edit a row</div>
+      </div>
+
+      <table class="kg-table">
+        <thead>
+          <tr>
+            <th style="width: 36px;">#</th>
+            <th style="width: 140px;">Range</th>
+            <th style="width: 100px;">Vel switch</th>
+            <th>Soft sample</th>
+            <th>Loud sample</th>
+            <th style="width: 90px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">1</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-yellow)"></span>C2</td>
+            <td class="mono">128</td>
+            <td>KICK</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">2</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-magenta)"></span>D2</td>
+            <td class="mono">128</td>
+            <td>SNARE</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">3</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-cyan)"></span>F#2</td>
+            <td class="mono">128</td>
+            <td>HHC</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">4</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-green)"></span>A#2</td>
+            <td class="mono">128</td>
+            <td>HHO</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">5</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-orange)"></span>C3</td>
+            <td class="mono">128</td>
+            <td>TOM</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">6</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-red)"></span>D3</td>
+            <td class="mono">128</td>
+            <td>808 KICK</td>
+            <td style="color: var(--grey-medium);">(none)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+          <tr>
+            <td class="mono">7</td>
+            <td class="mono"><span class="kg-swatch" style="background: var(--rb-purple)"></span>F3 — G3</td>
+            <td class="mono">64</td>
+            <td>CLAP</td>
+            <td>CLAP (loud)</td>
+            <td><a class="kg-link" href="keygroup.html">Edit ↗</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Device I/O toolbar — grouped so destructive (Send) is visually
+         separated from local file ops. Get/Send open a blocking modal
+         with progress, since closed-loop SysEx transfers can take
+         minutes and require per-block ACKs. -->
+    <section class="card">
+      <div class="card__head">
+        <div class="card__title">Device</div>
+        <div class="card__subtitle">MRCC Port 03 · Ch 0</div>
+      </div>
+      <div class="actions">
+        <div class="actions__group">
+          <button class="btn" data-modal-open="get">Get from S950</button>
+          <button class="btn btn--primary" data-modal-open="send">Send to S950</button>
+        </div>
+        <div class="actions__sep"></div>
+        <div class="actions__group">
+          <button class="btn">Open .json…</button>
+          <button class="btn">Save .json…</button>
+        </div>
+        <div class="actions__sep"></div>
+        <div class="actions__group">
+          <button class="btn">New program</button>
+          <button class="btn">Duplicate</button>
+        </div>
+        <span class="hint">last synced 2 min ago</span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Pre-flight modal — runs before any long transfer. Catches the
+       sampler-crashing cases (slot collisions, length/rate out of
+       range, full memory) on the client side so we never hand the
+       S950 something it'll NAK or hang on. Visible by default in the
+       mockup; real app opens it on Send/Get click. Continue advances
+       to the transfer modal (see sample.html for the in-flight state).
+  -->
+  <div class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">Ready to send <strong>EX KIT</strong></h2>
+        <div class="modal__route">MRCC Port 03 · Ch 0</div>
+      </header>
+      <div class="modal__body">
+        <ul class="preflight">
+          <li class="preflight__item preflight__item--ok">
+            <span class="preflight__icon">✓</span>
+            <div class="preflight__body">
+              <span class="preflight__title">Connection</span>
+              <span class="preflight__detail">MRCC Port 03 · S950 responded to catalog request</span>
+            </div>
+          </li>
+          <li class="preflight__item preflight__item--ok">
+            <span class="preflight__icon">✓</span>
+            <div class="preflight__body">
+              <span class="preflight__title">Keygroup count</span>
+              <span class="preflight__detail">7 keygroups · max 31</span>
+            </div>
+          </li>
+          <li class="preflight__item preflight__item--ok">
+            <span class="preflight__icon">✓</span>
+            <div class="preflight__body">
+              <span class="preflight__title">Free sample memory</span>
+              <span class="preflight__detail">52,400 / 475,020 words needed · 422,620 free after upload</span>
+            </div>
+          </li>
+          <li class="preflight__item preflight__item--warn">
+            <span class="preflight__icon">⚠</span>
+            <div class="preflight__body">
+              <span class="preflight__title">Slot 02 occupied (OLD KIT)</span>
+              <span class="preflight__detail">Overwriting will replace the existing program on the device.</span>
+              <div class="preflight__action">
+                <button type="button" class="btn">Overwrite</button>
+                <button type="button" class="btn">Use slot 07 (empty)</button>
+              </div>
+            </div>
+          </li>
+          <li class="preflight__item preflight__item--warn">
+            <span class="preflight__icon">⚠</span>
+            <div class="preflight__body">
+              <span class="preflight__title">Sample KICK referenced elsewhere</span>
+              <span class="preflight__detail">PIANO (slot 05) uses this sample. Overwriting it will change PIANO's sound.</span>
+            </div>
+          </li>
+        </ul>
+        <div class="preflight__estimate">
+          Estimated transfer: 4 samples · ~3m 04s
+        </div>
+      </div>
+      <footer class="modal__foot">
+        <button type="button" class="btn" data-modal-close>Cancel</button>
+        <button type="button" class="btn btn--primary">Continue ▶</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div class="statusbar">
+    <span class="statusbar__hint"><kbd>↵</kbd> edit name</span>
+    <span class="statusbar__hint"><kbd>⌘S</kbd> save .json</span>
+    <span class="statusbar__hint"><kbd>⌘↵</kbd> send to s950</span>
+    <span class="statusbar__spacer"></span>
+    <span>Program slot 02 · 7 / 31 keygroups used</span>
+  </div>
+</div>
+<script>
+  // Modal open/close — Get/Send buttons trigger the transfer overlay,
+  // Cancel dismisses it. The data-modal-open value (get|send) could
+  // swap modal content; the mockup shows the send scenario.
+  (function () {
+    var body = document.body;
+    document.querySelectorAll('[data-modal-open]').forEach(function (b) {
+      b.addEventListener('click', function () { body.classList.add('modal-open'); });
+    });
+    document.querySelectorAll('[data-modal-close]').forEach(function (b) {
+      b.addEventListener('click', function () { body.classList.remove('modal-open'); });
+    });
+  })();
+</script>
+</body>
+</html>

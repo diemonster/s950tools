@@ -1,4 +1,4 @@
-# s950
+# s950-tools
 
 A small Go CLI for managing samples and programs on an Akai S900/S950 sampler
 over MIDI SysEx. It reads the device catalog, fetches sample/program data,
@@ -8,7 +8,7 @@ up to 31 keygroups) from a JSON manifest.
 ## Install / build
 
 ```bash
-go build ./cmd/s950
+go build ./cmd/s950-tools
 ```
 
 The build needs a working C toolchain (the MIDI driver wraps RtMidi via cgo).
@@ -52,10 +52,10 @@ All commands share these global flags:
 ### Typical session
 
 ```bash
-s950 ports
-s950 --out "MRCC Port 03" catalog
-s950 --out "MRCC Port 03" put-sample --rate sp1200 kick.wav
-s950 --out "MRCC Port 03" put-program kit.json --slot 2
+s950-tools ports
+s950-tools --out "MRCC Port 03" catalog
+s950-tools --out "MRCC Port 03" put-sample --rate sp1200 kick.wav
+s950-tools --out "MRCC Port 03" put-program kit.json --slot 2
 ```
 
 ### Program JSON template
@@ -68,10 +68,10 @@ starting point — copy it next to your audio files, adjust `lower_key` /
 `upper_key` / `soft_sample` / `soft_tune` per zone, then upload:
 
 ```bash
-s950 --out "MRCC Port 03" put-program examples/program.json --slot 2
+s950-tools --out "MRCC Port 03" put-program examples/program.json --slot 2
 ```
 
-If you'd rather start from a blank-but-correct skeleton, `s950
+If you'd rather start from a blank-but-correct skeleton, `s950-tools
 program-template --keygroups N -o new.json` emits the same shape with default
 field values and empty sample names. The `_raw_header_hex` and
 `_raw_bytes_hex` fields preserve undocumented bytes from the S950 protocol —
@@ -102,7 +102,7 @@ The project is organized as follows:
 - [internal/device/](internal/device/) — high-level device operations
   (`Catalog`, `GetProgram`, `SetProgram`, `GetParams`, `SetParams`,
   `PutSampleOpenLoop`, slot-picking, NAK collection).
-- [cmd/s950/](cmd/s950/) — the cobra CLI that wires it all together.
+- [cmd/s950-tools/](cmd/s950-tools/) — the cobra CLI that wires it all together.
 
 ## References
 
