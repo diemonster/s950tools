@@ -3,7 +3,11 @@
   import Statusbar from '../lib/Statusbar.svelte';
   import NumField from '../lib/NumField.svelte';
   import { setSync } from '../lib/sync';
-  import { samples, selectedSampleSlot, selectedSample, newLocalSample, pickFreeSlot, type Sample } from '../lib/state/samples';
+  import {
+    samples, selectedSampleSlot, selectedSample,
+    newLocalSample, pickFreeSlot, removeLocalSample,
+    type Sample,
+  } from '../lib/state/samples';
   import {
     slicing,
     updateSlicing,
@@ -22,6 +26,7 @@
   } from '../lib/state/slicing';
   import { ensureSampleLoaded } from '../lib/state/catalog';
   import * as preview from '../lib/preview';
+  import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
   // Wails bindings — regenerated on `wails dev` boot. The new
@@ -50,7 +55,7 @@
   // path === '' opens the native file picker; a non-empty path
   // (drag-and-drop) imports that file directly.
   async function importSample(path = '') {
-    setSync('sending', 'Importing…');
+    setSync('sending', 'Importing...');
     try {
       const info = await (App as any).ImportSample(path);
       if (!info) {
@@ -172,7 +177,7 @@
   // currently selected sample. Fast (~50ms), no modal needed.
   async function getSPRMFromDevice() {
     const slot = get(selectedSampleSlot);
-    setSync('sending', 'Fetching…');
+    setSync('sending', 'Fetching...');
     try {
       await ensureSampleLoaded(slot, true);
       setSync('synced', 'Synced');
@@ -644,7 +649,10 @@
   }
 
   function onWaveformWheel(e: WheelEvent) {
-    if (!$slicing.active) return;
+    // Zoom is useful in both modes: slicing needs it to place slices
+    // precisely; the default Markers view benefits when nudging
+    // Start/End/Loop on long samples. The slicing store still owns
+    // the zoom state per-sample either way.
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.25 : 1 / 1.25;
     const newZoom = Math.max(1, Math.min(40, $slicing.zoom * factor));
@@ -707,37 +715,19 @@
   }
 
   // ---------- Waveform path generation ----------
-  // Seeded LCG so the path is stable across re-renders for the same
-  // sample — re-generated per slot change so different samples look
-  // different. Filled top + bottom give the classic mirrored shape.
-  let wfTop = '';
-  let wfBot = '';
-  function regenWaveform(slot: number) {
-    let seed = (0x9E37 ^ slot * 0x1ABC) >>> 0;
-    const rnd = () => {
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      return seed / 0x7fffffff;
-    };
-    const N = 280;
-    const top: string[] = ['M 0,100'];
-    const bot: string[] = ['M 0,100'];
-    for (let i = 1; i <= N; i++) {
-      const t = i / N;
-      let env = 92 * Math.exp(-3.2 * t);
-      if (t < 0.04) env *= (1 + (0.04 - t) * 8);
-      const jit = 0.35 + 0.65 * rnd();
-      const amp = env * jit;
-      const x = (i / N) * 1000;
-      top.push(`L ${x.toFixed(1)},${(100 - amp).toFixed(1)}`);
-      bot.push(`L ${x.toFixed(1)},${(100 + amp).toFixed(1)}`);
-    }
-    top.push('L 1000,100 Z');
-    bot.push('L 1000,100 Z');
-    wfTop = top.join(' ');
-    wfBot = bot.join(' ');
-  }
-  // Regenerate when the selected sample changes.
-  $: regenWaveform($selectedSampleSlot);
+  // When the sample has imported audio (`smp.pcm` populated by
+  // ImportSample), draw a real min/max peak envelope across the
+  // visible window. When PCM isn't loaded (a catalog entry from the
+  // device that wasn't host-imported), fall back to a slot-seeded
+  // synthetic shape so the canvas still has something to render.
+  //
+  // Re-runs whenever the slot, the audio, or the zoom window
+  // changes — peak aggregation is re-computed against the visible
+  // sample range each time, so zooming in actually shows finer
+  // detail instead of stretching the same coarse path.
+  $: ({ top: wfTop, bot: wfBot } = (smp.pcm && smp.pcm.length > 0)
+    ? buildWaveformPaths(smp.pcm, viewStart, visibleN)
+    : buildSyntheticPaths(smp.slot));
 
   // Ruler ticks every ~70ms across the waveform.
   // Ruler step picks the smallest "nice" interval that keeps the
@@ -799,11 +789,19 @@
           <span class="sample__slot">{s.slot.toString().padStart(2, '0')}</span>
           <span class="sample__name">{s.name || '(unnamed)'}</span>
           {#if s.source === 'local'}
-            <!-- LOCAL tag for un-uploaded imports. Sits in the same
-                 column as the rate so device samples still show kHz
-                 — the two never apply at the same time (locals always
-                 have a known rate but the tag is more important info). -->
+            <!-- LOCAL tag + close button for un-uploaded imports.
+                 Sits in the same column as the rate so device
+                 samples still show kHz — the two never apply at the
+                 same time (locals always have a known rate but the
+                 tag is more important info). Delete is local-only
+                 since the S950 has no remote-delete SysEx opcode. -->
             <span class="sample__tag sample__tag--local" title="Imported but not yet on the S950">LOCAL</span>
+            <button
+              type="button"
+              class="sample__del"
+              title="Remove this local sample (does not touch the S950)"
+              aria-label={`Remove local sample ${s.name || s.slot}`}
+              on:click|stopPropagation={() => removeLocalSample(s.slot)}>×</button>
           {:else}
             <span class="sample__rate">{Math.round(s.rate / 1000)}k</span>
           {/if}
@@ -847,7 +845,7 @@
           or connect to an S950 to pull its sample catalog.
         </p>
         <button type="button" class="btn btn--primary" on:click={() => importSample()}>
-          Import .wav / .aiff…
+          Import .wav / .aiff...
         </button>
       </div>
     {:else}
@@ -944,16 +942,19 @@
                 <button type="button" class={!$slicing.snapToZero ? 'on' : ''} on:click={() => updateSlicing({ snapToZero: false })}>Off</button>
               </span>
             </div>
-            <div class="slice-tools__group">
-              <span class="slice-tools__label">zoom</span>
-              <span class="seg">
-                <button type="button" class={$slicing.zoom === 1 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 1 })}>1×</button>
-                <button type="button" class={$slicing.zoom === 2 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 2 })}>2×</button>
-                <button type="button" class={$slicing.zoom === 4 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 4 })}>4×</button>
-                <button type="button" class={$slicing.zoom === 8 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 8 })}>8×</button>
-              </span>
-            </div>
           {/if}
+          <!-- Zoom segment lives outside the slicing-only block so it
+               also works in the default Markers view — useful when
+               nudging Start/End/Loop on long samples. -->
+          <div class="slice-tools__group">
+            <span class="slice-tools__label">zoom</span>
+            <span class="seg">
+              <button type="button" class={$slicing.zoom === 1 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 1 })}>1×</button>
+              <button type="button" class={$slicing.zoom === 2 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 2 })}>2×</button>
+              <button type="button" class={$slicing.zoom === 4 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 4 })}>4×</button>
+              <button type="button" class={$slicing.zoom === 8 ? 'on' : ''}  on:click={() => updateSlicing({ zoom: 8 })}>8×</button>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -1069,17 +1070,18 @@
                 <span class="slice-marker__line"></span>
               </div>
             {/each}
+          {/if}
 
-            <!-- Hover cursor. Shows where the next click would drop a
-                 slice (Manual mode) and is the anchor for wheel zoom.
-                 Hidden when the mouse isn't over the waveform. -->
-            {#if cursorRatio !== null}
-              <div class="waveform__cursor" style="left: {cursorRatio * 100}%;">
-                <span class="waveform__cursor__badge">
-                  {cursorWord?.toLocaleString()}{$slicing.zoom > 1 ? ` · ${Math.round($slicing.zoom * 100)}%` : ''}
-                </span>
-              </div>
-            {/if}
+          <!-- Hover cursor. In slicing mode shows where the next
+               click would drop a slice; in default mode it's the
+               zoom anchor + word-position readout. Hidden when the
+               mouse isn't over the waveform. -->
+          {#if cursorRatio !== null}
+            <div class="waveform__cursor" style="left: {cursorRatio * 100}%;">
+              <span class="waveform__cursor__badge">
+                {cursorWord?.toLocaleString()}{$slicing.zoom > 1 ? ` · ${Math.round($slicing.zoom * 100)}%` : ''}
+              </span>
+            </div>
           {/if}
 
           <div class="waveform__ruler">
@@ -1090,11 +1092,13 @@
         </div>
       </div>
       <div class="waveform__legend">
-        <!-- Synthetic preview indicator: the squiggle is JS-generated
-             from the slot index (stable across re-renders), not real
-             audio. SPRM metadata IS accurate — markers, loop region,
-             reverse direction are real device values. -->
-        <span class="waveform__preview-tag">preview · synthetic waveform</span>
+        <!-- When PCM is loaded we render a real peak envelope; when
+             only the SPRM metadata is known (catalog entry, not yet
+             host-imported) we fall back to a synthetic squiggle so
+             the canvas isn't empty. The tag tells the user which. -->
+        <span class="waveform__preview-tag">
+          {smp.pcm && smp.pcm.length > 0 ? 'waveform · imported audio' : 'preview · synthetic waveform'}
+        </span>
         {#if $slicing.active}
           <span><span class="legend-swatch" style="--swatch: var(--rb-yellow)"></span>Slice</span>
           <span><span class="legend-swatch" style="--swatch: var(--rb-magenta)"></span>Selected</span>
@@ -1338,9 +1342,9 @@
             </button>
             <hr class="panel__divider" />
           {/if}
-          <button type="button" class="btn btn--primary" on:click={() => importSample()}>Import .wav / .aiff…</button>
+          <button type="button" class="btn btn--primary" on:click={() => importSample()}>Import .wav / .aiff...</button>
           <button type="button" class="btn" on:click={openTransfer}>Replace from S950</button>
-          <button type="button" class="btn" on:click={openTransfer}>Download .wav…</button>
+          <button type="button" class="btn" on:click={openTransfer}>Download .wav...</button>
           <hr class="panel__divider" />
           <button type="button" class="btn">Send SPRM to S950</button>
           <button type="button" class="btn" on:click={getSPRMFromDevice}>Get SPRM from S950</button>
@@ -1422,7 +1426,7 @@
 
       <div class="modal__body">
         {#if slicePhase === 'inspecting'}
-          <div class="modal__step">Checking device catalog…</div>
+          <div class="modal__step">Checking device catalog...</div>
         {:else if slicePhase === 'preflight' && slicePreflight}
           <ul class="preflight">
             <li class="preflight__item preflight__item--ok">
@@ -1436,7 +1440,7 @@
               <span class="preflight__icon">✓</span>
               <div class="preflight__body">
                 <span class="preflight__title">Slot allocation</span>
-                <span class="preflight__detail">samples → slots {slicePreflight.sampleSlots?.[0]}…{slicePreflight.sampleSlots?.[slicePreflight.sampleSlots.length - 1]} · program → slot {String(slicePreflight.programSlot).padStart(2, '0')}</span>
+                <span class="preflight__detail">samples → slots {slicePreflight.sampleSlots?.[0]}...{slicePreflight.sampleSlots?.[slicePreflight.sampleSlots.length - 1]} · program → slot {String(slicePreflight.programSlot).padStart(2, '0')}</span>
               </div>
             </li>
             {#each (slicePreflight.errors ?? []) as err}
@@ -1464,7 +1468,7 @@
         {:else if slicePhase === 'applying' || slicePhase === 'done'}
           <div class="modal__step">
             {sliceProgress?.phase === 'uploading_program' ? 'Building program' : sliceProgress?.phase === 'done' ? 'Complete' : 'Uploading slices'}
-            <strong>{sliceProgress?.message ?? 'Starting…'}</strong>
+            <strong>{sliceProgress?.message ?? 'Starting...'}</strong>
           </div>
           <div class="progress">
             <div class="progress__bar" style="width: {sliceProgress?.percent ?? 0}%;"></div>
@@ -1479,7 +1483,7 @@
                 <div class="log__row pending">Slice {sliceProgress.sliceIndex + 1} of {sliceProgress.totalSlices}</div>
               {/if}
             {:else}
-              <div class="log__row pending">· Connecting…</div>
+              <div class="log__row pending">· Connecting...</div>
             {/if}
           </div>
         {:else if slicePhase === 'error'}

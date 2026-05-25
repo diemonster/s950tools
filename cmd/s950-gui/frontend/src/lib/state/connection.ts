@@ -16,17 +16,49 @@ export type Status = { connected: boolean; in?: string; out?: string; channel: n
 // edits haven't been Sent yet.
 export type LinkPhase = 'unknown' | 'disconnected' | 'connecting' | 'connected' | 'error';
 
+// ---------- Persistence ----------
+// MIDI picks survive app restarts via localStorage so the user
+// isn't forced to repick the same interface on every launch. Same
+// pattern as theme.ts: read on init, mirror on every change.
+// If the saved port name doesn't exist anymore (user unplugged a
+// device), the select shows blank — better than auto-connecting to
+// the wrong interface.
+const KEY_IN      = 's950-tools.midi-in';
+const KEY_OUT     = 's950-tools.midi-out';
+const KEY_CHANNEL = 's950-tools.midi-channel';
+
+function readString(key: string): string {
+  if (typeof localStorage === 'undefined') return '';
+  return localStorage.getItem(key) ?? '';
+}
+function readChannel(): number {
+  if (typeof localStorage === 'undefined') return 0;
+  const raw = parseInt(localStorage.getItem(KEY_CHANNEL) ?? '', 10);
+  return Number.isInteger(raw) && raw >= 0 && raw <= 15 ? raw : 0;
+}
+function writeKey(key: string, value: string) {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(key, value);
+}
+
 export const inputPorts  = writable<Port[]>([]);
 export const outputPorts = writable<Port[]>([]);
 // User's current picks. Empty string until they choose; if empty on
 // Connect, the backend's `transport.Open` substring-matches against
 // the first available port.
-export const selectedIn  = writable<string>('');
-export const selectedOut = writable<string>('');
-export const channel     = writable<number>(0);
+export const selectedIn  = writable<string>(readString(KEY_IN));
+export const selectedOut = writable<string>(readString(KEY_OUT));
+export const channel     = writable<number>(readChannel());
 export const phase       = writable<LinkPhase>('unknown');
 export const status      = writable<Status>({ connected: false, channel: 0 });
 export const linkError   = writable<string>('');
+
+// Mirror every change back to localStorage. Subscribers run
+// synchronously, including the initial fire on subscribe — that's
+// fine, it just re-writes the value we just read.
+selectedIn.subscribe ((v) => writeKey(KEY_IN,      v));
+selectedOut.subscribe((v) => writeKey(KEY_OUT,     v));
+channel.subscribe    ((v) => writeKey(KEY_CHANNEL, String(v)));
 
 // refreshPorts enumerates available MIDI in/out ports from the
 // backend (which wraps rtmidi). Called on app mount and after a

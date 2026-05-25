@@ -6,6 +6,7 @@ import {
   selectedSample,
   newLocalSample,
   pickFreeSlot,
+  removeLocalSample,
   type Sample,
 } from './samples';
 
@@ -85,5 +86,65 @@ describe('selectedSample', () => {
     const list = get(samples);
     expect(list[0].name).toBe('A');
     expect(list[1].name).toBe('B2');
+  });
+});
+
+describe('removeLocalSample', () => {
+  // Convenience: a sample marked as living on the device. removeLocal
+  // must refuse to touch these — the S950 has no remote-delete
+  // SysEx, so dropping a row would silently disagree with the catalog.
+  const deviceSample = (slot: number, name: string): Sample => ({
+    ...newLocalSample(slot, name, 26040, 100),
+    source: 'device',
+  });
+
+  it('removes a local sample and reports true', () => {
+    samples.set([newLocalSample(0, 'A'), newLocalSample(1, 'B')]);
+    expect(removeLocalSample(0)).toBe(true);
+    const slots = get(samples).map((s) => s.slot);
+    expect(slots).toEqual([1]);
+  });
+
+  it('refuses to remove a device sample', () => {
+    samples.set([deviceSample(0, 'A')]);
+    expect(removeLocalSample(0)).toBe(false);
+    expect(get(samples)).toHaveLength(1);
+  });
+
+  it('returns false for an unknown slot', () => {
+    samples.set([newLocalSample(0, 'A')]);
+    expect(removeLocalSample(99)).toBe(false);
+    expect(get(samples)).toHaveLength(1);
+  });
+
+  it('moves selection forward when deleting the active row', () => {
+    samples.set([newLocalSample(0, 'A'), newLocalSample(1, 'B'), newLocalSample(2, 'C')]);
+    selectedSampleSlot.set(1);
+    removeLocalSample(1);
+    // Index 1 was B; remaining list is [A, C] — selection lands on
+    // whatever is at index 1 of the new list (C).
+    expect(get(selectedSampleSlot)).toBe(2);
+  });
+
+  it('falls back to the previous row when deleting the last entry', () => {
+    samples.set([newLocalSample(0, 'A'), newLocalSample(1, 'B')]);
+    selectedSampleSlot.set(1);
+    removeLocalSample(1);
+    expect(get(selectedSampleSlot)).toBe(0);
+  });
+
+  it('leaves selection on slot 0 when the list ends up empty', () => {
+    samples.set([newLocalSample(7, 'only')]);
+    selectedSampleSlot.set(7);
+    removeLocalSample(7);
+    expect(get(samples)).toHaveLength(0);
+    expect(get(selectedSampleSlot)).toBe(0);
+  });
+
+  it('does not move selection when deleting a non-active row', () => {
+    samples.set([newLocalSample(0, 'A'), newLocalSample(1, 'B')]);
+    selectedSampleSlot.set(0);
+    removeLocalSample(1);
+    expect(get(selectedSampleSlot)).toBe(0);
   });
 });

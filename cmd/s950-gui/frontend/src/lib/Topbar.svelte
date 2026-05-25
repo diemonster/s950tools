@@ -29,7 +29,7 @@
   // problems dominate (no point showing "Unsaved" when the device is
   // gone). When the device is fine, the edit-state dot takes over.
   $: statusChipLabel = (() => {
-    if ($phase === 'connecting')   return 'Connecting…';
+    if ($phase === 'connecting')   return 'Connecting...';
     if ($phase === 'error')        return 'Conn. error';
     if ($phase !== 'connected')    return 'Offline';
     return $sync.label;
@@ -105,7 +105,7 @@
       class="chip chip--btn chip--btn-primary"
       disabled={$phase === 'connecting'}
       on:click={connect}>
-      {$phase === 'connecting' ? 'Connecting…' : 'Connect'}
+      {$phase === 'connecting' ? 'Connecting...' : 'Connect'}
     </button>
   {/if}
 

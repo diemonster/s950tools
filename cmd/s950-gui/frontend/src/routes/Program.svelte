@@ -36,7 +36,7 @@
   // state.
   async function getFromDevice() {
     const slot = get(selectedSlot);
-    setSync('sending', 'Fetching…');
+    setSync('sending', 'Fetching...');
     try {
       await ensureProgramLoaded(slot, true);
       setSync('synced', 'Synced');
@@ -281,8 +281,8 @@
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">
-          <button type="button" class="btn">Open .json…</button>
-          <button type="button" class="btn">Save .json…</button>
+          <button type="button" class="btn">Open .json...</button>
+          <button type="button" class="btn">Save .json...</button>
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">

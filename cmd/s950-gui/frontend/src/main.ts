@@ -7,6 +7,18 @@
   document.documentElement.dataset.theme = t === 'party' ? 'party' : 'business';
 }
 
+// Suppress the browser-level context menu (which exposes the dev
+// inspector in `wails dev` builds). Wails already disables it in
+// production via `EnableDefaultContextMenu: false`, but in dev the
+// "Inspect" entry shows through and looks unprofessional during
+// demos. Exempt text inputs so users can still right-click them for
+// the OS-native copy / paste menu.
+window.addEventListener('contextmenu', (e) => {
+  const t = e.target as HTMLElement | null;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+});
+
 // Global stylesheet — palette, shell, form controls, modal. Page-
 // specific styles live in each .svelte component's <style> block.
 import './shared.css';

@@ -84,6 +84,34 @@ export function pickFreeSlot(list: Sample[]): number {
   return -1;
 }
 
+// removeLocalSample drops a row from the samples store. Refuses to
+// touch source: 'device' rows because the S950 has no remote-delete
+// SysEx opcode — dropping it from the sidebar would silently
+// disagree with the device's catalog. Returns true if the row was
+// removed, false otherwise.
+//
+// If the deleted slot was the active selection, advances to the
+// next still-present row (or the previous one, or unselected if the
+// list ends up empty).
+export function removeLocalSample(slot: number): boolean {
+  const list = get(samples);
+  const idx = list.findIndex((s) => s.slot === slot);
+  if (idx < 0) return false;
+  if (list[idx].source !== 'local') return false;
+
+  const remaining = list.filter((_, i) => i !== idx);
+  samples.set(remaining);
+  if (get(selectedSampleSlot) === slot) {
+    if (remaining.length === 0) {
+      selectedSampleSlot.set(0);
+    } else {
+      const next = remaining[Math.min(idx, remaining.length - 1)];
+      selectedSampleSlot.set(next.slot);
+    }
+  }
+  return true;
+}
+
 export const samples = writable<Sample[]>([]);
 // Default to slot 0 so the sidebar selection survives between an
 // empty start and the first import.

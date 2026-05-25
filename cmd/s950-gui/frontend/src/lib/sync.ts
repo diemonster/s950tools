@@ -22,7 +22,7 @@ function defaultLabel(state: SyncState): string {
   switch (state) {
     case 'synced':  return 'Synced';
     case 'dirty':   return 'Unsaved';
-    case 'sending': return 'Sending…';
+    case 'sending': return 'Sending...';
     case 'error':   return 'Sync error';
   }
 }

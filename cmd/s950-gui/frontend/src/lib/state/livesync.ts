@@ -39,7 +39,7 @@ function isConnected(): boolean {
 export function scheduleProgramWriteback(slot: number) {
   if (!isConnected()) return;
   programPendingSlot = slot;
-  setSync('dirty', 'Editing…');
+  setSync('dirty', 'Editing...');
   if (programTimer) clearTimeout(programTimer);
   programTimer = setTimeout(flushProgramWriteback, DEBOUNCE_MS);
 }
@@ -60,7 +60,7 @@ export async function flushProgramWriteback() {
   const p = get(programs).find((x) => x.slot === slot);
   if (!p) return;
 
-  setSync('sending', 'Sending…');
+  setSync('sending', 'Sending...');
   try {
     await App.SetProgram(slot, programToJSON(p));
     setSync('synced', 'Synced');
@@ -75,7 +75,7 @@ export async function flushProgramWriteback() {
 export function scheduleSampleWriteback(slot: number) {
   if (!isConnected()) return;
   samplePendingSlot = slot;
-  setSync('dirty', 'Editing…');
+  setSync('dirty', 'Editing...');
   if (sampleTimer) clearTimeout(sampleTimer);
   sampleTimer = setTimeout(flushSampleWriteback, DEBOUNCE_MS);
 }
@@ -92,7 +92,7 @@ export async function flushSampleWriteback() {
   const s = get(samples).find((x) => x.slot === slot);
   if (!s) return;
 
-  setSync('sending', 'Sending…');
+  setSync('sending', 'Sending...');
   try {
     await App.SetSampleParams(slot, sampleToParams(s));
     setSync('synced', 'Synced');
