@@ -79,7 +79,7 @@ describe('Sample tab — empty state', () => {
     const { getByText, container } = render(Sample);
     expect(getByText(/No samples loaded/i)).toBeTruthy();
     // The drop-target affordance carries the Wails CSS property.
-    const empty = container.querySelector('.sample-empty');
+    const empty = container.querySelector('.empty-state');
     expect(empty?.getAttribute('style')).toContain('--wails-drop-target');
     cleanup();
   });

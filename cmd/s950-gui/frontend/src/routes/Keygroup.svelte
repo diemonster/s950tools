@@ -271,20 +271,21 @@
   <!-- 2D zone canvas. When no program/keygroup is loaded (fresh app,
        no Connect, no New) we show a CTA that points the user back to
        the Program tab — the keygroup editor has nothing to operate on
-       without a program. The splitter + properties panel are hidden
-       below for the same reason. -->
+       without a program. The empty-state spans the canvas + splitter
+       + properties rows so it gets a full-width panel rather than
+       being squeezed into the canvas grid's narrow first cell. -->
   {#if !hasKeygroup}
-    <section class="canvas">
-      <div class="sample-empty">
-        <div class="sample-empty__title">No keygroup selected</div>
-        <p class="sample-empty__hint">
+    <div class="kg-empty">
+      <div class="empty-state">
+        <div class="empty-state__title">No keygroup selected</div>
+        <p class="empty-state__hint">
           A keygroup belongs to a program. Pick or create a program first.
         </p>
         <button type="button" class="btn btn--primary" on:click={() => navigate('program')}>
           Go to Program tab
         </button>
       </div>
-    </section>
+    </div>
   {:else}
   <section class="canvas">
     <div class="canvas__head">
@@ -648,6 +649,20 @@
   .sidebar :global(.sample) { cursor: grab; }
 
   /* ---------- Canvas ---------- */
+  /* Empty-state wrapper. The .app--canvas grid has canvas / splitter /
+     properties as three separate rows in the right column; when no
+     keygroup is selected we want the CTA panel to fill all three so
+     it doesn't get cramped into the narrow canvas row. The wrapper
+     starts at the canvas row and stretches through the properties
+     row, in the second column only (sidebar keeps its area). */
+  .kg-empty {
+    grid-column: 2 / 3;
+    grid-row: 2 / 5;
+    padding: 16px;
+    background: var(--grey-light);
+    display: flex;
+  }
+
   .canvas {
     grid-area: canvas;
     background: var(--canvas);
@@ -685,7 +700,7 @@
     background: transparent;
     cursor: pointer;
   }
-  .head-chip.on { background: var(--rb-yellow); color: var(--black); border-color: var(--rb-yellow); }
+  .head-chip.on { background: var(--rb-yellow); color: var(--ink); border-color: var(--rb-yellow); }
 
   .y-axis {
     display: flex;
@@ -785,7 +800,7 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--white);
+    color: var(--paper);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -945,7 +960,7 @@
   }
   /* Subtle "(KICK)" sample tag next to layer headings. */
   .panel__title .panel__tag {
-    color: var(--black);
+    color: var(--ink);
     background: var(--rb-yellow);
     border: 1px solid var(--black);
     border-radius: 3px;

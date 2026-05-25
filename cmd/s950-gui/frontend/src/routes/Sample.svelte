@@ -835,14 +835,14 @@
            connected, no imports). The whole panel acts as a drop
            target, so a single drag-and-drop creates the first row
            without the user having to think about slot assignment. -->
-      <div class="sample-empty"
+      <div class="empty-state"
         class:is-dragging={isDragging}
         style="--wails-drop-target: drop;"
         on:dragenter={onDragEnter}
         on:dragleave={onDragLeave}
         on:dragover={onDragOver}>
-        <div class="sample-empty__title">No samples loaded</div>
-        <p class="sample-empty__hint">
+        <div class="empty-state__title">No samples loaded</div>
+        <p class="empty-state__hint">
           Drop a <strong>.wav</strong> or <strong>.aif</strong> file anywhere on this panel,
           or connect to an S950 to pull its sample catalog.
         </p>
@@ -1567,7 +1567,7 @@
     border: 1px solid var(--black);
     border-radius: var(--r);
     background: var(--rb-yellow);
-    color: var(--black);
+    color: var(--ink);
     font-size: 12px;
     cursor: pointer;
     padding: 0;
@@ -1575,50 +1575,16 @@
     align-items: center;
     justify-content: center;
   }
-  .identity__play:hover:not([disabled]) { background: var(--rb-magenta); color: var(--white); }
+  .identity__play:hover:not([disabled]) { background: var(--rb-magenta); color: var(--paper); }
   .identity__play[disabled] {
     background: var(--grey-light);
     color: var(--grey-medium);
     cursor: not-allowed;
   }
-  /* Empty-state panel shown when no samples are loaded. Centred CTA,
-     dashed border to mirror the dropzone-hint affordance — the whole
-     thing is a drop target, so dragging anywhere on it imports. */
-  .sample-empty {
-    flex: 1 1 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
-    padding: 40px 24px;
-    margin: 0;
-    background: var(--white);
-    border: dashed var(--bw) var(--grey-medium);
-    border-radius: var(--r);
-    color: var(--grey-dark);
-    transition: background 120ms, border-color 120ms, color 120ms;
-  }
-  .sample-empty.is-dragging {
-    border-color: var(--rb-yellow);
-    background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
-    color: var(--black);
-  }
-  .sample-empty__title {
-    font-family: var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--black);
-  }
-  .sample-empty__hint {
-    margin: 0;
-    text-align: center;
-    max-width: 360px;
-    font-size: 13px;
-    line-height: 1.45;
-  }
+  /* Sample-tab specific empty-state styling is now in shared.css as
+     .empty-state so Program + Keygroup tabs match. The drag-over
+     `.is-dragging` class still drives the yellow-tinted hover
+     feedback used by the file-drop affordance. */
 
   /* Source dot + tag inside the identity Slot field. The dot tracks
      the sync state at a glance; the tag spells it out for users who
@@ -1897,7 +1863,7 @@
     left: 0;
     transform: translateX(-50%);
     background: var(--rb-yellow);
-    color: var(--black);
+    color: var(--ink);
     font-family: var(--font-mono);
     font-size: 9px;
     font-weight: 700;
@@ -1918,8 +1884,8 @@
   .slice-marker:hover .slice-marker__line { background: rgba(255, 255, 255, 0.6); }
   .slice-marker.is-selected .slice-marker__head {
     background: var(--rb-magenta);
-    color: var(--white);
-    border-color: var(--white);
+    color: var(--paper);
+    border-color: var(--paper);
   }
   .slice-marker.is-selected .slice-marker__line {
     background: var(--rb-magenta);
@@ -2016,7 +1982,7 @@
     left: 3px;
     bottom: 4px;
     background: var(--rb-cyan);
-    color: var(--black);
+    color: var(--ink);
     font-family: var(--font-mono);
     font-size: 9px;
     padding: 1px 5px;
@@ -2053,8 +2019,8 @@
   }
   .slice-list__row + .slice-list__row { border-top: 1px solid var(--grey-light); }
   .slice-list__row:hover { background: var(--grey-light); }
-  .slice-list__row.is-selected { background: var(--rb-yellow); }
-  .slice-list__row.is-selected .slice-list__loop { color: var(--black); }
+  .slice-list__row.is-selected { background: var(--rb-yellow); color: var(--ink); }
+  .slice-list__row.is-selected .slice-list__loop { color: var(--ink); }
   .slice-list__num { font-weight: 700; color: var(--grey-dark); }
   .slice-list__loop { color: var(--grey-dark); font-size: 10px; }
   .slice-list__play {
@@ -2070,7 +2036,7 @@
     cursor: pointer;
     padding: 0;
   }
-  .slice-list__play:hover:not([disabled]) { background: var(--rb-yellow); }
+  .slice-list__play:hover:not([disabled]) { background: var(--rb-yellow); color: var(--ink); }
   .slice-list__play[disabled] {
     background: var(--grey-light);
     color: var(--grey-medium);

@@ -29,6 +29,39 @@
   --r: 5px;
   --font-sans: "Space Grotesk", "Antique Olive", Helvetica, sans-serif;
   --font-mono: "Space Mono", "Automate OT", ui-monospace, monospace;
+
+  /* Fixed-tone tokens that survive the party-mode swap. Use these on
+   * any element with a saturated rainbow background — those need a
+   * dark/light text colour regardless of which theme is active.
+   * (`--black`/`--white` invert between themes; these don't.) */
+  --ink:   #212121;
+  --paper: #FFFFFF;
+}
+
+/* ---------- Party Mode ----------
+ * Surface-level color swap, not a dark-mode inversion. The neutral
+ * tokens (--black, --white, --grey-*) stay put so text + card
+ * chrome remain legible; we only repaint the structural surfaces:
+ * the main work area becomes yellow, the sidebar becomes green, and
+ * the top/bottom bars become black with light text — same palette
+ * relationship as the website's party mode. */
+html[data-theme="party"] .main,
+html[data-theme="party"] .kg-empty  { background: var(--rb-yellow); }
+html[data-theme="party"] .sidebar   { background: var(--rb-green); }
+html[data-theme="party"] .topbar    { background: var(--ink); }
+html[data-theme="party"] .statusbar { background: var(--ink); color: var(--paper); }
+/* On the dark statusbar, the kbd pill still pops thanks to its own
+   light BG. The default `--grey-light` for the pill itself works in
+   both modes; only its grey-dark-on-grey-light hint label needs
+   nudging so it's readable next to white status text. */
+html[data-theme="party"] .statusbar__hint { color: var(--paper); }
+html[data-theme="party"] .statusbar kbd  { color: var(--ink); }
+/* Sidebar dropzone hint sits on a green sidebar in party mode; the
+   default dashed grey loses contrast on green, so swap to black
+   chrome which reads cleanly on the green. */
+html[data-theme="party"] .dropzone-hint {
+  border-color: var(--ink);
+  color: var(--ink);
 }
 
 * { box-sizing: border-box; }
@@ -97,16 +130,28 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 14px;
-  border: var(--bw) solid var(--black);
+  border: var(--bw) solid var(--ink);
   border-radius: var(--r);
   padding: 4px 10px;
-  background: var(--black);
+  /* Pinned to the fixed ink/yellow combo regardless of theme — the
+     brand identity reads the same in party + business modes, like a
+     band T-shirt that doesn't change colour with the lighting. */
+  background: var(--ink);
   color: var(--rb-yellow);
   /* Tight topbars shouldn't wrap the brand to two lines or squeeze it
      to half-width — the chrome looks broken when it happens. */
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* Theme-toggle variant of the logo. The base .logo styles cover
+   typography + colours; this modifier only adds the interactive cues
+   (cursor, hover lift). */
+.logo--toggle { cursor: pointer; transition: transform 100ms ease, box-shadow 100ms ease; }
+.logo--toggle:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 0 var(--rb-magenta);
+}
+.logo--toggle:active { transform: translateY(0); box-shadow: none; }
 .tabs { display: flex; gap: 4px; margin-left: 24px; }
 .tab {
   font-family: var(--font-mono);
@@ -122,7 +167,7 @@ body {
   text-decoration: none;
   display: inline-block;
 }
-.tab.active { background: var(--rb-yellow); }
+.tab.active { background: var(--rb-yellow); color: var(--ink); }
 .tab[disabled],
 .tab.is-disabled {
   color: var(--grey-medium);
@@ -144,8 +189,8 @@ body {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.chip.on { background: var(--black); color: var(--rb-yellow); }
-.chip.accent { background: var(--rb-magenta); color: var(--white); }
+.chip.on { background: var(--rb-yellow); color: var(--ink); }
+.chip.accent { background: var(--rb-magenta); color: var(--paper); }
 .chip__label { color: var(--grey-dark); margin-right: 4px; }
 /* The "programs / samples" suffix on the slot count chip — hidden in
    the tight media query so the chip stays a fixed count and never
@@ -267,7 +312,11 @@ body {
   font-size: 13px;
 }
 .sample:hover, .program:hover { background: var(--grey-light); border-color: var(--black); }
-.sample.selected, .program.selected { background: var(--rb-yellow); border-color: var(--black); }
+.sample.selected, .program.selected {
+  background: var(--rb-yellow);
+  border-color: var(--black);
+  color: var(--ink);
+}
 .sample__slot, .program__slot {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -302,8 +351,48 @@ body {
 }
 .sample__tag--local {
   background: var(--rb-orange);
+  color: var(--ink);
+}
+/* Shared empty-state panel — the dashed-border CTA that replaces
+   the editor when a tab has nothing to operate on. Used by Sample,
+   Program, and Keygroup so the affordance reads the same across
+   tabs. Lives at file scope so .svelte components can apply it
+   without unscoping global selectors. */
+.empty-state {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 40px 24px;
+  margin: 0;
+  background: var(--white);
+  border: dashed var(--bw) var(--grey-medium);
+  border-radius: var(--r);
+  color: var(--grey-dark);
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.empty-state.is-dragging {
+  border-color: var(--rb-yellow);
+  background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
   color: var(--black);
 }
+.empty-state__title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--black);
+}
+.empty-state__hint {
+  font-size: 13px;
+  text-align: center;
+  margin: 0;
+  max-width: 420px;
+}
+
 /* Sidebar empty state — shown when the samples list is genuinely
    empty (no connect, no imports). Sits inside the scrolling list
    container so the dropzone-hint stays visible below it. */
@@ -326,24 +415,22 @@ body {
   font-style: italic;
   transition: background 120ms, border-color 120ms, color 120ms;
 }
-/* Hover state while a file is being dragged over (anywhere with
-   .is-dragging). Yellow border + tinted background mirrors the
-   slice-marker highlight palette so the "accepted" affordance is
-   consistent across the app. */
-.dropzone-hint.is-dragging,
-.waveform-card.is-dragging {
+/* Hover state while a file is being dragged over an opted-in drop
+   target. Yellow border + tinted BG mirrors the slice-marker
+   highlight palette so the "accepted" affordance reads the same
+   across the app. */
+.dropzone-hint.is-dragging {
   border-color: var(--rb-yellow);
   background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
-}
-.dropzone-hint.is-dragging {
   color: var(--black);
   font-style: normal;
   font-weight: 600;
 }
 .waveform-card.is-dragging {
   /* The waveform card already has its own border via .card; switching
-     just the colour keeps the layout stable (no border-width shift). */
+     to an inset shadow keeps layout stable (no border-width shift). */
   box-shadow: inset 0 0 0 2px var(--rb-yellow);
+  background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
   transition: box-shadow 120ms, background 120ms;
 }
 
@@ -386,8 +473,6 @@ body {
   padding: 4px 0;
   font-size: 13px;
 }
-.row label,
-.row .row__label,
 .row__label {
   font-family: var(--font-mono);
   text-transform: uppercase;
@@ -407,8 +492,8 @@ body {
   background: var(--grey-light);
 }
 .field--wide { width: 100%; }
-.field--yellow { background: var(--rb-yellow); }
-.field--cyan { background: var(--rb-cyan); }
+.field--yellow { background: var(--rb-yellow); color: var(--ink); }
+.field--yellow input { color: var(--ink); }
 .field.is-disabled {
   color: var(--grey-medium);
   border-color: var(--grey-medium);
@@ -446,7 +531,7 @@ body {
   color: var(--black);
   cursor: pointer;
 }
-.toggle.on { background: var(--black); color: var(--rb-yellow); }
+.toggle.on { background: var(--rb-yellow); color: var(--ink); }
 .seg {
   display: inline-flex;
   border: var(--bw) solid var(--black);
@@ -466,7 +551,7 @@ body {
   cursor: pointer;
 }
 .seg button:last-child { border-right: none; }
-.seg button.on { background: var(--black); color: var(--rb-yellow); }
+.seg button.on { background: var(--rb-yellow); color: var(--ink); }
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -481,7 +566,7 @@ body {
   color: var(--black);
   cursor: pointer;
 }
-.btn--primary { background: var(--rb-yellow); color: var(--black); }
+.btn--primary { background: var(--rb-yellow); color: var(--ink); }
 .btn--dark    { background: var(--black); color: var(--white); }
 .btn--danger  { background: var(--white); color: var(--rb-red); border-color: var(--rb-red); }
 .btn[disabled],
@@ -598,7 +683,7 @@ body.modal-open .modal-backdrop { display: flex; }
 }
 .log {
   background: var(--canvas);
-  color: #DDDDDD;
+  color: var(--canvas-text);
   font-family: var(--font-mono);
   font-size: 11px;
   padding: 10px 12px;

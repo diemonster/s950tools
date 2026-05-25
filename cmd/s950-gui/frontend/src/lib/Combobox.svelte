@@ -158,7 +158,7 @@
     border-radius: 3px;
   }
   .combobox__menu li:hover { background: var(--grey-light); }
-  .combobox__menu li.selected { background: var(--rb-yellow); }
+  .combobox__menu li.selected { background: var(--rb-yellow); color: var(--ink); }
   .combobox__none {
     color: var(--grey-dark);
     font-style: italic;

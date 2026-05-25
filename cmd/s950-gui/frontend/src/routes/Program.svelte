@@ -125,9 +125,9 @@
        so the user sees what to do first. -->
   <main class="main">
     {#if !hasProgram}
-      <div class="sample-empty">
-        <div class="sample-empty__title">No programs yet</div>
-        <p class="sample-empty__hint">
+      <div class="empty-state">
+        <div class="empty-state__title">No programs yet</div>
+        <p class="empty-state__hint">
           Connect to your S950 to load its program catalog, or start a
           new program from scratch.
         </p>
@@ -416,6 +416,9 @@
     background: var(--grey-light);
     min-height: 0;
   }
+  /* Empty-state spans the whole grid so the dashed CTA panel fills
+     the work area instead of getting squeezed into the first cell. */
+  .main > .empty-state { grid-column: 1 / -1; grid-row: 1 / -1; }
   .top-form     { grid-column: 1; grid-row: 1; }
   .preview      { grid-column: 2; grid-row: 1; }
   .kg-card      { grid-column: 1 / -1; grid-row: 2; min-height: 0; }
@@ -511,7 +514,7 @@
     background: var(--white);
     cursor: pointer;
   }
-  .kg-link:hover { background: var(--rb-yellow); }
+  .kg-link:hover { background: var(--rb-yellow); color: var(--ink); }
 
   .actions {
     display: flex;

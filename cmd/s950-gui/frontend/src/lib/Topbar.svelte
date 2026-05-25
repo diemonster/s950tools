@@ -7,6 +7,7 @@
     phase, linkError,
     refreshPorts, refreshStatus, connect, disconnect,
   } from './state/connection';
+  import { theme, toggleTheme } from './state/theme';
 
   // Page-specific slot count. `slotCount` is the loud part (e.g.
   // "3 / 100") and `slotNoun` is the descriptor ("programs", "samples")
@@ -47,7 +48,17 @@
 </script>
 
 <header class="topbar">
-  <div class="logo">s950-tools</div>
+  <!-- The brand chip doubles as a theme toggle: clicking flips the
+       `data-theme` attribute on <html> between 'business' (default
+       light palette) and 'party' (dark palette + rainbow accents).
+       Pure CSS swap of the --black/--white/--grey-* tokens; no
+       per-component changes needed. -->
+  <button
+    type="button"
+    class="logo logo--toggle"
+    on:click={toggleTheme}
+    title={$theme === 'party' ? 'Switch to Business Mode' : 'Switch to Party Mode'}
+    aria-label="Toggle theme">s950-tools</button>
   <nav class="tabs">
     <button class={tabClass('program')}  on:click={() => navigate('program')}>Program</button>
     <button class={tabClass('keygroup')} on:click={() => navigate('keygroup')}>Keygroup</button>
@@ -156,10 +167,11 @@
   }
   :global(.chip--btn:hover):not(:disabled) {
     background: var(--rb-yellow);
+    color: var(--ink);
   }
   :global(.chip--btn-primary) {
     background: var(--rb-yellow);
-    color: var(--black);
+    color: var(--ink);
   }
   :global(.chip--btn:disabled) {
     color: var(--grey-medium);
