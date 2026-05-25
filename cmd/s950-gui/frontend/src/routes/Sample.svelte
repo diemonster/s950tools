@@ -19,15 +19,107 @@
     type SliceLoopMode,
     type Division,
   } from '../lib/state/slicing';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  // Wails bindings — regenerated on `wails dev` boot. The new
+  // slicing methods land here after the Go side compiles.
+  import * as App from '../../wailsjs/go/main/App';
+  import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
 
   onMount(() => setSync('synced', 'Synced'));
 
   // ---------- Modal flow ----------
+  // Two parallel modals: the stub one (Get/Send/Replace/etc. — not
+  // wired yet) and the real Apply-slicing flow (Inspect → Preflight
+  // → Apply → Transfer with live progress events).
   type ModalKind = 'closed' | 'transfer';
   let modalKind: ModalKind = 'closed';
   function openTransfer() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
+
+  // ---------- Apply Slicing ----------
+  type SlicePhase = 'idle' | 'inspecting' | 'preflight' | 'applying' | 'done' | 'error';
+  let slicePhase: SlicePhase = 'idle';
+  let slicePreflight: any | null = null;
+  let sliceProgress: any | null = null;
+  let sliceError = '';
+  let sliceUnsub: (() => void) | null = null;
+
+  function buildSlicingRequest() {
+    // TODO: real source words come from the WAV import flow. For now
+    // the frontend sends a zero-filled buffer of the displayed sample
+    // length — enough to exercise the IPC + state machine end-to-end
+    // until Import is wired. Slices' loop fields are passed through
+    // as-is.
+    const sourceWords = new Array(smp.length).fill(0);
+    return {
+      sourceWords,
+      sourceRateHz: smp.rate,
+      slices: $slicing.slices.map((sl) => ({
+        name: '', // Apply auto-generates "{base}_NN" when name is empty
+        startWord: sl.start,
+        lengthWords: sl.length,
+        loopMode: sl.loopMode,
+        loopStart: sl.loopStart,
+        loopLength: sl.loopLength,
+      })),
+      baseName: smp.name,
+      programName: smp.name.slice(0, 10),
+      baseMidiKey: 36, // C2 — first slice maps here, rest chromatic
+      // -1 is the auto-pick sentinel: backend finds the first run of
+      // N consecutive free sample slots + the first free program
+      // slot. Manual override (future toggle in the slicing UI) will
+      // pass non-negative values here.
+      firstSampleSlot: -1,
+      programSlot: -1,
+    };
+  }
+
+  async function startApplySlicing() {
+    sliceError = '';
+    sliceProgress = null;
+    slicePhase = 'inspecting';
+    try {
+      const req = buildSlicingRequest();
+      slicePreflight = await (App as any).InspectSlicing(req);
+      slicePhase = 'preflight';
+    } catch (e: any) {
+      sliceError = String(e?.message ?? e);
+      slicePhase = 'error';
+    }
+  }
+
+  async function continueApplySlicing() {
+    if (!slicePreflight || !slicePreflight.ok) return;
+    sliceProgress = null;
+    slicePhase = 'applying';
+
+    // Subscribe BEFORE invoking — the very first progress event fires
+    // before the await resolves, so missing it means no UI updates.
+    sliceUnsub = EventsOn('slicing:progress', (p: any) => {
+      sliceProgress = p;
+      if (p.phase === 'done')  slicePhase = 'done';
+      if (p.phase === 'error') { slicePhase = 'error'; sliceError = p.message; }
+    });
+
+    try {
+      await (App as any).ApplySlicing(buildSlicingRequest());
+    } catch (e: any) {
+      sliceError = String(e?.message ?? e);
+      slicePhase = 'error';
+    } finally {
+      if (sliceUnsub) { sliceUnsub(); sliceUnsub = null; }
+    }
+  }
+
+  function cancelApply() {
+    slicePhase = 'idle';
+    slicePreflight = null;
+    sliceProgress = null;
+    sliceError = '';
+    if (sliceUnsub) { sliceUnsub(); sliceUnsub = null; }
+  }
+
+  onDestroy(() => { if (sliceUnsub) sliceUnsub(); });
 
   $: smp = $selectedSample;
 
@@ -651,22 +743,27 @@
                 {/each}
               </div>
             </div>
-            <div class="row">
-              <label>Loop start</label>
-              <NumField
-                value={sel.loopStart}
-                min={0} max={sel.length}
-                format={(v) => v.toLocaleString()}
-                on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopStart: e.detail })} />
-            </div>
-            <div class="row">
-              <label>Loop length</label>
-              <NumField
-                value={sel.loopLength}
-                min={0} max={sel.length}
-                format={(v) => v.toLocaleString()}
-                on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopLength: e.detail })} />
-            </div>
+            <!-- Loop start / length only matter for loop and ping-pong
+                 modes — hide them in one-shot to keep the card short
+                 and leave the waveform room above. -->
+            {#if sel.loopMode !== 'one-shot'}
+              <div class="row">
+                <label>Loop start</label>
+                <NumField
+                  value={sel.loopStart}
+                  min={0} max={sel.length}
+                  format={(v) => v.toLocaleString()}
+                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopStart: e.detail })} />
+              </div>
+              <div class="row">
+                <label>Loop length</label>
+                <NumField
+                  value={sel.loopLength}
+                  min={0} max={sel.length}
+                  format={(v) => v.toLocaleString()}
+                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopLength: e.detail })} />
+              </div>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -726,9 +823,9 @@
           {#if $slicing.active}
             <!-- Headline action when slicing: uploads N samples to the
                  next free slots and auto-builds a program with N
-                 keygroups mapped chromatically. The pre-flight modal
-                 (designed earlier) gates the multi-sample transfer. -->
-            <button type="button" class="btn btn--primary" on:click={openTransfer}>
+                 keygroups mapped chromatically. Drives the real
+                 Inspect → Preflight → Apply flow with live progress. -->
+            <button type="button" class="btn btn--primary" on:click={startApplySlicing}>
               Apply slicing → {$slicing.slices.length} samples + program
             </button>
             <hr class="panel__divider" />
@@ -790,11 +887,131 @@
   </div>
 {/if}
 
+<!-- ===== Apply slicing modals =====
+     Three states share the same backdrop:
+       inspecting → spinner-ish "checking device"
+       preflight  → checklist with errors/warnings, Continue if OK
+       applying   → live progress driven by slicing:progress events
+       done/error → terminal state with Close
+-->
+{#if slicePhase !== 'idle'}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">
+          {#if slicePhase === 'inspecting'}Inspecting <strong>{smp.name}</strong>
+          {:else if slicePhase === 'preflight'}Ready to apply slicing — <strong>{smp.name}</strong>
+          {:else if slicePhase === 'applying'}Applying slicing — <strong>{smp.name}</strong>
+          {:else if slicePhase === 'done'}Done — <strong>{smp.name}</strong>
+          {:else}Slicing error
+          {/if}
+        </h2>
+        <div class="modal__route">{$slicing.slices.length} slices · MRCC Port 03 · Ch 0</div>
+      </header>
+
+      <div class="modal__body">
+        {#if slicePhase === 'inspecting'}
+          <div class="modal__step">Checking device catalog…</div>
+        {:else if slicePhase === 'preflight' && slicePreflight}
+          <ul class="preflight">
+            <li class="preflight__item preflight__item--ok">
+              <span class="preflight__icon">✓</span>
+              <div class="preflight__body">
+                <span class="preflight__title">Slice math</span>
+                <span class="preflight__detail">{$slicing.slices.length} slices · all lengths ≥ 200 words</span>
+              </div>
+            </li>
+            <li class="preflight__item preflight__item--ok">
+              <span class="preflight__icon">✓</span>
+              <div class="preflight__body">
+                <span class="preflight__title">Slot allocation</span>
+                <span class="preflight__detail">samples → slots {slicePreflight.sampleSlots?.[0]}…{slicePreflight.sampleSlots?.[slicePreflight.sampleSlots.length - 1]} · program → slot {String(slicePreflight.programSlot).padStart(2, '0')}</span>
+              </div>
+            </li>
+            {#each (slicePreflight.errors ?? []) as err}
+              <li class="preflight__item preflight__item--error">
+                <span class="preflight__icon">✗</span>
+                <div class="preflight__body">
+                  <span class="preflight__title">Error</span>
+                  <span class="preflight__detail">{err}</span>
+                </div>
+              </li>
+            {/each}
+            {#each (slicePreflight.warnings ?? []) as warn}
+              <li class="preflight__item preflight__item--warn">
+                <span class="preflight__icon">⚠</span>
+                <div class="preflight__body">
+                  <span class="preflight__title">Warning</span>
+                  <span class="preflight__detail">{warn}</span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+          <div class="preflight__estimate">
+            Estimated transfer: ~{Math.floor(slicePreflight.estimatedSeconds / 60)}m {slicePreflight.estimatedSeconds % 60}s
+          </div>
+        {:else if slicePhase === 'applying' || slicePhase === 'done'}
+          <div class="modal__step">
+            {sliceProgress?.phase === 'uploading_program' ? 'Building program' : sliceProgress?.phase === 'done' ? 'Complete' : 'Uploading slices'}
+            <strong>{sliceProgress?.message ?? 'Starting…'}</strong>
+          </div>
+          <div class="progress">
+            <div class="progress__bar" style="width: {sliceProgress?.percent ?? 0}%;"></div>
+            <div class="progress__label">{sliceProgress?.percent ?? 0}%</div>
+          </div>
+          <div class="log">
+            {#if sliceProgress}
+              <div class="log__row {slicePhase === 'done' ? 'ok' : 'run'}">
+                {slicePhase === 'done' ? '✓' : '▶'} {sliceProgress.message}
+              </div>
+              {#if sliceProgress.sliceIndex >= 0}
+                <div class="log__row pending">Slice {sliceProgress.sliceIndex + 1} of {sliceProgress.totalSlices}</div>
+              {/if}
+            {:else}
+              <div class="log__row pending">· Connecting…</div>
+            {/if}
+          </div>
+        {:else if slicePhase === 'error'}
+          <ul class="preflight">
+            <li class="preflight__item preflight__item--error">
+              <span class="preflight__icon">✗</span>
+              <div class="preflight__body">
+                <span class="preflight__title">Slicing failed</span>
+                <span class="preflight__detail">{sliceError || 'Unknown error'}</span>
+              </div>
+            </li>
+          </ul>
+        {/if}
+      </div>
+
+      <footer class="modal__foot">
+        {#if slicePhase === 'preflight'}
+          <button type="button" class="btn" on:click={cancelApply}>Cancel</button>
+          <button
+            type="button"
+            class="btn btn--primary"
+            disabled={!slicePreflight?.ok}
+            on:click={continueApplySlicing}>Continue ▶</button>
+        {:else if slicePhase === 'applying'}
+          <!-- No Cancel during applying. The S950 has no remote
+               "delete sample" path, so an aborted run would leave
+               orphan slices on the device with no clean rollback.
+               Once Continue is clicked, the user waits. -->
+          <span class="modal__waitnote">do not close · upload in progress</span>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={cancelApply}>Close</button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}
+
 <style>
-  /* Flex column fills the grid area exactly. Identity is fixed at
-     the top, controls fixed at the bottom, the waveform card flexes
-     to whatever space is left — so on short windows the waveform
-     shrinks instead of the bottom controls falling off-screen. */
+  /* Flex column. Identity is fixed at the top, controls fixed at the
+     bottom, the waveform card flexes to whatever space is left.
+     overflow: auto on main is the last-resort fallback for very
+     short viewports — keeps the bottom cards from being clipped
+     silently when the layout exceeds the available height. */
   .main {
     grid-area: main;
     padding: 16px;
@@ -804,7 +1021,7 @@
     background: var(--grey-light);
     height: 100%;
     min-height: 0;
-    overflow: hidden;
+    overflow: auto;
   }
   .identity-card { flex: 0 0 auto; }
   .waveform-card {
@@ -940,9 +1157,10 @@
     border-radius: 1px;
   }
 
-  /* Three-column grid for the cards below the waveform. Fixed at
-     the bottom of .main; each card scrolls internally if its rows
-     exceed the allotted height so nothing falls off the viewport. */
+  /* Three-column grid for the cards below the waveform. Sized so
+     the Slices card fits its typical one-shot content without
+     scrolling, while leaving the waveform comfortable room above.
+     Loop / ping-pong slices show two extra rows that scroll within. */
   .controls {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -951,7 +1169,7 @@
     min-height: 0;
   }
   .controls :global(.card) {
-    max-height: 280px;
+    max-height: 320px;
     overflow-y: auto;
   }
   .actions--stack {

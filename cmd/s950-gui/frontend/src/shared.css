@@ -549,6 +549,13 @@ body.modal-open .modal-backdrop { display: flex; }
   border-top: 1px solid var(--grey-light);
   background: var(--grey-light);
 }
+.modal__waitnote {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 
 /* ---------- Pre-flight checklist ----------
    Used in the pre-flight modal body. Each .preflight__item has one of

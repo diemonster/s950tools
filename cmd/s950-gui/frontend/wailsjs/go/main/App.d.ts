@@ -3,6 +3,8 @@
 import {main} from '../models';
 import {protocol} from '../models';
 
+export function ApplySlicing(arg1:main.SlicingRequest):Promise<void>;
+
 export function Catalog():Promise<main.Catalog>;
 
 export function Connect(arg1:string,arg2:string,arg3:number):Promise<void>;
@@ -10,6 +12,8 @@ export function Connect(arg1:string,arg2:string,arg3:number):Promise<void>;
 export function Disconnect():Promise<void>;
 
 export function GetProgram(arg1:number):Promise<protocol.ProgramJSON>;
+
+export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPreflight>;
 
 export function ListPorts():Promise<main.PortList>;
 

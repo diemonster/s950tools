@@ -1,3 +1,30 @@
+export namespace device {
+	
+	export class SliceSpec {
+	    name: string;
+	    startWord: number;
+	    lengthWords: number;
+	    loopMode: string;
+	    loopStart: number;
+	    loopLength: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SliceSpec(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.startWord = source["startWord"];
+	        this.lengthWords = source["lengthWords"];
+	        this.loopMode = source["loopMode"];
+	        this.loopStart = source["loopStart"];
+	        this.loopLength = source["loopLength"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
 	export class CatalogItem {
@@ -67,6 +94,22 @@ export namespace main {
 	        this.channel = source["channel"];
 	    }
 	}
+	export class OccupiedSlot {
+	    kind: string;
+	    slot: number;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new OccupiedSlot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.slot = source["slot"];
+	        this.name = source["name"];
+	    }
+	}
 	export class Port {
 	    name: string;
 	
@@ -91,6 +134,92 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ins = this.convertValues(source["ins"], Port);
 	        this.outs = this.convertValues(source["outs"], Port);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SlicingPreflight {
+	    ok: boolean;
+	    errors?: string[];
+	    warnings?: string[];
+	    sampleSlots: number[];
+	    programSlot: number;
+	    estimatedSeconds: number;
+	    occupiedSlots?: OccupiedSlot[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SlicingPreflight(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.errors = source["errors"];
+	        this.warnings = source["warnings"];
+	        this.sampleSlots = source["sampleSlots"];
+	        this.programSlot = source["programSlot"];
+	        this.estimatedSeconds = source["estimatedSeconds"];
+	        this.occupiedSlots = this.convertValues(source["occupiedSlots"], OccupiedSlot);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SlicingRequest {
+	    sourceWords: number[];
+	    sourceRateHz: number;
+	    slices: device.SliceSpec[];
+	    baseName: string;
+	    programName: string;
+	    baseMidiKey: number;
+	    firstSampleSlot: number;
+	    programSlot: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SlicingRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceWords = source["sourceWords"];
+	        this.sourceRateHz = source["sourceRateHz"];
+	        this.slices = this.convertValues(source["slices"], device.SliceSpec);
+	        this.baseName = source["baseName"];
+	        this.programName = source["programName"];
+	        this.baseMidiKey = source["baseMidiKey"];
+	        this.firstSampleSlot = source["firstSampleSlot"];
+	        this.programSlot = source["programSlot"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

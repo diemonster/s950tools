@@ -10,30 +10,31 @@ import (
 )
 
 // SliceSpec is one slice extraction request. Offsets are S950 words
-// (12-bit) into the source sample's word buffer.
+// (12-bit) into the source sample's word buffer. JSON tags use
+// camelCase for clean consumption by the Wails frontend.
 type SliceSpec struct {
 	// Name is the SPRM name for the resulting sample (max 10 ASCII chars).
-	Name string
+	Name string `json:"name"`
 	// StartWord is the source-relative offset where the slice begins.
-	StartWord uint32
+	StartWord uint32 `json:"startWord"`
 	// LengthWords is the slice's length in words. Must be >= 200
 	// (S950 minimum). Lengths < 200 are rejected; the caller should
 	// pad or refuse to slice that small.
-	LengthWords uint32
+	LengthWords uint32 `json:"lengthWords"`
 	// LoopMode picks the per-slice replay flag:
 	//   "one-shot" — sample plays through and stops
 	//   "loop"     — wire mode 0, loops the [LoopStart..LoopStart+LoopLength]
 	//   "ping-pong"— wire mode 1, alternating playback over the same region
 	// Empty string is treated as "one-shot".
-	LoopMode string
+	LoopMode string `json:"loopMode"`
 	// LoopStartInSlice is the loop point's start, relative to the
 	// slice's first word (0 = start of slice). Only used when LoopMode
 	// is "loop" or "ping-pong".
-	LoopStartInSlice uint32
+	LoopStartInSlice uint32 `json:"loopStart"`
 	// LoopLengthInSlice is the loop's length in words. Loop end =
 	// LoopStartInSlice + LoopLengthInSlice. If the resulting length is
 	// < 5, the slice is treated as one-shot regardless of LoopMode.
-	LoopLengthInSlice uint32
+	LoopLengthInSlice uint32 `json:"loopLength"`
 }
 
 // SlicePayload is one slice ready for upload — words extracted from
@@ -55,7 +56,7 @@ type SlicePayload struct {
 // Errors from BuildSlices.
 var (
 	ErrSliceOutOfRange = errors.New("slice extends past source")
-	ErrSliceTooShort   = fmt.Errorf("slice shorter than S950 minimum (%d words)", sample.MinTotalWords)
+	ErrSliceTooShort   = errors.New("slice shorter than S950 minimum (200 words)")
 	ErrTooManySlices   = errors.New("too many slices (max 31 keygroups per program)")
 	ErrNoSlices        = errors.New("no slices specified")
 )
