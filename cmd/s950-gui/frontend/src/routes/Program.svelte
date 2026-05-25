@@ -5,7 +5,9 @@
   import { setSync } from '../lib/sync';
   import { navigate } from '../lib/route';
   import { programs, selectedSlot, selectedProgram, selectedKeygroupN } from '../lib/state/programs';
+  import { ensureProgramLoaded } from '../lib/state/catalog';
   import { rangeLabel, midiX, midiW } from '../lib/midi';
+  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
 
   // Program is the explicit-Send tab — local edits are dirty until the
@@ -19,6 +21,21 @@
   function openSend()     { modalKind = 'preflight'; }
   function continueSend() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
+
+  // Get from S950: re-pull the currently selected program from the
+  // device. No modal — fast operation; surface progress via the
+  // topbar sync chip. Failure caught + shown via the chip's error
+  // state.
+  async function getFromDevice() {
+    const slot = get(selectedSlot);
+    setSync('sending', 'Fetching…');
+    try {
+      await ensureProgramLoaded(slot, true);
+      setSync('synced', 'Synced');
+    } catch (e: any) {
+      setSync('error', 'Fetch failed');
+    }
+  }
 
   function editKeygroup(n: number) {
     selectedKeygroupN.set(n);
@@ -205,7 +222,7 @@
       </div>
       <div class="actions">
         <div class="actions__group">
-          <button type="button" class="btn" on:click={openSend}>Get from S950</button>
+          <button type="button" class="btn" on:click={getFromDevice}>Get from S950</button>
           <button type="button" class="btn btn--primary" on:click={openSend}>Send to S950</button>
         </div>
         <div class="actions__sep"></div>

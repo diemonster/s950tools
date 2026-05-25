@@ -5,6 +5,7 @@
 
 import { writable, get } from 'svelte/store';
 import * as App from '../../../wailsjs/go/main/App';
+import { refreshCatalog } from './catalog';
 
 export type Port = { name: string };
 export type Status = { connected: boolean; in?: string; out?: string; channel: number };
@@ -50,6 +51,17 @@ export async function connect() {
   try {
     await App.Connect(get(selectedIn), get(selectedOut), get(channel));
     await refreshStatus();
+    // Pull the device catalog immediately so the sidebars reflect
+    // what's actually on the S950, not the dev-time stubs. Failures
+    // here don't break the connection — surface as a soft error so
+    // the user can retry without disconnecting.
+    if (get(phase) === 'connected') {
+      try {
+        await refreshCatalog();
+      } catch (e: any) {
+        linkError.set('Catalog fetch failed: ' + String(e?.message ?? e));
+      }
+    }
   } catch (e: any) {
     phase.set('error');
     linkError.set(String(e?.message ?? e));

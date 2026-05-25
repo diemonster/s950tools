@@ -405,6 +405,40 @@ export namespace protocol {
 		    return a;
 		}
 	}
+	export class SampleParams {
+	    Raw: number[];
+	    Name: string;
+	    TotalWords: number;
+	    SampleRateHz: number;
+	    NominalPitch: number;
+	    LoudOffset: number;
+	    ReplayMode: number;
+	    End: number;
+	    Start: number;
+	    LoopLength: number;
+	    VelXFade: number;
+	    Reversed: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SampleParams(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Raw = source["Raw"];
+	        this.Name = source["Name"];
+	        this.TotalWords = source["TotalWords"];
+	        this.SampleRateHz = source["SampleRateHz"];
+	        this.NominalPitch = source["NominalPitch"];
+	        this.LoudOffset = source["LoudOffset"];
+	        this.ReplayMode = source["ReplayMode"];
+	        this.End = source["End"];
+	        this.Start = source["Start"];
+	        this.LoopLength = source["LoopLength"];
+	        this.VelXFade = source["VelXFade"];
+	        this.Reversed = source["Reversed"];
+	    }
+	}
 
 }
 

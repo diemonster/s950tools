@@ -22,6 +22,10 @@ export function GetProgram(arg1) {
   return window['go']['main']['App']['GetProgram'](arg1);
 }
 
+export function GetSampleParams(arg1) {
+  return window['go']['main']['App']['GetSampleParams'](arg1);
+}
+
 export function InspectSlicing(arg1) {
   return window['go']['main']['App']['InspectSlicing'](arg1);
 }

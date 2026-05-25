@@ -19,6 +19,8 @@
     type SliceLoopMode,
     type Division,
   } from '../lib/state/slicing';
+  import { ensureSampleLoaded } from '../lib/state/catalog';
+  import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
   // Wails bindings — regenerated on `wails dev` boot. The new
   // slicing methods land here after the Go side compiles.
@@ -35,6 +37,19 @@
   let modalKind: ModalKind = 'closed';
   function openTransfer() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
+
+  // Get SPRM from S950: re-pull just the SPRM block for the
+  // currently selected sample. Fast (~50ms), no modal needed.
+  async function getSPRMFromDevice() {
+    const slot = get(selectedSampleSlot);
+    setSync('sending', 'Fetching…');
+    try {
+      await ensureSampleLoaded(slot, true);
+      setSync('synced', 'Synced');
+    } catch (e: any) {
+      setSync('error', 'Fetch failed');
+    }
+  }
 
   // ---------- Apply Slicing ----------
   type SlicePhase = 'idle' | 'inspecting' | 'preflight' | 'applying' | 'done' | 'error';
@@ -835,7 +850,7 @@
           <button type="button" class="btn" on:click={openTransfer}>Download .wav…</button>
           <hr class="panel__divider" />
           <button type="button" class="btn">Send SPRM to S950</button>
-          <button type="button" class="btn">Get SPRM from S950</button>
+          <button type="button" class="btn" on:click={getSPRMFromDevice}>Get SPRM from S950</button>
         </div>
       </div>
     </section>

@@ -165,6 +165,21 @@ func (a *App) GetProgram(slot int) (*protocol.ProgramJSON, error) {
 	return &j, nil
 }
 
+// GetSampleParams fetches the 120-byte SPRM block for slot N and
+// returns the high-level decoded view. Backs the Sample tab's lazy
+// fetch: selecting a sample in the sidebar triggers this to fill in
+// the start / end / loop / rate / nominal-pitch fields.
+func (a *App) GetSampleParams(slot int) (*protocol.SampleParams, error) {
+	d, err := a.requireDevice()
+	if err != nil {
+		return nil, err
+	}
+	if slot < 0 || slot > 99 {
+		return nil, fmt.Errorf("slot %d out of range (0..99)", slot)
+	}
+	return d.GetParams(byte(slot))
+}
+
 // SetProgram uploads a program (ProgramJSON shape) to slot N. The
 // frontend is responsible for running pre-flight checks before
 // calling this — the device may NAK on slot collisions or oversize

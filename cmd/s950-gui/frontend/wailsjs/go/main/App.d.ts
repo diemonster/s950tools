@@ -13,6 +13,8 @@ export function Disconnect():Promise<void>;
 
 export function GetProgram(arg1:number):Promise<protocol.ProgramJSON>;
 
+export function GetSampleParams(arg1:number):Promise<protocol.SampleParams>;
+
 export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPreflight>;
 
 export function ListPorts():Promise<main.PortList>;
