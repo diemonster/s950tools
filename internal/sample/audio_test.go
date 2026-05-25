@@ -324,12 +324,12 @@ func TestLoadAudio_WAVFloat32Stereo_ChannelModes(t *testing.T) {
 	if len(left.PCM) != 3 {
 		t.Fatalf("left frames %d, want 3", len(left.PCM))
 	}
-	if left.PCM[0] < 32000 || left.PCM[0] > 32767 {
+	if left.PCM[0] < 32000 {
 		t.Errorf("left[0] = %d, want ~32767", left.PCM[0])
 	}
 
 	right, _ := LoadAudio(path, ChannelRight)
-	if right.PCM[0] > -32000 || right.PCM[0] < -32768 {
+	if right.PCM[0] > -32000 {
 		t.Errorf("right[0] = %d, want ~-32767", right.PCM[0])
 	}
 

@@ -36,6 +36,21 @@ class StubAudioContext {
       disconnect() {},
       start() {},
       stop() {},
+      addEventListener() {},
+    };
+  }
+  // Minimal GainNode stub. `gain` is an AudioParam — only the
+  // automation methods preview.ts actually calls need to be present.
+  createGain() {
+    const param = {
+      value: 1,
+      setValueAtTime(_v: number, _when: number) {},
+      linearRampToValueAtTime(_v: number, _when: number) {},
+    };
+    return {
+      gain: param,
+      connect() {},
+      disconnect() {},
     };
   }
 }

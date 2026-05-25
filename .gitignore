@@ -1,5 +1,6 @@
 # Binaries
 /s950-tools
+/s950-gui
 /bin/
 *.exe
 *.test

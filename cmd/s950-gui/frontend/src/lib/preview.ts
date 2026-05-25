@@ -15,11 +15,43 @@ import type { Slice } from './state/slicing';
 // even if they never explicitly resumed the context.
 let ctx: AudioContext | null = null;
 let current: AudioBufferSourceNode | null = null;
+// The GainNode that sits between every active source and the
+// destination. Owned per playback session so a fresh fade-in /
+// fade-out curve can be scheduled without conflicting with leftover
+// automation from a previous run.
+let currentGain: GainNode | null = null;
 // Secondary sources spawned alongside `current` (e.g. the ping-pong
 // pre-roll node that bridges sample-start into the looping segment).
 // Tracked separately so stop() can tear all of them down at once
 // without losing the meaning of "is something playing" via `current`.
 const extras: AudioBufferSourceNode[] = [];
+
+// Sub-millisecond fade applied at play-START and play-STOP only.
+// Suppresses the click you get when jumping from silence to the
+// sample's first non-zero value, and the click when cutting out
+// mid-loop. Deliberately NOT applied at loop seams — those need to
+// ring through so the user can hear a mismatched loopStart/loopEnd
+// (which is real diagnostic information they'd want to fix).
+const FADE_SEC = 0.002;
+
+function makeFadeInGain(ac: AudioContext): GainNode {
+  const gain = ac.createGain();
+  const now = ac.currentTime;
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(1, now + FADE_SEC);
+  gain.connect(ac.destination);
+  return gain;
+}
+
+// Schedules a linear ramp down to silence on the gain node, starting
+// at `when` and ending FADE_SEC later. setValueAtTime pins the
+// current gain value so the ramp begins from wherever automation
+// happens to be — important if a previous ramp is mid-flight.
+function scheduleFadeOutAt(gain: GainNode, ac: AudioContext, when: number) {
+  const startVal = gain.gain.value;
+  gain.gain.setValueAtTime(startVal, Math.max(when, ac.currentTime));
+  gain.gain.linearRampToValueAtTime(0, Math.max(when, ac.currentTime) + FADE_SEC);
+}
 
 function audioContext(): AudioContext {
   if (!ctx) {
@@ -55,21 +87,43 @@ function bufferFor(s: Sample): AudioBuffer | null {
   return buf;
 }
 
-// stop tears down the in-flight source. Calling preview again does
-// this automatically — exposed so the spacebar handler can toggle
-// playback (second press while audio is in flight should stop).
+// stop tears down the in-flight source(s). Calling preview again
+// does this automatically — exposed so the spacebar handler can
+// toggle playback (second press while audio is in flight should
+// stop). Rather than cutting to silence (which clicks), we ramp the
+// shared GainNode to 0 over FADE_SEC and schedule each source's
+// stop() at the end of the ramp. The `current` / `currentGain` /
+// `extras` refs clear synchronously so isPlaying() reports false
+// immediately and a subsequent preview can start fresh.
 export function stop() {
-  if (current) {
-    try { current.stop(); } catch {}
-    current.disconnect();
-    current = null;
+  if (currentGain) {
+    const ac = audioContext();
+    const fadeStart = ac.currentTime;
+    const stopAt    = fadeStart + FADE_SEC;
+    scheduleFadeOutAt(currentGain, ac, fadeStart);
+    if (current) {
+      try { current.stop(stopAt); } catch {}
+    }
+    for (const s of extras) {
+      try { s.stop(stopAt); } catch {}
+    }
+    // Tidy up the graph once the fade has played out — disconnect on
+    // each source's `ended` event, plus a setTimeout fallback for
+    // the gain (no native end event). Leaking briefly is harmless
+    // (GC takes them) but explicit disconnect keeps the audio graph
+    // tidy across many preview clicks.
+    const g = currentGain;
+    if (current) {
+      const c = current;
+      c.addEventListener('ended', () => { try { c.disconnect(); } catch {} });
+    }
+    for (const s of extras) {
+      s.addEventListener('ended', () => { try { s.disconnect(); } catch {} });
+    }
+    setTimeout(() => { try { g.disconnect(); } catch {} }, FADE_SEC * 1000 + 20);
   }
-  // Tear down any secondary sources we scheduled (e.g. the ping-pong
-  // pre-roll feeding into the loop source).
-  for (const s of extras) {
-    try { s.stop(); } catch {}
-    s.disconnect();
-  }
+  current = null;
+  currentGain = null;
   extras.length = 0;
 }
 
@@ -106,6 +160,11 @@ export function previewRegion(
   const loopStartAbs = startSec + loopStartWord / s.rate;
   const loopEndAbs   = startSec + (loopStartWord + loopLengthWord) / s.rate;
 
+  // Build the per-session gain node now so every source we wire
+  // below routes through it. Fade-in is scheduled inside the
+  // factory; fade-out is scheduled below or in stop().
+  const gain = makeFadeInGain(ac);
+
   // ---------- Ping-pong ----------
   // Web Audio's native loop is forward-only. We synthesise ping-pong
   // by building a stitched buffer of [reverse(loop), forward(loop)]
@@ -117,7 +176,7 @@ export function previewRegion(
     // loop region (the standard ping-pong entry), no loop.
     const preRoll = ac.createBufferSource();
     preRoll.buffer = buf;
-    preRoll.connect(ac.destination);
+    preRoll.connect(gain);
     const preRollEnd = loopEndAbs;       // absolute seconds in source buffer
     const preRollDur = preRollEnd - startSec;
     preRoll.start(0, startSec, preRollDur);
@@ -125,23 +184,23 @@ export function previewRegion(
     // Loop buffer: reverse half then forward half, both covering the
     // loop region. Looping this buffer produces alternating
     // backward/forward playback that bounces off loopStart and loopEnd.
+    // See buildPingPongLoopBuffer() for the math.
     const srcArr = buf.getChannelData(0);
     const startIdx = Math.max(0, Math.floor(loopStartAbs * s.rate));
     const endIdx   = Math.min(srcArr.length, Math.floor(loopEndAbs * s.rate));
-    const segLen   = Math.max(1, endIdx - startIdx);
-    const pingBuf  = ac.createBuffer(1, segLen * 2, s.rate);
-    const dst = pingBuf.getChannelData(0);
-    for (let i = 0; i < segLen; i++) dst[i] = srcArr[endIdx - 1 - i];     // reverse
-    for (let i = 0; i < segLen; i++) dst[segLen + i] = srcArr[startIdx + i]; // forward
+    const pingData = buildPingPongLoopBuffer(srcArr, startIdx, endIdx);
+    const pingBuf  = ac.createBuffer(1, pingData.length, s.rate);
+    pingBuf.getChannelData(0).set(pingData);
 
     const loopSrc = ac.createBufferSource();
     loopSrc.buffer = pingBuf;
     loopSrc.loop = true;
-    loopSrc.connect(ac.destination);
+    loopSrc.connect(gain);
     loopSrc.start(ac.currentTime + preRollDur);
 
     extras.push(preRoll);
     current = loopSrc;
+    currentGain = gain;
     return true;
   }
 
@@ -157,12 +216,28 @@ export function previewRegion(
     src.loopEnd   = loopEndAbs;
   }
 
-  src.connect(ac.destination);
+  src.connect(gain);
   src.start(0, startSec, loopMode === 'one-shot' ? lenSec : undefined);
+
+  // One-shot has a known end time — schedule the fade-out so the
+  // tail of the clip ramps to silence instead of cutting at lenSec.
+  // Clamp to half the clip length so very short samples don't
+  // double-fade (in→out overlap = audible pop). For ≤2*FADE_SEC
+  // clips, skip the out-fade entirely.
+  if (loopMode === 'one-shot' && lenSec > 2 * FADE_SEC) {
+    const endTime = ac.currentTime + lenSec;
+    scheduleFadeOutAt(gain, ac, endTime - FADE_SEC);
+  }
+
   current = src;
+  currentGain = gain;
   // Auto-clear after the play window so subsequent stop() is a no-op.
   if (loopMode === 'one-shot') {
-    src.onended = () => { if (current === src) current = null; };
+    src.onended = () => {
+      if (current === src) { current = null; currentGain = null; }
+      try { src.disconnect(); } catch {}
+      try { gain.disconnect(); } catch {}
+    };
   }
   return true;
 }
@@ -191,4 +266,33 @@ export function previewSlice(s: Sample, sl: Slice): boolean {
 // sample has no in-memory PCM (i.e. wasn't imported in this session).
 export function hasHostAudio(s: Sample | undefined): boolean {
   return Boolean(s && s.pcm && s.pcm.length > 0);
+}
+
+// buildPingPongLoopBuffer constructs the audio segment that
+// previewRegion loops to synthesise ping-pong playback. Web Audio
+// has no native ping-pong, so we hand-stitch a [reverse, forward]
+// buffer and play it with loop=true.
+//
+// Inputs: source samples and the loop region [startIdx, endIdx)
+//   (endIdx exclusive). Pre-roll plays [..., endIdx-1] forward
+//   before this buffer takes over.
+//
+// Output: a Float32Array of length 2*segLen where
+//   • [0..segLen)        is the reverse traversal (endIdx-1 → startIdx)
+//   • [segLen..2*segLen) is the forward traversal (startIdx → endIdx-1)
+//
+// Bounce points (reverse→forward inside the buffer, and end→start
+// across the loop seam) repeat one sample each — at the natural
+// zero-velocity turnaround that's perceptually fine. The shape is
+// locked in by tests so we don't regress this on a casual refactor.
+export function buildPingPongLoopBuffer(
+  srcArr: Float32Array | ArrayLike<number>,
+  startIdx: number,
+  endIdx: number,
+): Float32Array {
+  const segLen = Math.max(1, endIdx - startIdx);
+  const out = new Float32Array(segLen * 2);
+  for (let i = 0; i < segLen; i++) out[i] = srcArr[endIdx - 1 - i];
+  for (let i = 0; i < segLen; i++) out[segLen + i] = srcArr[startIdx + i];
+  return out;
 }
