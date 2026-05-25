@@ -36,6 +36,12 @@
    * (`--black`/`--white` invert between themes; these don't.) */
   --ink:   #212121;
   --paper: #FFFFFF;
+
+  /* Semantic surface tokens. Page-scoped Svelte styles read these
+   * instead of var(--grey-light) directly so the theme can swap the
+   * "main work area" colour without specificity wars against the
+   * per-route scoped CSS. */
+  --main-bg: var(--grey-light);
 }
 
 /* ---------- Party Mode ----------
@@ -45,9 +51,11 @@
  * the main work area becomes yellow, the sidebar becomes green, and
  * the top/bottom bars become black with light text — same palette
  * relationship as the website's party mode. */
-html[data-theme="party"] .main,
-html[data-theme="party"] .kg-empty  { background: var(--rb-yellow); }
-html[data-theme="party"] .sidebar   { background: var(--rb-green); }
+/* Token-driven swap: page-scoped .main / .kg-empty rules pick up the
+   new value via var(--main-bg). Avoids the specificity battle that
+   element-targeted overrides lose against Svelte's hashed scope. */
+html[data-theme="party"] { --main-bg: var(--rb-yellow); }
+html[data-theme="party"] .sidebar { background: var(--rb-green); }
 html[data-theme="party"] .topbar    { background: var(--ink); }
 html[data-theme="party"] .statusbar { background: var(--ink); color: var(--paper); }
 /* On the dark statusbar, the kbd pill still pops thanks to its own
@@ -56,12 +64,15 @@ html[data-theme="party"] .statusbar { background: var(--ink); color: var(--paper
    nudging so it's readable next to white status text. */
 html[data-theme="party"] .statusbar__hint { color: var(--paper); }
 html[data-theme="party"] .statusbar kbd  { color: var(--ink); }
-/* Sidebar dropzone hint sits on a green sidebar in party mode; the
+/* Sidebar panel sits on the green sidebar in party mode; the
    default dashed grey loses contrast on green, so swap to black
    chrome which reads cleanly on the green. */
-html[data-theme="party"] .dropzone-hint {
+html[data-theme="party"] .sidebar__panel {
   border-color: var(--ink);
+}
+html[data-theme="party"] .sidebar__hint {
   color: var(--ink);
+  border-top-color: var(--ink);
 }
 
 * { box-sizing: border-box; }
@@ -266,14 +277,34 @@ body {
 }
 .statusbar__spacer { flex: 1; }
 
-/* ---------- Sidebar shell ---------- */
+/* ---------- Sidebar shell ----------
+   The aside is just the grey backdrop + right border that separates
+   the sidebar from the main pane. The actual list/head/hint content
+   lives inside .sidebar__panel — a dashed white card with the same
+   shape as the main pane's empty-state, so the two panels feel like
+   one visual system. */
 .sidebar {
   grid-area: sidebar;
-  background: var(--white);
+  background: var(--grey-light);
   border-right: var(--bw) solid var(--black);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.sidebar__panel {
+  flex: 1 1 0;
+  margin: 16px;
+  background: var(--white);
+  border: dashed var(--bw) var(--grey-medium);
+  border-radius: var(--r);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: background 120ms, border-color 120ms;
+}
+.sidebar__panel.is-dragging {
+  border-color: var(--rb-yellow);
+  background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
 }
 .sidebar__head {
   display: flex;
@@ -315,7 +346,11 @@ body {
   cursor: pointer;
   font-size: 13px;
 }
-.sample:hover, .program:hover { background: var(--grey-light); border-color: var(--black); }
+/* Hover lifts each row to a white tile on the now-grey sidebar — same
+   "card pops off grey" relationship as the main pane. The previous
+   --grey-light hover went invisible after the sidebar BG flipped to
+   match the main panel. */
+.sample:hover, .program:hover { background: var(--white); border-color: var(--black); }
 .sample.selected, .program.selected {
   background: var(--rb-yellow);
   border-color: var(--black);
@@ -433,27 +468,16 @@ body {
   padding: 14px 8px;
   font-style: italic;
 }
-.dropzone-hint {
-  margin: 8px;
-  padding: 14px;
-  border: dashed var(--bw) var(--grey-medium);
-  border-radius: var(--r);
+/* Hint footer inside .sidebar__panel — the dashed border now lives
+   on the outer panel, so this is just an italic note divided from
+   the list by a thin top border. */
+.sidebar__hint {
+  padding: 12px 14px;
+  border-top: 1px solid var(--grey-light);
   color: var(--grey-dark);
   font-size: 12px;
   text-align: center;
   font-style: italic;
-  transition: background 120ms, border-color 120ms, color 120ms;
-}
-/* Hover state while a file is being dragged over an opted-in drop
-   target. Yellow border + tinted BG mirrors the slice-marker
-   highlight palette so the "accepted" affordance reads the same
-   across the app. */
-.dropzone-hint.is-dragging {
-  border-color: var(--rb-yellow);
-  background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
-  color: var(--black);
-  font-style: normal;
-  font-weight: 600;
 }
 .waveform-card.is-dragging {
   /* The waveform card already has its own border via .card; switching

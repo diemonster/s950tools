@@ -774,56 +774,62 @@
   <Topbar slotCount={`${$samples.length} / 100`} slotNoun="samples" />
 
   <aside class="sidebar">
-    <div class="sidebar__head">
-      <div class="sidebar__title">Samples</div>
-      <div class="sidebar__count">{$samples.length} / 100</div>
-    </div>
-    <div class="sample-list">
-      {#each $samples as s (s.slot)}
-        <div
-          class="sample {s.slot === $selectedSampleSlot ? 'selected' : ''}"
-          on:click={() => selectedSampleSlot.set(s.slot)}
-          on:keydown={(e) => e.key === 'Enter' && selectedSampleSlot.set(s.slot)}
-          role="button"
-          tabindex="0">
-          <span class="sample__slot">{s.slot.toString().padStart(2, '0')}</span>
-          <span class="sample__name">{s.name || '(unnamed)'}</span>
-          {#if s.source === 'local'}
-            <!-- LOCAL tag + close button for un-uploaded imports.
-                 Sits in the same column as the rate so device
-                 samples still show kHz — the two never apply at the
-                 same time (locals always have a known rate but the
-                 tag is more important info). Delete is local-only
-                 since the S950 has no remote-delete SysEx opcode. -->
-            <span class="sample__tag sample__tag--local" title="Imported but not yet on the S950">LOCAL</span>
-            <button
-              type="button"
-              class="sample__del"
-              title="Remove this local sample (does not touch the S950)"
-              aria-label={`Remove local sample ${s.name || s.slot}`}
-              on:click|stopPropagation={() => removeLocalSample(s.slot)}>×</button>
-          {:else}
-            <span class="sample__rate">{Math.round(s.rate / 1000)}k</span>
-          {/if}
-        </div>
-      {/each}
-      {#if $samples.length === 0}
-        <div class="sample-list__empty">
-          No samples.<br/>Drop a file or connect to S950.
-        </div>
-      {/if}
-    </div>
-    <div class="dropzone-hint"
+    <!-- The whole sidebar content sits in a single dashed white card
+         that mirrors the main pane's empty-state shape, so the two
+         panels feel like one visual system. The card itself is the
+         file-drop target — dropping anywhere on it imports. -->
+    <div class="sidebar__panel"
       class:is-dragging={isDragging}
       style="--wails-drop-target: drop;"
       on:dragenter={onDragEnter}
       on:dragleave={onDragLeave}
       on:dragover={onDragOver}>
-      {#if $samples.length === 0}
-        drag .wav / .aiff files here<br/>to import
-      {:else}
-        drag .wav / .aiff files here<br/>to replace the selected sample
-      {/if}
+      <div class="sidebar__head">
+        <div class="sidebar__title">Samples</div>
+        <div class="sidebar__count">{$samples.length} / 100</div>
+      </div>
+      <div class="sample-list">
+        {#each $samples as s (s.slot)}
+          <div
+            class="sample {s.slot === $selectedSampleSlot ? 'selected' : ''}"
+            on:click={() => selectedSampleSlot.set(s.slot)}
+            on:keydown={(e) => e.key === 'Enter' && selectedSampleSlot.set(s.slot)}
+            role="button"
+            tabindex="0">
+            <span class="sample__slot">{s.slot.toString().padStart(2, '0')}</span>
+            <span class="sample__name">{s.name || '(unnamed)'}</span>
+            {#if s.source === 'local'}
+              <!-- LOCAL tag + close button for un-uploaded imports.
+                   Sits in the same column as the rate so device
+                   samples still show kHz — the two never apply at the
+                   same time (locals always have a known rate but the
+                   tag is more important info). Delete is local-only
+                   since the S950 has no remote-delete SysEx opcode. -->
+              <span class="sample__tag sample__tag--local" title="Imported but not yet on the S950">LOCAL</span>
+              <button
+                type="button"
+                class="sample__del"
+                title="Remove this local sample (does not touch the S950)"
+                aria-label={`Remove local sample ${s.name || s.slot}`}
+                on:click|stopPropagation={() => removeLocalSample(s.slot)}>×</button>
+            {:else}
+              <span class="sample__rate">{Math.round(s.rate / 1000)}k</span>
+            {/if}
+          </div>
+        {/each}
+        {#if $samples.length === 0}
+          <div class="sample-list__empty">
+            No samples.<br/>Drop a file or connect to S950.
+          </div>
+        {/if}
+      </div>
+      <div class="sidebar__hint">
+        {#if $samples.length === 0}
+          drag .wav / .aiff files here<br/>to import
+        {:else}
+          drag .wav / .aiff files here<br/>to replace the selected sample
+        {/if}
+      </div>
     </div>
   </aside>
 
@@ -1533,7 +1539,7 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-    background: var(--grey-light);
+    background: var(--main-bg);
     height: 100%;
     min-height: 0;
     overflow: auto;

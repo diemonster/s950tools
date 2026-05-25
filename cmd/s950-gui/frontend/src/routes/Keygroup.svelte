@@ -243,28 +243,30 @@
 
   <!-- Samples sidebar — drag source for zone binding (drag impl is TODO). -->
   <aside class="sidebar">
-    <div class="sidebar__head">
-      <div class="sidebar__title">Samples</div>
-      <div class="sidebar__count">{$samples.length} / 100</div>
-    </div>
-    <div class="sample-list">
-      {#each $samples as smp (smp.slot)}
-        <div
-          class="sample {smp.slot === $selectedSampleSlot ? 'selected' : ''}"
-          draggable="true"
-          on:dragstart={(e) => onSampleDragStart(e, smp.name)}
-          on:click={() => selectedSampleSlot.set(smp.slot)}
-          on:keydown={(e) => e.key === 'Enter' && selectedSampleSlot.set(smp.slot)}
-          role="button"
-          tabindex="0">
-          <span class="sample__slot">{smp.slot.toString().padStart(2, '0')}</span>
-          <span class="sample__name">{smp.name}</span>
-          <span class="sample__rate">{Math.round(smp.rate / 1000)}k</span>
-        </div>
-      {/each}
-    </div>
-    <div class="dropzone-hint">
-      drag a sample onto a zone to bind<br/>(shift + drop = loud layer)
+    <div class="sidebar__panel">
+      <div class="sidebar__head">
+        <div class="sidebar__title">Samples</div>
+        <div class="sidebar__count">{$samples.length} / 100</div>
+      </div>
+      <div class="sample-list">
+        {#each $samples as smp (smp.slot)}
+          <div
+            class="sample {smp.slot === $selectedSampleSlot ? 'selected' : ''}"
+            draggable="true"
+            on:dragstart={(e) => onSampleDragStart(e, smp.name)}
+            on:click={() => selectedSampleSlot.set(smp.slot)}
+            on:keydown={(e) => e.key === 'Enter' && selectedSampleSlot.set(smp.slot)}
+            role="button"
+            tabindex="0">
+            <span class="sample__slot">{smp.slot.toString().padStart(2, '0')}</span>
+            <span class="sample__name">{smp.name}</span>
+            <span class="sample__rate">{Math.round(smp.rate / 1000)}k</span>
+          </div>
+        {/each}
+      </div>
+      <div class="sidebar__hint">
+        drag a sample onto a zone to bind<br/>(shift + drop = loud layer)
+      </div>
     </div>
   </aside>
 
@@ -659,7 +661,7 @@
     grid-column: 2 / 3;
     grid-row: 2 / 5;
     padding: 16px;
-    background: var(--grey-light);
+    background: var(--main-bg);
     display: flex;
   }
 

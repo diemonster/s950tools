@@ -124,7 +124,7 @@ describe('Sample tab — drag-over hover state', () => {
   it('adds is-dragging to the dropzone hint on dragenter with Files', async () => {
     withSourceSample();
     const { container } = render(Sample);
-    const hint = container.querySelector('.dropzone-hint') as HTMLElement;
+    const hint = container.querySelector('.sidebar__panel') as HTMLElement;
     expect(hint).toBeTruthy();
     expect(hint.classList.contains('is-dragging')).toBe(false);
 
@@ -144,7 +144,7 @@ describe('Sample tab — drag-over hover state', () => {
   it('ignores drags that do not carry Files (e.g. text selections)', async () => {
     withSourceSample();
     const { container } = render(Sample);
-    const hint = container.querySelector('.dropzone-hint') as HTMLElement;
+    const hint = container.querySelector('.sidebar__panel') as HTMLElement;
     // dataTransfer with no 'Files' in types — text selection drag.
     await fireEvent.dragEnter(hint, { dataTransfer: { types: ['text/plain'] } });
     await tick();
@@ -155,7 +155,7 @@ describe('Sample tab — drag-over hover state', () => {
   it('counter survives nested-element dragenter/leave traversal', async () => {
     withSourceSample();
     const { container } = render(Sample);
-    const hint = container.querySelector('.dropzone-hint') as HTMLElement;
+    const hint = container.querySelector('.sidebar__panel') as HTMLElement;
 
     // Two enters (root + child traversal), one leave: counter > 0 → still hot.
     await fireEvent.dragEnter(hint, { dataTransfer: makeFileDT() });

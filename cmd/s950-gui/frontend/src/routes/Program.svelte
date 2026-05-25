@@ -89,31 +89,33 @@
 
   <!-- Programs sidebar -->
   <aside class="sidebar">
-    <div class="sidebar__head">
-      <div class="sidebar__title">Programs</div>
-      <div class="sidebar__count">{$programs.length} / 100</div>
-    </div>
-    <div class="program-list">
-      {#each $programs as p (p.slot)}
-        <div
-          class="program {p.slot === $selectedSlot ? 'selected' : ''}"
-          on:click={() => selectedSlot.set(p.slot)}
-          on:keydown={(e) => e.key === 'Enter' && selectedSlot.set(p.slot)}
-          role="button"
-          tabindex="0">
-          <span class="program__slot">{padSlot(p.slot)}</span>
-          <span class="program__name">{p.name || '(unnamed)'}</span>
-          <span class="program__kg">{p.keygroups.length} kg</span>
-        </div>
-      {/each}
-      {#if $programs.length === 0}
-        <div class="sample-list__empty">
-          No programs.<br/>Connect to S950 or click New program.
-        </div>
-      {/if}
-    </div>
-    <div class="dropzone-hint">
-      drop .json program file here<br/>or click + to create
+    <div class="sidebar__panel">
+      <div class="sidebar__head">
+        <div class="sidebar__title">Programs</div>
+        <div class="sidebar__count">{$programs.length} / 100</div>
+      </div>
+      <div class="program-list">
+        {#each $programs as p (p.slot)}
+          <div
+            class="program {p.slot === $selectedSlot ? 'selected' : ''}"
+            on:click={() => selectedSlot.set(p.slot)}
+            on:keydown={(e) => e.key === 'Enter' && selectedSlot.set(p.slot)}
+            role="button"
+            tabindex="0">
+            <span class="program__slot">{padSlot(p.slot)}</span>
+            <span class="program__name">{p.name || '(unnamed)'}</span>
+            <span class="program__kg">{p.keygroups.length} kg</span>
+          </div>
+        {/each}
+        {#if $programs.length === 0}
+          <div class="sample-list__empty">
+            No programs.<br/>Connect to S950 or click New program.
+          </div>
+        {/if}
+      </div>
+      <div class="sidebar__hint">
+        drop .json program file here<br/>or click + to create
+      </div>
     </div>
   </aside>
 
@@ -413,7 +415,7 @@
     grid-template-columns: minmax(420px, 560px) 1fr;
     grid-template-rows: auto 1fr auto;
     gap: 16px;
-    background: var(--grey-light);
+    background: var(--main-bg);
     min-height: 0;
   }
   /* Empty-state spans the whole grid so the dashed CTA panel fills
