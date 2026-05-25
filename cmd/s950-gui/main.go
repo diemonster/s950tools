@@ -29,6 +29,15 @@ func main() {
 		// Light app background matches the mockups' --grey-light.
 		BackgroundColour: &options.RGBA{R: 234, G: 234, B: 234, A: 1},
 		OnStartup:        app.startup,
+		// File drop: opt-in. Drop targets in the frontend declare
+		// themselves with style="--wails-drop-target: drop"; the
+		// runtime fires OnFileDrop(x, y, paths) when a file lands on
+		// one of them. Drop is consumed by the Sample tab to import
+		// audio into the currently selected slot — same code path as
+		// the Import… file picker.
+		DragAndDrop: &options.DragAndDrop{
+			EnableFileDrop: true,
+		},
 		Bind: []interface{}{
 			app,
 		},

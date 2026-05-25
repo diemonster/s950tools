@@ -9,7 +9,7 @@
 // itself can't slice on-device.
 
 import { writable, derived, get } from 'svelte/store';
-import { selectedSampleSlot, selectedSample } from './samples';
+import { samples, selectedSampleSlot, selectedSample, newLocalSample, type Sample } from './samples';
 
 export type SliceMode = 'manual' | 'auto' | 'beats';
 export type SliceLoopMode = 'one-shot' | 'loop' | 'ping-pong';
@@ -127,7 +127,7 @@ export function updateSlicing(patch: Partial<SlicingState>) {
 export function setSliceMode(mode: SliceMode) {
   const cur = get(slicing);
   const length = get(selectedSample).length;
-  let next: Partial<SlicingState> = { mode };
+  const next: Partial<SlicingState> = { mode };
   if (mode === 'beats') {
     next.slices = buildEvenSlices(slicesFor(cur.bars, cur.division), length);
   } else if (mode === 'auto') {
@@ -188,6 +188,90 @@ export function addSliceAt(wordIndex: number) {
     selectedIndex: sorted.indexOf(wordIndex),
   });
 }
+
+// ---------- Commit ----------
+//
+// Materialise the current slicing config as N local Sample rows in
+// the sidebar. The source sample's audio is sliced in-place — we
+// take subarrays of pcm + words12 for each slice and stamp them on
+// the new sample. Each child carries a parentSlot pointing back to
+// the source so the UI can lock re-commit until the children have
+// been uploaded (source: 'device').
+//
+// Commit + Apply Slicing are *alternative* endpoints from the same
+// state: commit-then-apply uses the committed children as the upload
+// payload, so we never end up with both local children AND new
+// device samples for the same slicing run.
+//
+// Returns the new slot numbers (or [] on failure — e.g. when the
+// source has no host-side audio or the device is full).
+export function commitSlices(): number[] {
+  const cur = get(slicing);
+  if (!cur.active || cur.slices.length === 0) return [];
+  const src = get(selectedSample);
+  if (!src || !src.words12 || src.words12.length === 0) {
+    console.warn('commitSlices: source has no host-side audio (import first).');
+    return [];
+  }
+
+  // Allocate slots up front so a partial commit can't half-fill the
+  // sidebar. Take into account both existing rows and slots already
+  // reserved earlier in this loop.
+  const taken = new Set(get(samples).map((s) => s.slot));
+  const allocated: number[] = [];
+  for (let i = 0; i < cur.slices.length; i++) {
+    let slot = -1;
+    for (let n = 0; n < 100; n++) {
+      if (!taken.has(n)) { slot = n; taken.add(n); break; }
+    }
+    if (slot < 0) {
+      console.warn('commitSlices: out of free sample slots');
+      return [];
+    }
+    allocated.push(slot);
+  }
+
+  const baseName = (src.name || 'SLICE').toUpperCase();
+  const children: Sample[] = cur.slices.map((sl, i) => {
+    const start = Math.max(0, sl.start | 0);
+    const end   = Math.min(src.words12!.length, (sl.start + sl.length) | 0);
+    const wordsSlice = src.words12!.slice(start, end);
+    const pcmSlice   = src.pcm ? src.pcm.slice(start, end) : undefined;
+    // S950 names are capped at 10 ASCII chars. "{base}_NN" keeps the
+    // ordering visible in the sidebar even when the base is short.
+    const sliceName = `${baseName}_${String(i + 1).padStart(2, '0')}`.slice(0, 10);
+    return {
+      ...newLocalSample(allocated[i], sliceName, src.rate, end - start),
+      mode: sl.loopMode,
+      loopStart: sl.loopStart,
+      loopLength: sl.loopLength,
+      pcm: pcmSlice,
+      words12: wordsSlice,
+      parentSlot: src.slot,
+    };
+  });
+
+  // Single atomic update so subscribers see all children at once.
+  samples.update((xs) => [...xs, ...children].sort((a, b) => a.slot - b.slot));
+  // Deactivate slicing on the source — slices are now "materialised";
+  // re-entering slicing mode would let the user start over but is
+  // gated by the Commit lock until the children are uploaded.
+  // Selection stays on the source: the Apply button lives on that
+  // row, and keeping context lets the user immediately upload once
+  // they're done eyeballing the children in the sidebar.
+  updateSlicing({ active: false });
+  return allocated;
+}
+
+// Reactive lock: true while the current source has any local
+// (un-uploaded) committed children. The Commit button binds to this.
+// Goes false again once those children flip to source: 'device'
+// after an Apply Slicing run.
+export const hasCommittedChildren = derived(
+  [samples, selectedSampleSlot],
+  ([$samples, $slot]) =>
+    $samples.some((s) => s.parentSlot === $slot && s.source === 'local'),
+);
 
 export function removeSliceAt(idx: number) {
   const cur = get(slicing);

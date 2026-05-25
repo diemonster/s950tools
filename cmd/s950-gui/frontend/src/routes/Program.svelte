@@ -50,7 +50,7 @@
 </script>
 
 <div class="app app--3row">
-  <Topbar slotChip={`${$programs.length} / 100 programs`} />
+  <Topbar slotCount={`${$programs.length} / 100`} slotNoun="programs" />
 
   <!-- Programs sidebar -->
   <aside class="sidebar">

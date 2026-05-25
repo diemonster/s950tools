@@ -3,7 +3,7 @@
   import Statusbar from '../lib/Statusbar.svelte';
   import NumField from '../lib/NumField.svelte';
   import { setSync } from '../lib/sync';
-  import { samples, selectedSampleSlot, selectedSample } from '../lib/state/samples';
+  import { samples, selectedSampleSlot, selectedSample, newLocalSample, pickFreeSlot, type Sample } from '../lib/state/samples';
   import {
     slicing,
     updateSlicing,
@@ -15,6 +15,7 @@
     removeSliceAt,
     slicesFor,
     MAX_SLICES,
+    commitSlices,
     type SliceMode,
     type SliceLoopMode,
     type Division,
@@ -26,7 +27,7 @@
   // Wails bindings — regenerated on `wails dev` boot. The new
   // slicing methods land here after the Go side compiles.
   import * as App from '../../wailsjs/go/main/App';
-  import { EventsOn } from '../../wailsjs/runtime/runtime';
+  import { EventsOn, OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime';
 
   onMount(() => setSync('synced', 'Synced'));
 
@@ -39,46 +40,133 @@
   function openTransfer() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
 
-  // Import: open the native file picker, decode + clamp + convert,
-  // and stash the audio on the selected sample's slot. Bypasses
-  // livesync deliberately — the device doesn't have this audio yet
-  // (only the slicing Apply pushes new samples up), so a stray SPRM
-  // writeback would either NAK or describe phantom audio. The user
-  // explicitly chose host-side Web Audio for preview here, so PCM
-  // never leaves memory until Apply Slicing.
-  async function importSample() {
+  // Import: decode + clamp + convert audio and stash on the selected
+  // sample's slot. Bypasses livesync deliberately — the device doesn't
+  // have this audio yet (only the slicing Apply pushes new samples
+  // up), so a stray SPRM writeback would either NAK or describe
+  // phantom audio. Host-side Web Audio preview means PCM never leaves
+  // memory until Apply Slicing.
+  //
+  // path === '' opens the native file picker; a non-empty path
+  // (drag-and-drop) imports that file directly.
+  async function importSample(path = '') {
     setSync('sending', 'Importing…');
     try {
-      const info = await (App as any).ImportSample('');
+      const info = await (App as any).ImportSample(path);
       if (!info) {
         setSync('synced', 'Synced');
         return;
       }
-      const slot = get(selectedSampleSlot);
-      samples.update((list) =>
-        list.map((x) =>
-          x.slot === slot
-            ? {
-                ...x,
-                name: info.name,
-                rate: info.rate,
-                length: info.length,
-                start: 0,
-                end: info.length,
-                loopStart: 0,
-                loopLength: 0,
-                pcm: info.pcm,
-                words12: info.words,
-              }
-            : x,
-        ),
-      );
+      const list = get(samples);
+      const curSlot = get(selectedSampleSlot);
+      const existing = list.find((x) => x.slot === curSlot);
+      // If the selected slot already holds a row, replace its audio in
+      // place (drag onto an existing entry = "replace this sample").
+      // The sample flips back to 'local' because the audio is no
+      // longer what the S950 has at that slot, even if the row came
+      // from the catalog.
+      //
+      // If nothing is selected (empty sidebar) we allocate the lowest
+      // free slot via pickFreeSlot — gives drag-onto-empty-sidebar
+      // a predictable home (slot 0, then 1, etc.).
+      if (existing) {
+        samples.update((xs) =>
+          xs.map((x) =>
+            x.slot === curSlot
+              ? {
+                  ...x,
+                  name: info.name,
+                  rate: info.rate,
+                  length: info.length,
+                  start: 0,
+                  end: info.length,
+                  loopStart: 0,
+                  loopLength: 0,
+                  pcm: info.pcm,
+                  words12: info.words,
+                  source: 'local',
+                }
+              : x,
+          ),
+        );
+      } else {
+        const slot = pickFreeSlot(list);
+        if (slot < 0) {
+          setSync('error', 'All 100 slots occupied — free one before importing');
+          return;
+        }
+        const next: Sample = {
+          ...newLocalSample(slot, info.name, info.rate, info.length),
+          pcm: info.pcm,
+          words12: info.words,
+        };
+        samples.update((xs) => [...xs, next].sort((a, b) => a.slot - b.slot));
+        selectedSampleSlot.set(slot);
+      }
       const secs = (info.length / info.rate).toFixed(2);
-      setSync('synced', `Imported · ${secs}s`);
+      setSync('synced', `Imported · ${secs}s · local only`);
     } catch (e: any) {
       setSync('error', String(e?.message ?? e));
     }
   }
+
+  // Wails fires OnFileDrop when a file lands on an element with the
+  // CSS `--wails-drop-target: drop` property. We take the first
+  // audio-looking path and reuse importSample() — multi-file drops
+  // are out of scope for now (would need to allocate consecutive
+  // slots, similar to slicing). Non-audio extensions get a setSync
+  // error so the user knows the drop was seen but ignored.
+  const AUDIO_EXT = /\.(wav|wave|aif|aiff)$/i;
+  function onFileDrop(paths: string[]) {
+    if (!paths || paths.length === 0) return;
+    const first = paths.find((p) => AUDIO_EXT.test(p));
+    if (!first) {
+      setSync('error', 'Drop a .wav or .aif file');
+      return;
+    }
+    void importSample(first);
+  }
+
+  onMount(() => {
+    // useDropTarget=true → only drops on opted-in elements (those
+    // with style="--wails-drop-target: drop") fire the callback. The
+    // rest of the window ignores drops, which matches the visual
+    // affordance of the dropzone hints.
+    OnFileDrop((_x, _y, paths) => {
+      // Drop fired — clear the hover state in case dragleave didn't
+      // fire (some platforms suppress it once the drop happens).
+      dragDepth = 0;
+      onFileDrop(paths);
+    }, true);
+  });
+  onDestroy(() => {
+    OnFileDropOff();
+  });
+
+  // ---------- Drag-over hover state ----------
+  // Wails has no native "hovering valid target" event, so we ride the
+  // standard HTML5 drag events. They fire in the WebView for OS-level
+  // file drags even though the file payload isn't accessible there
+  // (Wails delivers paths via OnFileDrop). dragDepth is a per-target
+  // counter — enter increments, leave decrements — so traversing
+  // nested children doesn't flicker the hover class on and off.
+  let dragDepth = 0;
+  function onDragEnter(e: DragEvent) {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    dragDepth++;
+  }
+  function onDragLeave(e: DragEvent) {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    if (dragDepth > 0) dragDepth--;
+  }
+  function onDragOver(e: DragEvent) {
+    // preventDefault is required for `drop` to fire in the DOM; we
+    // don't actually use the DOM drop event (Wails wins), but
+    // suppressing the browser's default "show NOT-ALLOWED cursor on
+    // file drag" makes the affordance correct.
+    if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+  }
+  $: isDragging = dragDepth > 0;
 
   // Get SPRM from S950: re-pull just the SPRM block for the
   // currently selected sample. Fast (~50ms), no modal needed.
@@ -101,12 +189,56 @@
   let sliceError = '';
   let sliceUnsub: (() => void) | null = null;
 
+  // True when the user has Commit-Slices'd this source already; the
+  // returned children are sitting in the sidebar awaiting upload.
+  // Apply uses them as the payload (preserving any names/loop tweaks
+  // the user made post-commit) instead of re-extracting from source.
+  $: committedChildren = $samples
+    .filter((s) => s.parentSlot === smp.slot && s.source === 'local')
+    .sort((a, b) => a.slot - b.slot);
+  $: hasCommitted = committedChildren.length > 0;
+
   function buildSlicingRequest() {
-    // words12 is populated by ImportSample; missing only when the
-    // current sample is the in-memory stub. The backend's Inspect
-    // catches the empty-buffer case and reports it as an error, so
-    // the modal still surfaces a useful message instead of pushing
-    // silence to the device.
+    // Two upload paths:
+    //   • Committed path — children rows exist in the sidebar. Concat
+    //     their words12 into one virtual source and generate slice
+    //     specs that point at each child's range. Names + per-slice
+    //     loop configs come from the children, so post-commit edits
+    //     are honoured by the backend extractor.
+    //   • Direct path — no commit. Send the source's words12 + current
+    //     slice config (the legacy in-one-shot flow).
+    if (hasCommitted) {
+      let offset = 0;
+      const slices: any[] = [];
+      const buf: number[] = [];
+      for (const c of committedChildren) {
+        const w = c.words12 ?? [];
+        slices.push({
+          name: c.name,
+          startWord: offset,
+          lengthWords: w.length,
+          loopMode: c.mode,
+          loopStart: c.loopStart,
+          loopLength: c.loopLength,
+        });
+        for (let i = 0; i < w.length; i++) buf.push(w[i]);
+        offset += w.length;
+      }
+      return {
+        sourceWords: buf,
+        sourceRateHz: smp.rate,
+        slices,
+        baseName: smp.name,
+        programName: smp.name.slice(0, 10),
+        baseMidiKey: 36,
+        firstSampleSlot: -1,
+        programSlot: -1,
+      };
+    }
+    // Direct path — words12 is populated by ImportSample; missing
+    // only when the current sample is the in-memory stub. The
+    // backend's Inspect catches the empty-buffer case and reports it
+    // as an error.
     const sourceWords = smp.words12 ?? [];
     return {
       sourceWords,
@@ -160,6 +292,15 @@
 
     try {
       await (App as any).ApplySlicing(buildSlicingRequest());
+      // On success, any committed children that fed this upload are
+      // now duplicates — the device has the real samples at new
+      // slots, and the local children should be discarded so the
+      // sidebar doesn't show both. Catalog refresh (next Connect /
+      // explicit Get) will surface the new device entries.
+      if (hasCommitted) {
+        const childSlots = new Set(committedChildren.map((c) => c.slot));
+        samples.update((xs) => xs.filter((s) => !childSlots.has(s.slot)));
+      }
     } catch (e: any) {
       sliceError = String(e?.message ?? e);
       slicePhase = 'error';
@@ -183,7 +324,20 @@
     preview.stop();
   });
 
-  $: smp = $selectedSample;
+  // EMPTY_SAMPLE is the type-safe fallback used while the sidebar is
+  // empty (fresh app, no Connect, no imports). The reactive
+  // derivations below all need a defined Sample to avoid runtime
+  // throws; the actual empty-state UI is gated separately via
+  // `hasSample` so the user sees the call-to-action, not these
+  // zeroed-out numbers.
+  const EMPTY_SAMPLE: Sample = {
+    slot: -1, name: '', rate: 26040, length: 1,
+    start: 0, end: 1, loopStart: 0, loopLength: 0,
+    mode: 'one-shot', reverse: false, velXfade: false,
+    tune: 0, loudness: 0, source: 'local',
+  };
+  $: smp = $selectedSample ?? EMPTY_SAMPLE;
+  $: hasSample = !!$selectedSample;
 
   // ---------- Zoom + visible window ----------
   // zoom × zoomCenter define which slice of [0..smp.length] words
@@ -519,6 +673,12 @@
     if (e.key === ' ' || e.code === 'Space') {
       if (inField) return;
       e.preventDefault();
+      // Toggle: a second tap on space while looping playback is in
+      // flight should stop, not stack another source on top.
+      if (preview.isPlaying()) {
+        preview.stop();
+        return;
+      }
       if ($slicing.active && $slicing.selectedIndex >= 0) {
         previewSlice($slicing.selectedIndex);
       } else {
@@ -580,11 +740,36 @@
   $: regenWaveform($selectedSampleSlot);
 
   // Ruler ticks every ~70ms across the waveform.
+  // Ruler step picks the smallest "nice" interval that keeps the
+  // total tick count near targetTicks (≈8). Without this, a fixed
+  // 70ms step produces 80+ ticks for a 6-second sample and the
+  // labels become an illegible smear. Adapts to the visible window
+  // (visibleSec) so zoomed-in views show finer ticks.
+  $: visibleSec = visibleN / smp.rate;
+  function pickRulerStep(span: number, targetTicks = 8): number {
+    if (span <= 0) return 1;
+    const raw = span / targetTicks;
+    const steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300];
+    for (const s of steps) if (s >= raw) return s;
+    return Math.ceil(raw / 60) * 60;
+  }
+  function fmtRulerLabel(t: number, step: number): string {
+    if (step < 1)  return `${t.toFixed(2)}s`;
+    if (step < 10) return `${t.toFixed(1)}s`;
+    return `${Math.round(t)}s`;
+  }
   $: ruler = (() => {
+    const span = visibleSec > 0 ? visibleSec : durationSec;
+    const step = pickRulerStep(span);
     const out: Array<{ left: number; label: string }> = [];
-    const step = 0.07;
-    for (let t = 0; t < durationSec; t += step) {
-      out.push({ left: (t / durationSec) * 100, label: `${t.toFixed(2)}s` });
+    // Start at the first tick ≥ viewStart's time (so zoomed views
+    // still anchor to round numbers like 1.0s, not 1.07s).
+    const startSec = viewStart / smp.rate;
+    const firstTick = Math.ceil(startSec / step) * step;
+    for (let t = firstTick; t < startSec + span; t += step) {
+      const left = ((t * smp.rate - viewStart) / visibleN) * 100;
+      if (left < 0 || left > 100) continue;
+      out.push({ left, label: fmtRulerLabel(t, step) });
     }
     return out;
   })();
@@ -596,7 +781,7 @@
   on:keydown={onWindowKeyDown} />
 
 <div class="app app--3row">
-  <Topbar slotChip={`${$samples.length} / 100 samples`} />
+  <Topbar slotCount={`${$samples.length} / 100`} slotNoun="samples" />
 
   <aside class="sidebar">
     <div class="sidebar__head">
@@ -612,17 +797,60 @@
           role="button"
           tabindex="0">
           <span class="sample__slot">{s.slot.toString().padStart(2, '0')}</span>
-          <span class="sample__name">{s.name}</span>
-          <span class="sample__rate">{Math.round(s.rate / 1000)}k</span>
+          <span class="sample__name">{s.name || '(unnamed)'}</span>
+          {#if s.source === 'local'}
+            <!-- LOCAL tag for un-uploaded imports. Sits in the same
+                 column as the rate so device samples still show kHz
+                 — the two never apply at the same time (locals always
+                 have a known rate but the tag is more important info). -->
+            <span class="sample__tag sample__tag--local" title="Imported but not yet on the S950">LOCAL</span>
+          {:else}
+            <span class="sample__rate">{Math.round(s.rate / 1000)}k</span>
+          {/if}
         </div>
       {/each}
+      {#if $samples.length === 0}
+        <div class="sample-list__empty">
+          No samples.<br/>Drop a file or connect to S950.
+        </div>
+      {/if}
     </div>
-    <div class="dropzone-hint">
-      drag .wav / .aiff files here<br/>to replace this sample
+    <div class="dropzone-hint"
+      class:is-dragging={isDragging}
+      style="--wails-drop-target: drop;"
+      on:dragenter={onDragEnter}
+      on:dragleave={onDragLeave}
+      on:dragover={onDragOver}>
+      {#if $samples.length === 0}
+        drag .wav / .aiff files here<br/>to import
+      {:else}
+        drag .wav / .aiff files here<br/>to replace the selected sample
+      {/if}
     </div>
   </aside>
 
   <main class="main">
+    {#if !hasSample}
+      <!-- Empty state: sidebar holds nothing yet (fresh app, not
+           connected, no imports). The whole panel acts as a drop
+           target, so a single drag-and-drop creates the first row
+           without the user having to think about slot assignment. -->
+      <div class="sample-empty"
+        class:is-dragging={isDragging}
+        style="--wails-drop-target: drop;"
+        on:dragenter={onDragEnter}
+        on:dragleave={onDragLeave}
+        on:dragover={onDragOver}>
+        <div class="sample-empty__title">No samples loaded</div>
+        <p class="sample-empty__hint">
+          Drop a <strong>.wav</strong> or <strong>.aif</strong> file anywhere on this panel,
+          or connect to an S950 to pull its sample catalog.
+        </p>
+        <button type="button" class="btn btn--primary" on:click={() => importSample()}>
+          Import .wav / .aiff…
+        </button>
+      </div>
+    {:else}
     <!-- Identity strip. Card chrome (title, subtitle, big padding)
          dropped to give the waveform + Slices card more vertical
          room — the metadata is repeated in the topbar slot chip
@@ -637,7 +865,11 @@
         </div>
         <div class="identity__cell">
           <span class="row__label">Slot</span>
-          <span class="field">{smp.slot.toString().padStart(2, '0')}</span>
+          <span class="field field--source-{smp.source}">
+            {smp.slot.toString().padStart(2, '0')}
+            <span class="source-dot" aria-hidden="true"></span>
+            <span class="source-tag">{smp.source === 'local' ? 'local only' : 'on S950'}</span>
+          </span>
         </div>
         <div class="identity__cell">
           <span class="row__label">Rate</span>
@@ -666,8 +898,16 @@
       </div>
     </section>
 
-    <!-- Waveform card -->
-    <section class="card waveform-card">
+    <!-- Waveform card. The Wails CSS drop-target property covers the
+         whole card (waveform + legend) so the natural target — the
+         visible audio area — accepts file drops in addition to the
+         sidebar hint. -->
+    <section class="card waveform-card"
+      class:is-dragging={isDragging}
+      style="--wails-drop-target: drop;"
+      on:dragenter={onDragEnter}
+      on:dragleave={onDragLeave}
+      on:dragover={onDragOver}>
       <div class="card__head">
         <div>
           <div class="card__title">Waveform</div>
@@ -747,11 +987,11 @@
           <span class="slice-beats__count">→ {slicesFor($slicing.bars, $slicing.division)} slices</span>
         </div>
       {/if}
-      <!-- svelte-ignore a11y-click-events-have-key-events
-           The waveform's click affordances (drop slice in manual mode,
+      <!-- The waveform's click affordances (drop slice in manual mode,
            drag markers) have no meaningful keyboard analogue — slice
            drop is anchored on the mouse cursor position. Numeric edits
            of Start/End/Loop via NumFields cover the keyboard path. -->
+      <!-- svelte-ignore a11y-click-events-have-key-events -->
       <div
         class="waveform"
         class:waveform--slicing={$slicing.active}
@@ -1072,17 +1312,33 @@
           <div class="card__subtitle">MRCC Port 03 · slot {smp.slot.toString().padStart(2, '0')}</div>
         </div>
         <div class="actions actions--stack">
-          {#if $slicing.active}
-            <!-- Headline action when slicing: uploads N samples to the
-                 next free slots and auto-builds a program with N
-                 keygroups mapped chromatically. Drives the real
-                 Inspect → Preflight → Apply flow with live progress. -->
+          {#if $slicing.active || hasCommitted}
+            <!-- Headline action when slicing or already committed.
+                 Commit materialises the slices as N local sidebar rows
+                 (optional preview step). Apply uploads — either from
+                 source words (no commit) or from the committed child
+                 rows (post-commit). Children disappear on Apply
+                 success, unlocking Commit for the next run. -->
+            {#if $slicing.active && !hasCommitted}
+              <button type="button" class="btn"
+                disabled={!preview.hasHostAudio(smp) || $slicing.slices.length === 0}
+                title={preview.hasHostAudio(smp)
+                  ? 'Create N local sample rows from the current slices (no upload yet)'
+                  : 'Import audio first'}
+                on:click={() => commitSlices()}>
+                Commit {$slicing.slices.length} slices to sidebar
+              </button>
+            {/if}
             <button type="button" class="btn btn--primary" on:click={startApplySlicing}>
-              Apply slicing → {$slicing.slices.length} samples + program
+              {#if hasCommitted}
+                Apply → upload {committedChildren.length} samples + program
+              {:else}
+                Apply slicing → {$slicing.slices.length} samples + program
+              {/if}
             </button>
             <hr class="panel__divider" />
           {/if}
-          <button type="button" class="btn btn--primary" on:click={importSample}>Import .wav / .aiff…</button>
+          <button type="button" class="btn btn--primary" on:click={() => importSample()}>Import .wav / .aiff…</button>
           <button type="button" class="btn" on:click={openTransfer}>Replace from S950</button>
           <button type="button" class="btn" on:click={openTransfer}>Download .wav…</button>
           <hr class="panel__divider" />
@@ -1091,6 +1347,7 @@
         </div>
       </div>
     </section>
+    {/if}
   </main>
 
   <Statusbar
@@ -1100,7 +1357,9 @@
       { key: 'space', label: 'preview' },
       { key: '⌘↵', label: 'send to s950' },
     ]}
-    status={`${smp.name} · slot ${smp.slot.toString().padStart(2, '0')} · ${smp.mode} · ${smp.length.toLocaleString()} words`}
+    status={hasSample
+      ? `${smp.name} · slot ${smp.slot.toString().padStart(2, '0')} · ${smp.mode} · ${smp.length.toLocaleString()} words · ${smp.source === 'local' ? 'local only' : 'on S950'}`
+      : 'no sample selected'}
   />
 </div>
 
@@ -1295,7 +1554,9 @@
 
   .identity {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto;
+    /* Slot column gets minmax(140px, 1.4fr) so the slot number +
+       sync dot + "local only" tag fit on one line. */
+    grid-template-columns: 2fr minmax(140px, 1.4fr) 1fr 1fr 1fr auto;
     gap: 14px;
     align-items: center;
   }
@@ -1320,6 +1581,70 @@
     color: var(--grey-medium);
     cursor: not-allowed;
   }
+  /* Empty-state panel shown when no samples are loaded. Centred CTA,
+     dashed border to mirror the dropzone-hint affordance — the whole
+     thing is a drop target, so dragging anywhere on it imports. */
+  .sample-empty {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 40px 24px;
+    margin: 0;
+    background: var(--white);
+    border: dashed var(--bw) var(--grey-medium);
+    border-radius: var(--r);
+    color: var(--grey-dark);
+    transition: background 120ms, border-color 120ms, color 120ms;
+  }
+  .sample-empty.is-dragging {
+    border-color: var(--rb-yellow);
+    background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
+    color: var(--black);
+  }
+  .sample-empty__title {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--black);
+  }
+  .sample-empty__hint {
+    margin: 0;
+    text-align: center;
+    max-width: 360px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  /* Source dot + tag inside the identity Slot field. The dot tracks
+     the sync state at a glance; the tag spells it out for users who
+     don't yet have the dot's meaning memorised. Magenta = local-only,
+     green = device-committed. */
+  .field--source-local .source-dot { background: var(--rb-orange); }
+  .field--source-device .source-dot { background: var(--rb-green); }
+  .source-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1px solid var(--black);
+    margin-left: 4px;
+    flex-shrink: 0;
+  }
+  .source-tag {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--grey-dark);
+    margin-left: 4px;
+  }
+  .field--source-local .source-tag { color: var(--black); font-weight: 700; }
+
   .identity__cell { display: flex; flex-direction: column; gap: 3px; }
   /* Identity strip's row__label is smaller + tighter than the standard
      .row__label so the metadata strip stays visually distinct. */

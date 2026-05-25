@@ -225,7 +225,7 @@
   class="app app--canvas"
   class:is-resizing={dragging}
   style="--props-h: {propsH}px;">
-  <Topbar slotChip={`${$samples.length} / 100 slots`} />
+  <Topbar slotCount={`${$samples.length} / 100`} slotNoun="samples" />
 
   <!-- Samples sidebar — drag source for zone binding (drag impl is TODO). -->
   <aside class="sidebar">

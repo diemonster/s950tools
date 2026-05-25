@@ -8,8 +8,14 @@
     refreshPorts, refreshStatus, connect, disconnect,
   } from './state/connection';
 
-  // Page-specific slot count (programs vs samples). Set by each route.
+  // Page-specific slot count. `slotCount` is the loud part (e.g.
+  // "3 / 100") and `slotNoun` is the descriptor ("programs", "samples")
+  // that gets hidden on narrow viewports so the chip never clips.
+  // `slotChip` is the legacy single-string prop kept for the few tabs
+  // that haven't migrated yet; if set, it's rendered as-is.
   export let slotChip: string = '';
+  export let slotCount: string = '';
+  export let slotNoun: string = '';
 
   onMount(async () => {
     // Enumerate ports on mount + reflect any pre-existing connection
@@ -95,8 +101,13 @@
   <span class={statusChipClass}>
     <span class="status-dot"></span>{statusChipLabel}
   </span>
-  {#if slotChip}
-    <span class="chip accent">{slotChip}</span>
+  {#if slotCount}
+    <span class="chip accent chip--slot">
+      <strong>{slotCount}</strong>
+      {#if slotNoun}<span class="chip__noun"> {slotNoun}</span>{/if}
+    </span>
+  {:else if slotChip}
+    <span class="chip accent chip--slot">{slotChip}</span>
   {/if}
 </header>
 

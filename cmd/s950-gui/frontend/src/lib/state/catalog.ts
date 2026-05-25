@@ -44,7 +44,9 @@ const ZONE_COLORS = [
 
 // Default sample shape used until SPRM is fetched. `length` is 1
 // instead of 0 so the waveform's percentage math doesn't divide by
-// zero; the waveform will render flat for an unloaded entry.
+// zero; the waveform will render flat for an unloaded entry. The
+// source is 'device' because skinnySample is only produced from a
+// catalog entry — the row exists on the S950.
 function skinnySample(slot: number, name: string): Sample {
   return {
     slot, name,
@@ -55,6 +57,7 @@ function skinnySample(slot: number, name: string): Sample {
     mode: 'one-shot',
     reverse: false, velXfade: false,
     tune: 0, loudness: 0,
+    source: 'device',
   };
 }
 
@@ -83,13 +86,22 @@ export async function refreshCatalog(): Promise<void> {
   loadedSamples.clear();
 
   if (newSamples.length > 0) {
-    samples.set(newSamples);
+    // Preserve local-only imports through a Connect — they're audio
+    // the user dragged in but hasn't uploaded yet, and Connect
+    // shouldn't silently wipe that work. If a device slot happens to
+    // shadow a local slot, the device wins (it's the source of
+    // truth); the local entry is dropped.
+    const locals = get(samples).filter((s) => s.source === 'local');
+    const deviceSlots = new Set(newSamples.map((s) => s.slot));
+    const survivingLocals = locals.filter((s) => !deviceSlots.has(s.slot));
+    const merged = [...newSamples, ...survivingLocals].sort((a, b) => a.slot - b.slot);
+    samples.set(merged);
     // Keep current selection if its slot still exists; otherwise
     // fall back to the lowest slot so the editor doesn't end up
     // dereffing an empty array.
     const curSlot = get(selectedSampleSlot);
-    if (!newSamples.find((s) => s.slot === curSlot)) {
-      selectedSampleSlot.set(newSamples[0].slot);
+    if (!merged.find((s) => s.slot === curSlot)) {
+      selectedSampleSlot.set(merged[0].slot);
     }
   }
   if (newPrograms.length > 0) {
@@ -123,6 +135,12 @@ export async function ensureProgramLoaded(slot: number, force = false): Promise<
 
 export async function ensureSampleLoaded(slot: number, force = false): Promise<void> {
   if (!force && loadedSamples.has(slot)) return;
+  // Skip local-only samples — fetching SPRM would either fail (no
+  // audio on device for this slot) or, worse, overwrite the
+  // imported PCM with phantom device data. Local samples live in
+  // host memory only until the user explicitly uploads.
+  const existing = get(samples).find((s) => s.slot === slot);
+  if (existing && existing.source === 'local') return;
   try {
     const params = await App.GetSampleParams(slot);
     const full = sampleParamsToSample(params, slot);
@@ -248,6 +266,9 @@ function sampleParamsToSample(p: any, slot: number): Sample {
     // Stash the 120-byte SPRM block for round-trip on Send.
     // Wails sends [120]byte as a number array; we mirror that.
     raw: Array.from(p.Raw ?? []),
+    // Definitionally 'device' — this converter only runs after a
+    // successful GetSampleParams round trip.
+    source: 'device',
   } as Sample;
 }
 

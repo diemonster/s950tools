@@ -11,7 +11,7 @@
 
 import { get } from 'svelte/store';
 import * as App from '../../../wailsjs/go/main/App';
-import { programs, type Program, type Keygroup, type Layer } from './programs';
+import { programs, type Program, type Keygroup } from './programs';
 import { samples, type Sample } from './samples';
 import { phase } from './connection';
 import { setSync } from '../sync';

@@ -102,6 +102,10 @@ body {
   padding: 4px 10px;
   background: var(--black);
   color: var(--rb-yellow);
+  /* Tight topbars shouldn't wrap the brand to two lines or squeeze it
+     to half-width — the chrome looks broken when it happens. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tabs { display: flex; gap: 4px; margin-left: 24px; }
 .tab {
@@ -143,16 +147,27 @@ body {
 .chip.on { background: var(--black); color: var(--rb-yellow); }
 .chip.accent { background: var(--rb-magenta); color: var(--white); }
 .chip__label { color: var(--grey-dark); margin-right: 4px; }
+/* The "programs / samples" suffix on the slot count chip — hidden in
+   the tight media query so the chip stays a fixed count and never
+   gets clipped. The count itself (the bold number) always renders. */
+.chip__noun { opacity: 0.85; }
 
-/* Tight mode for narrower windows — kicks in below 1280px. Shrinks
-   the chip text and hides the "MIDI in/out" labels so port names
-   keep room. The status badge + slot count stay visible. */
+/* Tighter modes layered in two steps. The default Wails window is
+   1440px wide, which is already cramped once port names are picked
+   and the status + slot chips are visible — so we hide the chip
+   labels + nouns first at 1440. Below 1280, fall through to the
+   compact font + padding mode.
+   Splitting these means at the default width the chips stay legible
+   and the slot count never clips off the right edge. */
+@media (max-width: 1440px) {
+  .chip__label { display: none; }
+  .chip__noun { display: none; }
+}
 @media (max-width: 1280px) {
   .topbar { gap: 8px; padding: 0 10px; }
   .tabs { margin-left: 12px; gap: 3px; }
   .tab { font-size: 11px; padding: 5px 9px; }
   .chip { font-size: 10px; padding: 3px 8px; }
-  .chip__label { display: none; }
   .logo { font-size: 12px; padding: 3px 8px; }
 }
 @media (max-width: 1100px) {
@@ -273,6 +288,33 @@ body {
   font-size: 10px;
   color: var(--grey-dark);
 }
+/* LOCAL tag in the sidebar row — orange pill that's deliberately a
+   different colour from the yellow "selected" highlight so it stays
+   legible on both selected and unselected rows. */
+.sample__tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--black);
+}
+.sample__tag--local {
+  background: var(--rb-orange);
+  color: var(--black);
+}
+/* Sidebar empty state — shown when the samples list is genuinely
+   empty (no connect, no imports). Sits inside the scrolling list
+   container so the dropzone-hint stays visible below it. */
+.sample-list__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--grey-dark);
+  text-align: center;
+  padding: 14px 8px;
+  font-style: italic;
+}
 .dropzone-hint {
   margin: 8px;
   padding: 14px;
@@ -282,6 +324,27 @@ body {
   font-size: 12px;
   text-align: center;
   font-style: italic;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+/* Hover state while a file is being dragged over (anywhere with
+   .is-dragging). Yellow border + tinted background mirrors the
+   slice-marker highlight palette so the "accepted" affordance is
+   consistent across the app. */
+.dropzone-hint.is-dragging,
+.waveform-card.is-dragging {
+  border-color: var(--rb-yellow);
+  background: color-mix(in srgb, var(--rb-yellow) 10%, var(--white));
+}
+.dropzone-hint.is-dragging {
+  color: var(--black);
+  font-style: normal;
+  font-weight: 600;
+}
+.waveform-card.is-dragging {
+  /* The waveform card already has its own border via .card; switching
+     just the colour keeps the layout stable (no border-width shift). */
+  box-shadow: inset 0 0 0 2px var(--rb-yellow);
+  transition: box-shadow 120ms, background 120ms;
 }
 
 /* ---------- Cards (Program + Sample) ---------- */

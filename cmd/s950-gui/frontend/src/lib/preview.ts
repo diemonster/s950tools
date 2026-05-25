@@ -15,6 +15,11 @@ import type { Slice } from './state/slicing';
 // even if they never explicitly resumed the context.
 let ctx: AudioContext | null = null;
 let current: AudioBufferSourceNode | null = null;
+// Secondary sources spawned alongside `current` (e.g. the ping-pong
+// pre-roll node that bridges sample-start into the looping segment).
+// Tracked separately so stop() can tear all of them down at once
+// without losing the meaning of "is something playing" via `current`.
+const extras: AudioBufferSourceNode[] = [];
 
 function audioContext(): AudioContext {
   if (!ctx) {
@@ -51,14 +56,28 @@ function bufferFor(s: Sample): AudioBuffer | null {
 }
 
 // stop tears down the in-flight source. Calling preview again does
-// this automatically — exposed so a "press Esc to stop" shortcut
-// can wire up later without going through play().
+// this automatically — exposed so the spacebar handler can toggle
+// playback (second press while audio is in flight should stop).
 export function stop() {
   if (current) {
     try { current.stop(); } catch {}
     current.disconnect();
     current = null;
   }
+  // Tear down any secondary sources we scheduled (e.g. the ping-pong
+  // pre-roll feeding into the loop source).
+  for (const s of extras) {
+    try { s.stop(); } catch {}
+    s.disconnect();
+  }
+  extras.length = 0;
+}
+
+// isPlaying lets the UI toggle preview on/off with one shortcut:
+// pressing space again while a loop is running should stop, not
+// stack a second source on top.
+export function isPlaying(): boolean {
+  return current !== null;
 }
 
 // previewRegion plays [startWord..startWord+lengthWords] of the
@@ -81,27 +100,61 @@ export function previewRegion(
   if (!buf) return false;
   stop();
   const ac = audioContext();
-  const src = ac.createBufferSource();
-  src.buffer = buf;
 
   const startSec  = startWord  / s.rate;
   const lenSec    = lengthWords / s.rate;
-  const endSec    = startSec + lenSec;
+  const loopStartAbs = startSec + loopStartWord / s.rate;
+  const loopEndAbs   = startSec + (loopStartWord + loopLengthWord) / s.rate;
 
-  if (loopMode === 'loop' || loopMode === 'ping-pong') {
-    if (loopMode === 'ping-pong') {
-      // TODO: Web Audio has no native ping-pong. Could emulate with
-      // a second source playing in reverse with a delay equal to one
-      // loop length, but it's a meaningful chunk of work. Falls back
-      // to forward-loop for now — still useful for clickless-loop
-      // auditioning.
-      console.info('[preview] ping-pong → forward-loop (Web Audio fallback)');
-    }
+  // ---------- Ping-pong ----------
+  // Web Audio's native loop is forward-only. We synthesise ping-pong
+  // by building a stitched buffer of [reverse(loop), forward(loop)]
+  // and looping that. The reverse → forward boundary is mathematically
+  // continuous (both halves meet at the loopStart sample), so the
+  // loop seam is inaudible.
+  if (loopMode === 'ping-pong' && loopLengthWord > 0) {
+    // Pre-roll: play normally from startWord up to the end of the
+    // loop region (the standard ping-pong entry), no loop.
+    const preRoll = ac.createBufferSource();
+    preRoll.buffer = buf;
+    preRoll.connect(ac.destination);
+    const preRollEnd = loopEndAbs;       // absolute seconds in source buffer
+    const preRollDur = preRollEnd - startSec;
+    preRoll.start(0, startSec, preRollDur);
+
+    // Loop buffer: reverse half then forward half, both covering the
+    // loop region. Looping this buffer produces alternating
+    // backward/forward playback that bounces off loopStart and loopEnd.
+    const srcArr = buf.getChannelData(0);
+    const startIdx = Math.max(0, Math.floor(loopStartAbs * s.rate));
+    const endIdx   = Math.min(srcArr.length, Math.floor(loopEndAbs * s.rate));
+    const segLen   = Math.max(1, endIdx - startIdx);
+    const pingBuf  = ac.createBuffer(1, segLen * 2, s.rate);
+    const dst = pingBuf.getChannelData(0);
+    for (let i = 0; i < segLen; i++) dst[i] = srcArr[endIdx - 1 - i];     // reverse
+    for (let i = 0; i < segLen; i++) dst[segLen + i] = srcArr[startIdx + i]; // forward
+
+    const loopSrc = ac.createBufferSource();
+    loopSrc.buffer = pingBuf;
+    loopSrc.loop = true;
+    loopSrc.connect(ac.destination);
+    loopSrc.start(ac.currentTime + preRollDur);
+
+    extras.push(preRoll);
+    current = loopSrc;
+    return true;
+  }
+
+  // ---------- One-shot + forward loop ----------
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+
+  if (loopMode === 'loop') {
     src.loop = true;
     // loopStart/loopEnd are absolute seconds in the buffer (not
     // relative to the source's start parameter), per spec.
-    src.loopStart = startSec + loopStartWord / s.rate;
-    src.loopEnd   = startSec + (loopStartWord + loopLengthWord) / s.rate;
+    src.loopStart = loopStartAbs;
+    src.loopEnd   = loopEndAbs;
   }
 
   src.connect(ac.destination);
