@@ -94,6 +94,28 @@ export namespace main {
 	        this.channel = source["channel"];
 	    }
 	}
+	export class ImportInfo {
+	    path: string;
+	    name: string;
+	    rate: number;
+	    length: number;
+	    pcm: number[];
+	    words: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	        this.rate = source["rate"];
+	        this.length = source["length"];
+	        this.pcm = source["pcm"];
+	        this.words = source["words"];
+	    }
+	}
 	export class OccupiedSlot {
 	    kind: string;
 	    slot: number;

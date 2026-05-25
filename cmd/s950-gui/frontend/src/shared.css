@@ -323,7 +323,9 @@ body {
   padding: 4px 0;
   font-size: 13px;
 }
-.row label {
+.row label,
+.row .row__label,
+.row__label {
   font-family: var(--font-mono);
   text-transform: uppercase;
   font-size: 10px;
@@ -362,6 +364,12 @@ body {
   user-select: none;
   padding: 0 4px;
   color: var(--grey-dark);
+  /* Reset button chrome — the stepper renders as a borderless ± inside
+     the parent .field shell. */
+  border: none;
+  background: transparent;
+  font: inherit;
+  line-height: 1;
 }
 .toggle {
   font-family: var(--font-mono);

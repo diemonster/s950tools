@@ -52,6 +52,10 @@ export type Keygroup = {
   constPitch: boolean;
   keyFilter: boolean;
   mod: Modulation;
+  // Round-trip cache: the 140-byte keygroup wire payload as hex.
+  // Populated when we load from the device; passed back on SetProgram
+  // so undocumented/reserved bytes the S950 still uses survive.
+  rawBytesHex?: string;
 };
 
 export type Program = {
@@ -62,6 +66,9 @@ export type Program = {
   keyTilt: number;
   positionalXfade: boolean;
   keygroups: Keygroup[];
+  // Round-trip cache: the 76-byte program-header wire payload as hex.
+  // Same purpose as Keygroup.rawBytesHex — see comment there.
+  rawHeaderHex?: string;
 };
 
 // Default modulation block — same values as examples/program.json's
@@ -177,9 +184,13 @@ function makeSelectedProgram() {
       // If the user edited the slot itself, the selection must follow
       // — otherwise the next .update() looks for the old slot, finds
       // nothing, and the rest of the form silently no-ops.
+      const targetSlot = patch.slot ?? slot;
       if (patch.slot !== undefined && patch.slot !== slot) {
         selectedSlot.set(patch.slot);
       }
+      // Schedule a live-sync write-back. Lazy-imported to avoid a
+      // circular dependency (livesync imports programs).
+      void import('./livesync').then((m) => m.scheduleProgramWriteback(targetSlot));
     },
   };
 }
@@ -211,6 +222,9 @@ function makeSelectedKeygroup() {
           };
         })
       );
+      // Live-sync the whole program — keygroup edits live inside a
+      // PRGM block, no granular per-keygroup write on the S950.
+      void import('./livesync').then((m) => m.scheduleProgramWriteback(slot));
     },
     updateSoft(patch: Partial<Layer>) {
       const k = get(inner);

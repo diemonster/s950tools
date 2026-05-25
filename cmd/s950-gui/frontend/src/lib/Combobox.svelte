@@ -39,6 +39,18 @@
   function onKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') open = false;
   }
+  function onTriggerKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
+  }
+  function onOptionKey(e: KeyboardEvent, v: string) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      pick(v);
+    }
+  }
 
   // Selected label for display — fall back to placeholder if value
   // is empty.
@@ -56,20 +68,33 @@
     class:is-disabled={disabled}
     class:combobox__field--open={open}
     on:click={toggle}
+    on:keydown={onTriggerKey}
     role="button"
+    aria-haspopup="listbox"
+    aria-expanded={open}
     tabindex="0">
     <span class="combobox__value">{selectedLabel || placeholder}</span>
     <span class="combobox__caret">▾</span>
   </span>
   {#if open}
-    <ul class="combobox__menu">
+    <ul class="combobox__menu" role="listbox">
       {#if allowNone}
-        <li class:selected={value === ''} on:click={() => pick('')}>
+        <li class:selected={value === ''}
+          on:click={() => pick('')}
+          on:keydown={(e) => onOptionKey(e, '')}
+          role="option"
+          aria-selected={value === ''}
+          tabindex="0">
           <span class="combobox__none">(none)</span>
         </li>
       {/if}
       {#each options as opt (opt.value)}
-        <li class:selected={opt.value === value} on:click={() => pick(opt.value)}>
+        <li class:selected={opt.value === value}
+          on:click={() => pick(opt.value)}
+          on:keydown={(e) => onOptionKey(e, opt.value)}
+          role="option"
+          aria-selected={opt.value === value}
+          tabindex="0">
           <span>{opt.label}</span>
           {#if opt.meta}<span class="combobox__meta">{opt.meta}</span>{/if}
         </li>

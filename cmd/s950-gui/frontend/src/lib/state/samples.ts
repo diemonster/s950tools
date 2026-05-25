@@ -14,11 +14,22 @@ export type Sample = {
   end: number;       // end point (words)
   loopStart: number; // loop start (words)
   loopLength: number;// loop length (words)
-  mode: 'one-shot' | 'loop' | 'alt';
+  mode: 'one-shot' | 'loop' | 'ping-pong';
   reverse: boolean;
   velXfade: boolean;
   tune: number;      // semitones + cents
   loudness: number;  // signed
+  // Round-trip cache of the original 120-byte SPRM block. Populated
+  // by GetSampleParams and passed back on SetSampleParams so the
+  // S950's reserved/undocumented bytes survive an edit cycle.
+  raw?: number[];
+  // ---------- Host-side audio (import-only) ----------
+  // pcm: int16 mono PCM at `rate`, used for Web Audio preview.
+  // words12: same audio as 12-bit S950 words, used as the slicing
+  // source so we don't re-convert on Apply. Both arrays are
+  // populated by ImportSample and never touched once stored.
+  pcm?: number[];
+  words12?: number[];
 };
 
 function s(
@@ -72,6 +83,9 @@ function makeSelectedSample() {
       samples.update((list) =>
         list.map((x) => (x.slot === slot ? { ...x, ...patch } : x))
       );
+      // Schedule SPRM write-back. Lazy-imported to avoid the
+      // livesync ↔ samples circular import.
+      void import('./livesync').then((m) => m.scheduleSampleWriteback(slot));
     },
   };
 }

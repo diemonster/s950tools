@@ -128,7 +128,7 @@
   class="field numfield-shell {extra}"
   class:is-disabled={disabled}
   on:wheel|preventDefault|nonpassive={onWheel}>
-  <span class="stepper" on:click={() => dec()} role="button" tabindex="-1">−</span>
+  <button type="button" class="stepper" on:click={() => dec()} tabindex="-1" aria-label="decrement">−</button>
   {#if editing}
     <input
       class="numfield__input"
@@ -146,7 +146,7 @@
       {format(value)}
     </span>
   {/if}
-  <span class="stepper" on:click={() => inc()} role="button" tabindex="-1">+</span>
+  <button type="button" class="stepper" on:click={() => inc()} tabindex="-1" aria-label="increment">+</button>
 </span>
 
 <style>

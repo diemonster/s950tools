@@ -15,10 +15,14 @@ export function GetProgram(arg1:number):Promise<protocol.ProgramJSON>;
 
 export function GetSampleParams(arg1:number):Promise<protocol.SampleParams>;
 
+export function ImportSample(arg1:string):Promise<main.ImportInfo>;
+
 export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPreflight>;
 
 export function ListPorts():Promise<main.PortList>;
 
 export function SetProgram(arg1:number,arg2:protocol.ProgramJSON):Promise<void>;
+
+export function SetSampleParams(arg1:number,arg2:protocol.SampleParams):Promise<void>;
 
 export function Status():Promise<main.ConnectionStatus>;

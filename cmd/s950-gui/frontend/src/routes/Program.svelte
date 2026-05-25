@@ -91,7 +91,7 @@
       </div>
 
       <div class="row">
-        <label>Name</label>
+        <span class="row__label">Name</span>
         <span class="field field--wide field--yellow">
           <input
             type="text"
@@ -101,7 +101,7 @@
         </span>
       </div>
       <div class="row">
-        <label>Slot</label>
+        <span class="row__label">Slot</span>
         <NumField
           value={$selectedProgram.slot}
           min={0} max={99}
@@ -109,7 +109,7 @@
           on:change={(e) => selectedProgram.update({ slot: e.detail })} />
       </div>
       <div class="row">
-        <label>MIDI prog #</label>
+        <span class="row__label">MIDI prog #</span>
         <NumField
           value={$selectedProgram.midiProg}
           min={1} max={128}
@@ -117,7 +117,7 @@
           on:change={(e) => selectedProgram.update({ midiProg: e.detail })} />
       </div>
       <div class="row">
-        <label>Respond to PC</label>
+        <span class="row__label">Respond to PC</span>
         <button
           type="button"
           class="toggle {$selectedProgram.respondPC ? 'on' : ''}"
@@ -129,14 +129,14 @@
       <details class="advanced">
         <summary>Advanced</summary>
         <div class="row">
-          <label>Key tilt</label>
+          <span class="row__label">Key tilt</span>
           <NumField
             value={$selectedProgram.keyTilt}
             min={-64} max={63}
             on:change={(e) => selectedProgram.update({ keyTilt: e.detail })} />
         </div>
         <div class="row">
-          <label>Positional xfade</label>
+          <span class="row__label">Positional xfade</span>
           <button
             type="button"
             class="toggle {$selectedProgram.positionalXfade ? 'on' : ''}"

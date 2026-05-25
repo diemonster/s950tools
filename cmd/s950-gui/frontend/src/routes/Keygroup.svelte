@@ -24,12 +24,6 @@
 
   let mode: 'drum' | 'ranged' = 'drum';
 
-  // Generic per-field updater for keygroup/layer/modulation knobs.
-  // Inline expressions can't use TS casts in Svelte 3, so route int
-  // parsing through helpers.
-  const num = (v: string | number): number => typeof v === 'number' ? v : parseInt(v, 10) || 0;
-  const numFloat = (v: string | number): number => typeof v === 'number' ? v : parseFloat(v) || 0;
-
   // ---------- Splitter drag ----------
   // Same behavior as the mockup: drag the 6px bar to shrink/grow the
   // properties row. Reads/writes --props-h on the .app element.
@@ -345,7 +339,7 @@
       <hr class="panel__divider" />
 
       <div class="row">
-        <label>Lower key</label>
+        <span class="row__label">Lower key</span>
         <NumField
           value={kg.lowKey}
           min={0} max={kg.highKey}
@@ -353,7 +347,7 @@
           on:change={(e) => selectedKeygroup.update({ lowKey: e.detail })} />
       </div>
       <div class="row">
-        <label>Upper key</label>
+        <span class="row__label">Upper key</span>
         <NumField
           value={kg.highKey}
           min={kg.lowKey} max={127}
@@ -361,14 +355,14 @@
           on:change={(e) => selectedKeygroup.update({ highKey: e.detail })} />
       </div>
       <div class="row">
-        <label>Vel switch</label>
+        <span class="row__label">Vel switch</span>
         <NumField
           value={kg.vel}
           min={1} max={128}
           on:change={(e) => selectedKeygroup.update({ vel: e.detail })} />
       </div>
       <div class="row">
-        <label>MIDI channel</label>
+        <span class="row__label">MIDI channel</span>
         <NumField
           value={kg.midiChannel}
           min={0} max={16}
@@ -376,7 +370,7 @@
           on:change={(e) => selectedKeygroup.update({ midiChannel: e.detail })} />
       </div>
       <div class="row">
-        <label>Voice out</label>
+        <span class="row__label">Voice out</span>
         <span class="field">{kg.voiceOut} ▾</span>
       </div>
     </div>
@@ -388,7 +382,7 @@
       </div>
       <div class="layer-hint">plays at velocities below the switch</div>
       <div class="row">
-        <label>Sample</label>
+        <span class="row__label">Sample</span>
         <Combobox
           value={kg.soft.sample}
           options={sampleOptions}
@@ -396,7 +390,7 @@
           on:change={(e) => selectedKeygroup.updateSoft({ sample: e.detail })} />
       </div>
       <div class="row">
-        <label>Transpose</label>
+        <span class="row__label">Transpose</span>
         <NumField
           value={kg.soft.transpose}
           min={-50} max={50} step={0.01}
@@ -404,14 +398,14 @@
           on:change={(e) => selectedKeygroup.updateSoft({ transpose: e.detail })} />
       </div>
       <div class="row">
-        <label>Filter</label>
+        <span class="row__label">Filter</span>
         <NumField
           value={kg.soft.filter}
           min={0} max={99}
           on:change={(e) => selectedKeygroup.updateSoft({ filter: e.detail })} />
       </div>
       <div class="row">
-        <label>Loudness</label>
+        <span class="row__label">Loudness</span>
         <NumField
           value={kg.soft.loudness}
           on:change={(e) => selectedKeygroup.updateSoft({ loudness: e.detail })} />
@@ -425,14 +419,14 @@
       </div>
       <div class="layer-hint">{kg.loud.sample ? 'plays at velocities at or above the switch' : 'assign a sample to enable this layer'}</div>
       <div class="row">
-        <label>Sample</label>
+        <span class="row__label">Sample</span>
         <Combobox
           value={kg.loud.sample}
           options={sampleOptions}
           on:change={(e) => selectedKeygroup.updateLoud({ sample: e.detail })} />
       </div>
       <div class="row">
-        <label>Transpose</label>
+        <span class="row__label">Transpose</span>
         <NumField
           value={kg.loud.transpose}
           min={-50} max={50} step={0.01}
@@ -441,7 +435,7 @@
           on:change={(e) => selectedKeygroup.updateLoud({ transpose: e.detail })} />
       </div>
       <div class="row">
-        <label>Filter</label>
+        <span class="row__label">Filter</span>
         <NumField
           value={kg.loud.filter}
           min={0} max={99}
@@ -449,7 +443,7 @@
           on:change={(e) => selectedKeygroup.updateLoud({ filter: e.detail })} />
       </div>
       <div class="row">
-        <label>Loudness</label>
+        <span class="row__label">Loudness</span>
         <NumField
           value={kg.loud.loudness}
           disabled={!kg.loud.sample}
@@ -508,28 +502,28 @@
            odd one out (Fade in) sits alone on its row. -->
       <div class="grid-2">
         <div class="row row--compact">
-          <label>Rate</label>
+          <span class="row__label">Rate</span>
           <NumField value={kg.mod.lfo.rate} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ lfo: { ...kg.mod.lfo, rate: e.detail } })} />
         </div>
         <div class="row row--compact">
-          <label>Depth</label>
+          <span class="row__label">Depth</span>
           <NumField value={kg.mod.lfo.depth} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ lfo: { ...kg.mod.lfo, depth: e.detail } })} />
         </div>
         <div class="row row--compact">
-          <label>Fade in</label>
+          <span class="row__label">Fade in</span>
           <NumField value={kg.mod.lfo.fadeIn} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ lfo: { ...kg.mod.lfo, fadeIn: e.detail } })} />
         </div>
         <div></div>
         <div class="row row--compact">
-          <label>Mod-wheel</label>
+          <span class="row__label">Mod-wheel</span>
           <NumField value={kg.mod.lfo.modWheel} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ lfo: { ...kg.mod.lfo, modWheel: e.detail } })} />
         </div>
         <div class="row row--compact">
-          <label>Aftertouch</label>
+          <span class="row__label">Aftertouch</span>
           <NumField value={kg.mod.lfo.aftertouch} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ lfo: { ...kg.mod.lfo, aftertouch: e.detail } })} />
         </div>
@@ -538,12 +532,12 @@
       <div class="panel__subtitle">Filter routing</div>
       <div class="grid-2">
         <div class="row row--compact">
-          <label>Env → VCF</label>
+          <span class="row__label">Env → VCF</span>
           <NumField value={kg.mod.envToVCF} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ envToVCF: e.detail })} />
         </div>
         <div class="row row--compact">
-          <label>Key track</label>
+          <span class="row__label">Key track</span>
           <NumField value={kg.mod.keyTrack} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ keyTrack: e.detail })} />
         </div>
@@ -571,7 +565,7 @@
 
       <div class="panel__subtitle">Pitch warp</div>
       <div class="row row--compact">
-        <label>Amount</label>
+        <span class="row__label">Amount</span>
         <NumField value={kg.mod.warpAmount} min={0} max={99} extra="field--xs"
           on:change={(e) => selectedKeygroup.updateMod({ warpAmount: e.detail })} />
       </div>
@@ -952,16 +946,7 @@
     margin-top: 4px;
   }
 
-  /* ADSR mini-graph + compact strip — see mockups/keygroup.html. */
-  .adsr {
-    height: 48px;
-    border: var(--bw) solid var(--black);
-    border-radius: var(--r);
-    background: var(--canvas);
-    position: relative;
-    overflow: hidden;
-  }
-  .adsr :global(svg) { display: block; width: 100%; height: 100%; }
+  /* Compact strip — see mockups/keygroup.html. */
   .row--compact { grid-template-columns: 84px 1fr; padding: 2px 0; gap: 6px; }
   .adsr-strip {
     display: grid;
@@ -1000,9 +985,11 @@
   }
   .panel__subtitle:first-of-type { margin-top: 0; }
   /* Compact field variant for the tightly-packed modulation panels.
-     Smaller padding + smaller font; NumField has matching internal
-     overrides via :global(.field--xs). */
-  .field--xs { padding: 0 4px; font-size: 11px; min-width: 0; }
+     Smaller padding + smaller font. NumField applies field--xs to its
+     internal .field via the extra prop, so the selector must be
+     :global() — the class never lands on a DOM node this stylesheet
+     directly owns. */
+  :global(.field--xs) { padding: 0 4px; font-size: 11px; min-width: 0; }
 
   .vel-grid {
     display: grid;

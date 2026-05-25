@@ -180,6 +180,22 @@ func (a *App) GetSampleParams(slot int) (*protocol.SampleParams, error) {
 	return d.GetParams(byte(slot))
 }
 
+// SetSampleParams writes the SPRM block back. The frontend rebuilds
+// the SampleParams from its edited Sample type and sends here —
+// device.SetParams uses the Raw[] field as the base, then overwrites
+// only the high-level fields we modelled, so reserved/undocumented
+// bytes from the original read round-trip safely.
+func (a *App) SetSampleParams(slot int, p protocol.SampleParams) error {
+	d, err := a.requireDevice()
+	if err != nil {
+		return err
+	}
+	if slot < 0 || slot > 99 {
+		return fmt.Errorf("slot %d out of range (0..99)", slot)
+	}
+	return d.SetParams(byte(slot), &p)
+}
+
 // SetProgram uploads a program (ProgramJSON shape) to slot N. The
 // frontend is responsible for running pre-flight checks before
 // calling this — the device may NAK on slot collisions or oversize

@@ -90,3 +90,23 @@ type SlicingProgress struct {
 	Percent     int    `json:"percent"`      // 0..100 over the whole job
 	Message     string `json:"message"`
 }
+
+// ---------- Audio import ----------
+
+// ImportInfo is returned by ImportSample. PCM is the int16 mono buffer
+// at the resolved sample rate, intended for browser-side Web Audio
+// preview. Words is the same audio converted to 12-bit S950 offset-
+// binary words, ready for upload via PutSampleOpenLoop / ApplySlicing.
+//
+// Both arrays cross the IPC boundary as JSON number arrays. That's
+// slow-ish for multi-minute samples (~36 MB serialized for a 4-min
+// breakbeat at 26 kHz) but fine for the typical drum-loop scale.
+// Future optimisation: keep audio host-side and pass a handle instead.
+type ImportInfo struct {
+	Path   string   `json:"path"`
+	Name   string   `json:"name"`   // basename, stripped of extension + truncated to 10 ASCII
+	Rate   uint32   `json:"rate"`   // resolved S950-range rate
+	Length uint32   `json:"length"` // total words (== len(Words))
+	PCM    []int16  `json:"pcm"`
+	Words  []uint16 `json:"words"`
+}

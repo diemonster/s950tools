@@ -20,12 +20,13 @@
     type Division,
   } from '../lib/state/slicing';
   import { ensureSampleLoaded } from '../lib/state/catalog';
+  import * as preview from '../lib/preview';
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
   // Wails bindings — regenerated on `wails dev` boot. The new
   // slicing methods land here after the Go side compiles.
   import * as App from '../../wailsjs/go/main/App';
-  import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
+  import { EventsOn } from '../../wailsjs/runtime/runtime';
 
   onMount(() => setSync('synced', 'Synced'));
 
@@ -37,6 +38,47 @@
   let modalKind: ModalKind = 'closed';
   function openTransfer() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
+
+  // Import: open the native file picker, decode + clamp + convert,
+  // and stash the audio on the selected sample's slot. Bypasses
+  // livesync deliberately — the device doesn't have this audio yet
+  // (only the slicing Apply pushes new samples up), so a stray SPRM
+  // writeback would either NAK or describe phantom audio. The user
+  // explicitly chose host-side Web Audio for preview here, so PCM
+  // never leaves memory until Apply Slicing.
+  async function importSample() {
+    setSync('sending', 'Importing…');
+    try {
+      const info = await (App as any).ImportSample('');
+      if (!info) {
+        setSync('synced', 'Synced');
+        return;
+      }
+      const slot = get(selectedSampleSlot);
+      samples.update((list) =>
+        list.map((x) =>
+          x.slot === slot
+            ? {
+                ...x,
+                name: info.name,
+                rate: info.rate,
+                length: info.length,
+                start: 0,
+                end: info.length,
+                loopStart: 0,
+                loopLength: 0,
+                pcm: info.pcm,
+                words12: info.words,
+              }
+            : x,
+        ),
+      );
+      const secs = (info.length / info.rate).toFixed(2);
+      setSync('synced', `Imported · ${secs}s`);
+    } catch (e: any) {
+      setSync('error', String(e?.message ?? e));
+    }
+  }
 
   // Get SPRM from S950: re-pull just the SPRM block for the
   // currently selected sample. Fast (~50ms), no modal needed.
@@ -60,12 +102,12 @@
   let sliceUnsub: (() => void) | null = null;
 
   function buildSlicingRequest() {
-    // TODO: real source words come from the WAV import flow. For now
-    // the frontend sends a zero-filled buffer of the displayed sample
-    // length — enough to exercise the IPC + state machine end-to-end
-    // until Import is wired. Slices' loop fields are passed through
-    // as-is.
-    const sourceWords = new Array(smp.length).fill(0);
+    // words12 is populated by ImportSample; missing only when the
+    // current sample is the in-memory stub. The backend's Inspect
+    // catches the empty-buffer case and reports it as an error, so
+    // the modal still surfaces a useful message instead of pushing
+    // silence to the device.
+    const sourceWords = smp.words12 ?? [];
     return {
       sourceWords,
       sourceRateHz: smp.rate,
@@ -134,7 +176,12 @@
     if (sliceUnsub) { sliceUnsub(); sliceUnsub = null; }
   }
 
-  onDestroy(() => { if (sliceUnsub) sliceUnsub(); });
+  onDestroy(() => {
+    if (sliceUnsub) sliceUnsub();
+    // Kill any in-flight Web Audio preview when navigating away —
+    // otherwise the source keeps playing through the new tab.
+    preview.stop();
+  });
 
   $: smp = $selectedSample;
 
@@ -153,7 +200,6 @@
     if (s + visibleN > smp.length) s = smp.length - visibleN;
     return s;
   })();
-  $: viewEnd   = viewStart + visibleN;
   $: viewBoxX  = (viewStart / smp.length) * 1000;
   $: viewBoxW  = (visibleN / smp.length) * 1000;
 
@@ -221,12 +267,37 @@
   // Real impl will play just the [start..end] window of the sample
   // through Web Audio (or a Wails-side player). For now it's a
   // console nudge so the UI affordance is wired end-to-end.
+  // Switching a slice from one-shot → loop/ping-pong seeds reasonable
+  // loop bounds so the band is immediately visible and grabbable. We
+  // only auto-place when there's no loop yet (loopLength == 0); if
+  // the user previously set a loop and switched to one-shot, their
+  // values stick around for the next switch back.
+  function setSliceLoopMode(idx: number, mode: SliceLoopMode) {
+    const sl = $slicing.slices[idx];
+    if (!sl) return;
+    if (mode !== 'one-shot' && sl.loopLength === 0) {
+      const start = Math.floor(sl.length / 2);
+      updateSliceAt(idx, {
+        loopMode: mode,
+        loopStart: start,
+        loopLength: sl.length - start,
+      });
+    } else {
+      updateSliceAt(idx, { loopMode: mode });
+    }
+  }
+
   function previewSlice(idx: number) {
     const s = $slicing.slices[idx];
     if (!s) return;
     selectSlice(idx);
-    // TODO: wire to backend audio preview.
-    console.log(`[preview slice ${idx + 1}] start=${s.start} length=${s.length} mode=${s.loopMode}`);
+    preview.previewSlice(smp, s);
+  }
+
+  // Whole-sample preview from the identity strip's ▶ button. Plays
+  // the [Start..End] window honouring the SPRM replay mode + loop.
+  function previewWhole() {
+    preview.previewSample(smp);
   }
 
   // ---------- Manual slice placement ----------
@@ -318,6 +389,87 @@
     if (wasMoved) lastDragEnd = performance.now();
   }
 
+  // ---------- Per-slice loop edge drag ----------
+  // Grab the left edge of a slice's loop band → moves loopStart while
+  // holding the loop's right edge in place. Grab the right edge →
+  // changes loopLength. Bounded inside [0..slice.length].
+  type LoopDrag = {
+    idx: number;
+    edge: 'start' | 'end';
+    startX: number;
+    startLoopStart: number;
+    startLoopLength: number;
+    moved: boolean;
+  };
+  let loopDrag: LoopDrag | null = null;
+
+  function onLoopHandleDown(e: MouseEvent, idx: number, edge: 'start' | 'end') {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selectSlice(idx);
+    const sl = $slicing.slices[idx];
+    loopDrag = {
+      idx, edge,
+      startX: e.clientX,
+      startLoopStart: sl.loopStart,
+      startLoopLength: sl.loopLength,
+      moved: false,
+    };
+  }
+
+  function onLoopDragMove(e: MouseEvent) {
+    if (!loopDrag || !waveformEl) return;
+    const r = waveformEl.getBoundingClientRect();
+    const wordsPerPx = visibleN / r.width;
+    const dx = e.clientX - loopDrag.startX;
+    if (Math.abs(dx) > 1) loopDrag.moved = true;
+    const delta = Math.round(dx * wordsPerPx);
+    const slices = $slicing.slices;
+    const sl = slices[loopDrag.idx];
+    if (!sl) return;
+
+    // The slice's *actual* hard right edge — in slice-local words —
+    // is the gap to the next slice's start (or sample end for the
+    // last slice). Using sl.length here drifts whenever a manual
+    // Length edit pushes it past the neighbour boundary, and the
+    // loop would happily extend into the next slice. Compute from
+    // neighbours so the bound stays correct.
+    const nextStart = loopDrag.idx < slices.length - 1
+      ? slices[loopDrag.idx + 1].start
+      : smp.length;
+    const maxSliceLocal = Math.max(1, nextStart - sl.start);
+
+    if (loopDrag.edge === 'start') {
+      // Hold the loop's right edge fixed; start can move within
+      // [0, oldEnd], where oldEnd never exceeds the slice's hard
+      // right edge (the user can't drag loopEnd past maxSliceLocal,
+      // so oldEnd ≤ maxSliceLocal is already enforced on creation).
+      const oldEnd = Math.min(
+        maxSliceLocal,
+        loopDrag.startLoopStart + loopDrag.startLoopLength,
+      );
+      let newStart = loopDrag.startLoopStart + delta;
+      newStart = Math.max(0, Math.min(oldEnd, newStart));
+      const newLength = oldEnd - newStart;
+      updateSliceAt(loopDrag.idx, { loopStart: newStart, loopLength: newLength });
+    } else {
+      // Right edge — grow/shrink loopLength. Clamp the loop's end
+      // (loopStart + loopLength) at maxSliceLocal so it cannot
+      // cross into the next slice.
+      let newLength = loopDrag.startLoopLength + delta;
+      newLength = Math.max(0, Math.min(maxSliceLocal - sl.loopStart, newLength));
+      updateSliceAt(loopDrag.idx, { loopLength: newLength });
+    }
+  }
+
+  function onLoopDragUp() {
+    if (!loopDrag) return;
+    const wasMoved = loopDrag.moved;
+    loopDrag = null;
+    if (wasMoved) lastDragEnd = performance.now();
+  }
+
   // ---------- Hover cursor + wheel zoom ----------
   // cursorRatio is the mouse's horizontal position (0..1) over the
   // waveform. Wheel zoom anchors at this position so the word under
@@ -357,14 +509,26 @@
     });
   }
 
-  // Delete the selected slice when the user presses Delete/Backspace
-  // while slicing is active. Ignored if focus is on an editable input
-  // so the user can still type negatives etc. in NumFields.
+  // Spacebar previews the selected slice (slicing active) or the
+  // whole sample. Delete/Backspace removes the selected slice. Both
+  // ignore an input/textarea focus so typing values in NumFields
+  // isn't intercepted.
   function onWindowKeyDown(e: KeyboardEvent) {
+    const t = e.target as HTMLElement | null;
+    const inField = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (e.key === ' ' || e.code === 'Space') {
+      if (inField) return;
+      e.preventDefault();
+      if ($slicing.active && $slicing.selectedIndex >= 0) {
+        previewSlice($slicing.selectedIndex);
+      } else {
+        previewWhole();
+      }
+      return;
+    }
     if (!$slicing.active) return;
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (inField) return;
     if ($slicing.selectedIndex < 0) return;
     e.preventDefault();
     removeSliceAt($slicing.selectedIndex);
@@ -427,8 +591,8 @@
 </script>
 
 <svelte:window
-  on:mousemove={(e) => { onMarkerMove(e); onSliceDragMove(e); }}
-  on:mouseup={() => { onMarkerUp(); onSliceDragUp(); }}
+  on:mousemove={(e) => { onMarkerMove(e); onSliceDragMove(e); onLoopDragMove(e); }}
+  on:mouseup={() => { onMarkerUp(); onSliceDragUp(); onLoopDragUp(); }}
   on:keydown={onWindowKeyDown} />
 
 <div class="app app--3row">
@@ -459,34 +623,45 @@
   </aside>
 
   <main class="main">
-    <!-- Identity strip -->
+    <!-- Identity strip. Card chrome (title, subtitle, big padding)
+         dropped to give the waveform + Slices card more vertical
+         room — the metadata is repeated in the topbar slot chip
+         anyway. Inline label/value rows in a single tight strip. -->
     <section class="card identity-card">
-      <div class="card__head">
-        <div class="card__title">Sample</div>
-        <div class="card__subtitle">slot {smp.slot.toString().padStart(2, '0')} · SPRM block synced</div>
-      </div>
       <div class="identity">
         <div class="identity__cell">
-          <label>Name</label>
+          <span class="row__label">Name</span>
           <span class="field field--wide field--yellow">
-            <input type="text" value={smp.name} on:input={onNameInput} maxlength="10" />
+            <input type="text" value={smp.name} on:input={onNameInput} maxlength="10" aria-label="Sample name" />
           </span>
         </div>
         <div class="identity__cell">
-          <label>Slot</label>
+          <span class="row__label">Slot</span>
           <span class="field">{smp.slot.toString().padStart(2, '0')}</span>
         </div>
         <div class="identity__cell">
-          <label>Rate</label>
+          <span class="row__label">Rate</span>
           <span class="field">{(smp.rate / 1000).toFixed(2)} kHz</span>
         </div>
         <div class="identity__cell">
-          <label>Length</label>
+          <span class="row__label">Length</span>
           <span class="field">{smp.length.toLocaleString()} words</span>
         </div>
         <div class="identity__cell">
-          <label>Nominal pitch</label>
+          <span class="row__label">Pitch</span>
           <span class="field">C3 (960)</span>
+        </div>
+        <div class="identity__cell identity__cell--preview">
+          <span class="row__label">Preview</span>
+          <button
+            type="button"
+            class="identity__play"
+            on:click={previewWhole}
+            disabled={!preview.hasHostAudio(smp)}
+            title={preview.hasHostAudio(smp)
+              ? 'Play (Start → End) · spacebar'
+              : 'Import .wav / .aiff to enable host-side preview'}
+            aria-label="Preview sample">▶</button>
         </div>
       </div>
     </section>
@@ -572,6 +747,11 @@
           <span class="slice-beats__count">→ {slicesFor($slicing.bars, $slicing.division)} slices</span>
         </div>
       {/if}
+      <!-- svelte-ignore a11y-click-events-have-key-events
+           The waveform's click affordances (drop slice in manual mode,
+           drag markers) have no meaningful keyboard analogue — slice
+           drop is anchored on the mouse cursor position. Numeric edits
+           of Start/End/Loop via NumFields cover the keyboard path. -->
       <div
         class="waveform"
         class:waveform--slicing={$slicing.active}
@@ -582,7 +762,14 @@
         on:mouseleave={onWaveformMouseLeave}
         on:wheel|preventDefault|nonpassive={onWaveformWheel}
         style="--start: {pctStart}%; --end: {pctEnd}%; --loop-start: {pctLoopStart}%; --loop-width: {pctLoopWidth}%;">
-        <svg class="waveform__svg" viewBox="{viewBoxX} 0 {viewBoxW} 200" preserveAspectRatio="none" aria-hidden="true">
+        <!-- Mirror horizontally when the sample's Reversed SPRM flag
+             is on — the squiggle's shape is still synthetic, but the
+             direction it plays back IS real. -->
+        <svg
+          class="waveform__svg"
+          class:waveform__svg--reversed={smp.reverse}
+          viewBox="{viewBoxX} 0 {viewBoxW} 200"
+          preserveAspectRatio="none" aria-hidden="true">
           <path d={wfTop} fill="#FDF000" />
           <path d={wfBot} fill="#FDF000" />
         </svg>
@@ -608,6 +795,28 @@
           </div>
 
           {#if $slicing.active}
+            <!-- Per-slice loop regions. Only drawn for slices whose
+                 loopMode is 'loop' or 'ping-pong'; one-shot slices get
+                 no band. Position is the slice's loop window in
+                 source-word space, projected through the visible view. -->
+            {#each $slicing.slices as sl, i (i)}
+              {#if sl.loopMode !== 'one-shot' && sl.loopLength > 0}
+                <div
+                  class="slice-loop slice-loop--{sl.loopMode === 'ping-pong' ? 'ping' : 'loop'}"
+                  style="left: {pct(sl.start + sl.loopStart)}%; width: {(sl.loopLength / visibleN) * 100}%;">
+                  <!-- Edge handles: drag the left edge to move loopStart
+                       (keeping the right edge fixed), drag the right to
+                       grow/shrink loopLength. The band itself stays
+                       click-through so it doesn't intercept slice-marker
+                       clicks behind it. -->
+                  <span class="slice-loop__handle slice-loop__handle--left"
+                    on:mousedown={(e) => onLoopHandleDown(e, i, 'start')}></span>
+                  <span class="slice-loop__handle slice-loop__handle--right"
+                    on:mousedown={(e) => onLoopHandleDown(e, i, 'end')}></span>
+                </div>
+              {/if}
+            {/each}
+
             {#each $slicing.slices as sl, i (i)}
               <div
                 class="slice-marker {i === $slicing.selectedIndex ? 'is-selected' : ''}"
@@ -641,6 +850,11 @@
         </div>
       </div>
       <div class="waveform__legend">
+        <!-- Synthetic preview indicator: the squiggle is JS-generated
+             from the slot index (stable across re-renders), not real
+             audio. SPRM metadata IS accurate — markers, loop region,
+             reverse direction are real device values. -->
+        <span class="waveform__preview-tag">preview · synthetic waveform</span>
         {#if $slicing.active}
           <span><span class="legend-swatch" style="--swatch: var(--rb-yellow)"></span>Slice</span>
           <span><span class="legend-swatch" style="--swatch: var(--rb-magenta)"></span>Selected</span>
@@ -653,10 +867,12 @@
       </div>
     </section>
 
-    <!-- Three columns: markers/slices / playback / device.
-         The first column swaps between Markers (no slicing) and
-         Slices (slicing active). -->
-    <section class="controls">
+    <!-- Three columns when editing a single sample: Markers / Playback /
+         Device. When slicing is active, the first two collapse into one
+         merged "Slicing" workspace card (list | divider | selected
+         slice props) — the source's Playback flags are irrelevant once
+         each slice becomes its own sample on the device. -->
+    <section class="controls" class:controls--slicing={$slicing.active}>
       {#if !$slicing.active}
         <div class="card">
           <div class="card__head">
@@ -664,7 +880,7 @@
             <div class="card__subtitle">in sample words</div>
           </div>
           <div class="row">
-            <label>Start</label>
+            <span class="row__label">Start</span>
             <NumField
               value={smp.start}
               min={0} max={smp.end}
@@ -672,7 +888,7 @@
               on:change={(e) => selectedSample.update({ start: e.detail })} />
           </div>
           <div class="row">
-            <label>End</label>
+            <span class="row__label">End</span>
             <NumField
               value={smp.end}
               min={smp.start} max={smp.length}
@@ -680,7 +896,7 @@
               on:change={(e) => selectedSample.update({ end: e.detail })} />
           </div>
           <div class="row">
-            <label>Loop start</label>
+            <span class="row__label">Loop start</span>
             <NumField
               value={smp.loopStart}
               min={0} max={smp.length}
@@ -688,7 +904,7 @@
               on:change={(e) => selectedSample.update({ loopStart: e.detail })} />
           </div>
           <div class="row">
-            <label>Loop length</label>
+            <span class="row__label">Loop length</span>
             <NumField
               value={smp.loopLength}
               min={0} max={smp.length}
@@ -696,138 +912,159 @@
               on:change={(e) => selectedSample.update({ loopLength: e.detail })} />
           </div>
         </div>
-      {:else}
-        {@const sel = $slicing.slices[$slicing.selectedIndex]}
+
         <div class="card">
           <div class="card__head">
-            <div class="card__title">Slices</div>
-            <div class="card__subtitle">{$slicing.slices.length} / {MAX_SLICES}</div>
+            <div class="card__title">Playback</div>
+            <div class="card__subtitle">SPRM replay flags</div>
           </div>
-          <div class="slice-list">
-            {#each $slicing.slices as sl, i (i)}
-              <div
-                class="slice-list__row {i === $slicing.selectedIndex ? 'is-selected' : ''}"
-                on:click={() => selectSlice(i)}
-                on:keydown={(e) => e.key === 'Enter' && selectSlice(i)}
-                role="button"
-                tabindex="0">
-                <span class="slice-list__num">{String(i + 1).padStart(2, '0')}</span>
-                <span>{sl.start.toLocaleString()} — {(sl.start + sl.length).toLocaleString()}</span>
-                <span class="slice-list__loop">{sl.loopMode}</span>
-                <button
-                  type="button"
-                  class="slice-list__play"
-                  aria-label={`Preview slice ${i + 1}`}
-                  on:click|stopPropagation={() => previewSlice(i)}>▶</button>
-              </div>
-            {/each}
+          <!-- Mode lives in a flex row instead of the 120-px label grid
+               so all three toggles fit at narrow column widths. -->
+          <div class="row row--inline">
+            <span class="row__label">Mode</span>
+            <div class="mode-row">
+              <button type="button" class="toggle {smp.mode === 'one-shot' ? 'on' : ''}" on:click={() => selectedSample.update({ mode: 'one-shot' })}>Once</button>
+              <button type="button" class="toggle {smp.mode === 'loop' ? 'on' : ''}"     on:click={() => selectedSample.update({ mode: 'loop' })}>Loop</button>
+              <button type="button" class="toggle {smp.mode === 'ping-pong' ? 'on' : ''}" on:click={() => selectedSample.update({ mode: 'ping-pong' })}>Ping-pong</button>
+            </div>
           </div>
-          {#if sel}
-            <div class="row">
-              <label>Slice</label>
-              <NumField
-                value={$slicing.selectedIndex + 1}
-                min={1} max={$slicing.slices.length}
-                format={(v) => `${String(v).padStart(2, '0')} of ${$slicing.slices.length}`}
-                on:change={(e) => selectSlice(e.detail - 1)} />
+          <div class="row">
+            <span class="row__label">Reverse</span>
+            <button type="button" class="toggle {smp.reverse ? 'on' : ''}" on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
+              {smp.reverse ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div class="row">
+            <span class="row__label">Vel x-fade</span>
+            <button type="button" class="toggle {smp.velXfade ? 'on' : ''}" on:click={() => selectedSample.update({ velXfade: !smp.velXfade })}>
+              {smp.velXfade ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <hr class="panel__divider" />
+
+          <div class="row">
+            <span class="row__label">Tune</span>
+            <NumField
+              value={smp.tune}
+              min={-50} max={50} step={0.01}
+              format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} st`}
+              on:change={(e) => selectedSample.update({ tune: e.detail })} />
+          </div>
+          <div class="row">
+            <span class="row__label">Loudness</span>
+            <NumField
+              value={smp.loudness}
+              on:change={(e) => selectedSample.update({ loudness: e.detail })} />
+          </div>
+        </div>
+      {:else}
+        {@const sel = $slicing.slices[$slicing.selectedIndex]}
+        <!-- Merged slicing workspace: one outer card chrome, two inner
+             columns separated by a hairline divider. The left column is
+             list-only (stable height, no layout shift when loop-mode
+             rows appear); the right shows the selected slice's props. -->
+        <div class="card slice-pair">
+          <div class="slice-pair__col">
+            <div class="card__head">
+              <div class="card__title">Slices</div>
+              <div class="card__subtitle">{$slicing.slices.length} / {MAX_SLICES}</div>
             </div>
-            <div class="row">
-              <label>Start</label>
-              <NumField
-                value={sel.start}
-                min={0} max={smp.length}
-                format={(v) => v.toLocaleString()}
-                on:change={(e) => updateSliceAt($slicing.selectedIndex, { start: e.detail })} />
+            <div class="slice-list slice-list--tall">
+              {#each $slicing.slices as sl, i (i)}
+                <div
+                  class="slice-list__row {i === $slicing.selectedIndex ? 'is-selected' : ''}"
+                  on:click={() => selectSlice(i)}
+                  on:keydown={(e) => e.key === 'Enter' && selectSlice(i)}
+                  role="button"
+                  tabindex="0">
+                  <span class="slice-list__num">{String(i + 1).padStart(2, '0')}</span>
+                  <span>{sl.start.toLocaleString()} — {(sl.start + sl.length).toLocaleString()}</span>
+                  <span class="slice-list__loop">{sl.loopMode}</span>
+                  <button
+                    type="button"
+                    class="slice-list__play"
+                    aria-label={`Preview slice ${i + 1}`}
+                    disabled={!preview.hasHostAudio(smp)}
+                    title={preview.hasHostAudio(smp)
+                      ? 'Preview slice'
+                      : 'Import audio to enable preview'}
+                    on:click|stopPropagation={() => previewSlice(i)}>▶</button>
+                </div>
+              {/each}
             </div>
-            <div class="row">
-              <label>Length</label>
-              <NumField
-                value={sel.length}
-                min={1} max={smp.length}
-                format={(v) => v.toLocaleString()}
-                on:change={(e) => updateSliceAt($slicing.selectedIndex, { length: e.detail })} />
-            </div>
-            <div class="row row--inline">
-              <label>Loop</label>
-              <div class="mode-row">
-                {#each LOOP_MODES as m}
-                  <button type="button" class="toggle {sel.loopMode === m ? 'on' : ''}"
-                    on:click={() => updateSliceAt($slicing.selectedIndex, { loopMode: m })}>
-                    {loopLabel(m)}
-                  </button>
-                {/each}
+          </div>
+          <div class="slice-pair__col">
+            <div class="card__head">
+              <div class="card__title">Selected slice</div>
+              <div class="card__subtitle">
+                {#if sel}slot allocated on Apply{:else}none selected{/if}
               </div>
             </div>
-            <!-- Loop start / length only matter for loop and ping-pong
-                 modes — hide them in one-shot to keep the card short
-                 and leave the waveform room above. -->
-            {#if sel.loopMode !== 'one-shot'}
+            {#if sel}
               <div class="row">
-                <label>Loop start</label>
+                <span class="row__label">Slice</span>
                 <NumField
-                  value={sel.loopStart}
-                  min={0} max={sel.length}
-                  format={(v) => v.toLocaleString()}
-                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopStart: e.detail })} />
+                  value={$slicing.selectedIndex + 1}
+                  min={1} max={$slicing.slices.length}
+                  format={(v) => `${String(v).padStart(2, '0')} of ${$slicing.slices.length}`}
+                  on:change={(e) => selectSlice(e.detail - 1)} />
               </div>
               <div class="row">
-                <label>Loop length</label>
+                <span class="row__label">Start</span>
                 <NumField
-                  value={sel.loopLength}
-                  min={0} max={sel.length}
+                  value={sel.start}
+                  min={0} max={smp.length}
                   format={(v) => v.toLocaleString()}
-                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopLength: e.detail })} />
+                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { start: e.detail })} />
               </div>
+              <div class="row">
+                <span class="row__label">Length</span>
+                <NumField
+                  value={sel.length}
+                  min={1} max={smp.length}
+                  format={(v) => v.toLocaleString()}
+                  on:change={(e) => updateSliceAt($slicing.selectedIndex, { length: e.detail })} />
+              </div>
+              <div class="row row--inline">
+                <span class="row__label">Loop</span>
+                <div class="mode-row">
+                  {#each LOOP_MODES as m}
+                    <button type="button" class="toggle {sel.loopMode === m ? 'on' : ''}"
+                      on:click={() => setSliceLoopMode($slicing.selectedIndex, m)}>
+                      {loopLabel(m)}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+              <!-- Loop start / length only matter for loop and ping-pong
+                   modes — hide in one-shot to reduce clutter. Living in
+                   the props column means the shift no longer pushes the
+                   slice list around. -->
+              {#if sel.loopMode !== 'one-shot'}
+                <div class="row">
+                  <span class="row__label">Loop start</span>
+                  <NumField
+                    value={sel.loopStart}
+                    min={0} max={sel.length}
+                    format={(v) => v.toLocaleString()}
+                    on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopStart: e.detail })} />
+                </div>
+                <div class="row">
+                  <span class="row__label">Loop length</span>
+                  <NumField
+                    value={sel.loopLength}
+                    min={0} max={sel.length}
+                    format={(v) => v.toLocaleString()}
+                    on:change={(e) => updateSliceAt($slicing.selectedIndex, { loopLength: e.detail })} />
+                </div>
+              {/if}
+            {:else}
+              <div class="slice-pair__empty">Select a slice to edit its boundaries + loop.</div>
             {/if}
-          {/if}
+          </div>
         </div>
       {/if}
-
-      <div class="card">
-        <div class="card__head">
-          <div class="card__title">Playback</div>
-          <div class="card__subtitle">SPRM replay flags</div>
-        </div>
-        <!-- Mode lives in a flex row instead of the 120-px label grid
-             so all three toggles fit at narrow column widths. -->
-        <div class="row row--inline">
-          <label>Mode</label>
-          <div class="mode-row">
-            <button type="button" class="toggle {smp.mode === 'one-shot' ? 'on' : ''}" on:click={() => selectedSample.update({ mode: 'one-shot' })}>Once</button>
-            <button type="button" class="toggle {smp.mode === 'loop' ? 'on' : ''}"     on:click={() => selectedSample.update({ mode: 'loop' })}>Loop</button>
-            <button type="button" class="toggle {smp.mode === 'alt' ? 'on' : ''}"      on:click={() => selectedSample.update({ mode: 'alt' })}>Alt</button>
-          </div>
-        </div>
-        <div class="row">
-          <label>Reverse</label>
-          <button type="button" class="toggle {smp.reverse ? 'on' : ''}" on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
-            {smp.reverse ? 'On' : 'Off'}
-          </button>
-        </div>
-        <div class="row">
-          <label>Vel x-fade</label>
-          <button type="button" class="toggle {smp.velXfade ? 'on' : ''}" on:click={() => selectedSample.update({ velXfade: !smp.velXfade })}>
-            {smp.velXfade ? 'On' : 'Off'}
-          </button>
-        </div>
-
-        <hr class="panel__divider" />
-
-        <div class="row">
-          <label>Tune</label>
-          <NumField
-            value={smp.tune}
-            min={-50} max={50} step={0.01}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} st`}
-            on:change={(e) => selectedSample.update({ tune: e.detail })} />
-        </div>
-        <div class="row">
-          <label>Loudness</label>
-          <NumField
-            value={smp.loudness}
-            on:change={(e) => selectedSample.update({ loudness: e.detail })} />
-        </div>
-      </div>
 
       <div class="card">
         <div class="card__head">
@@ -845,7 +1082,7 @@
             </button>
             <hr class="panel__divider" />
           {/if}
-          <button type="button" class="btn btn--primary" on:click={openTransfer}>Import .wav / .aiff…</button>
+          <button type="button" class="btn btn--primary" on:click={importSample}>Import .wav / .aiff…</button>
           <button type="button" class="btn" on:click={openTransfer}>Replace from S950</button>
           <button type="button" class="btn" on:click={openTransfer}>Download .wav…</button>
           <hr class="panel__divider" />
@@ -1038,7 +1275,12 @@
     min-height: 0;
     overflow: auto;
   }
-  .identity-card { flex: 0 0 auto; }
+  .identity-card {
+    flex: 0 0 auto;
+    /* Override the .card base padding — identity is a tight metadata
+       strip, not a full card with title + body. */
+    padding: 10px 14px;
+  }
   .waveform-card {
     flex: 1 1 0;
     min-height: 200px;
@@ -1053,17 +1295,37 @@
 
   .identity {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+    grid-template-columns: 2fr 1fr 1fr 1fr 1fr auto;
     gap: 14px;
     align-items: center;
   }
+  .identity__cell--preview { align-items: stretch; }
+  .identity__play {
+    width: 30px;
+    height: 26px;
+    border: 1px solid var(--black);
+    border-radius: var(--r);
+    background: var(--rb-yellow);
+    color: var(--black);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .identity__play:hover:not([disabled]) { background: var(--rb-magenta); color: var(--white); }
+  .identity__play[disabled] {
+    background: var(--grey-light);
+    color: var(--grey-medium);
+    cursor: not-allowed;
+  }
   .identity__cell { display: flex; flex-direction: column; gap: 3px; }
-  .identity__cell > label {
-    font-family: var(--font-mono);
-    text-transform: uppercase;
+  /* Identity strip's row__label is smaller + tighter than the standard
+     .row__label so the metadata strip stays visually distinct. */
+  .identity__cell > :global(.row__label) {
     font-size: 9px;
     letter-spacing: 0.08em;
-    color: var(--grey-dark);
   }
   .identity__cell > :global(.field) { padding: 4px 8px; }
 
@@ -1079,6 +1341,23 @@
     overflow: hidden;
   }
   .waveform__svg { display: block; width: 100%; height: 100%; }
+  /* Reverse-sample mirror — synthetic shape flips so the visual
+     read of playback direction matches the SPRM Reversed flag. */
+  .waveform__svg--reversed { transform: scaleX(-1); }
+
+  /* Subtle "this isn't real audio" tag, lives in the legend so the
+     user knows the squiggle is synthetic while markers are real. */
+  .waveform__preview-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    border: 1px solid var(--grey-medium);
+    border-radius: 999px;
+    color: var(--grey-dark);
+    font-style: italic;
+    background: var(--white);
+  }
   .waveform::before {
     content: "";
     position: absolute;
@@ -1184,8 +1463,42 @@
     min-height: 0;
   }
   .controls :global(.card) {
-    max-height: 320px;
+    /* Bumped a touch now that the identity card no longer eats
+       ~60px of vertical room — gives the Slices card breathing
+       space for loop-mode rows without immediately scrolling. */
+    max-height: 360px;
     overflow-y: auto;
+  }
+
+  /* Merged slicing workspace. One outer card spanning two grid columns;
+     two inner halves divided by a hairline. padding: 0 lets the inner
+     columns own their own padding so the divider runs full-height. */
+  .slice-pair {
+    grid-column: span 2;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    /* Override the .card overflow:auto + max-height inheritance: the
+       outer card no longer scrolls; each inner column scrolls if it
+       needs to (the slice list, mostly). */
+    overflow: hidden;
+  }
+  .slice-pair__col {
+    padding: 16px 18px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .slice-pair__col + .slice-pair__col {
+    border-left: 1px solid var(--grey-light);
+  }
+  .slice-pair__empty {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--grey-dark);
+    padding: 6px 0;
   }
   .actions--stack {
     display: flex;
@@ -1289,14 +1602,66 @@
     margin-left: -0.5px;
   }
 
-  /* When slice mode is active, dim the start/end/loop overlay so
-     slice markers visually dominate without removing the existing
-     UI entirely. */
-  .waveform--slicing :global(.marker),
-  .waveform--slicing :global(.waveform__loop),
+  /* When slice mode is active:
+       - the sample's Start/End markers are dimmed as context but
+         stay visible (they bound the source the slices live in);
+       - the sample's global Loop region + Loop-start/end markers
+         disappear entirely — irrelevant since each slice now owns
+         its own loop config rendered separately below.
+       - the pre/post inactive dim also fades back, otherwise it
+         hides the front of the audio behind a curtain.   */
+  .waveform--slicing :global(.marker--start),
+  .waveform--slicing :global(.marker--end),
   .waveform--slicing :global(.waveform__inactive) {
     opacity: 0.25;
     pointer-events: none;
+  }
+  .waveform--slicing :global(.waveform__loop),
+  .waveform--slicing :global(.marker--loop-start),
+  .waveform--slicing :global(.marker--loop-end) {
+    display: none;
+  }
+
+  /* Per-slice loop region. Plain cyan band for forward loops; the
+     ping-pong variant overlays diagonal hatching so you can tell at
+     a glance which slices alternate without selecting them. */
+  .slice-loop {
+    position: absolute;
+    top: 18px; bottom: 18px;
+    background: color-mix(in srgb, var(--rb-cyan) 14%, transparent);
+    border-left: 1px solid var(--rb-cyan);
+    border-right: 1px solid var(--rb-cyan);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .slice-loop--ping {
+    background-image:
+      linear-gradient(color-mix(in srgb, var(--rb-cyan) 14%, transparent),
+                      color-mix(in srgb, var(--rb-cyan) 14%, transparent)),
+      repeating-linear-gradient(
+        45deg,
+        transparent 0 5px,
+        color-mix(in srgb, var(--rb-cyan) 22%, transparent) 5px 6px
+      );
+  }
+  /* Edge handles for the loop band. 8px wide, overlapping the cyan
+     border so they're easy to grab even when the band is narrow.
+     pointer-events: auto re-enables hits inside the band (the band
+     itself is click-through). */
+  .slice-loop__handle {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    pointer-events: auto;
+    background: transparent;
+    z-index: 3;
+  }
+  .slice-loop__handle--left  { left: -4px; }
+  .slice-loop__handle--right { right: -4px; }
+  .slice-loop__handle:hover {
+    background: var(--rb-cyan);
+    opacity: 0.5;
   }
 
   /* Cursor hint for Manual mode — click to drop a new slice. */
@@ -1346,6 +1711,13 @@
     font-family: var(--font-mono);
     font-size: 11px;
   }
+  /* Taller variant used inside the merged .slice-pair workspace where
+     the list owns the entire left column — gives room for ~15 slices
+     before scrolling. */
+  .slice-list--tall {
+    max-height: 280px;
+    flex: 1 1 auto;
+  }
   .slice-list__row {
     display: grid;
     grid-template-columns: 28px 1fr auto 22px;
@@ -1373,7 +1745,12 @@
     cursor: pointer;
     padding: 0;
   }
-  .slice-list__play:hover { background: var(--rb-yellow); }
+  .slice-list__play:hover:not([disabled]) { background: var(--rb-yellow); }
+  .slice-list__play[disabled] {
+    background: var(--grey-light);
+    color: var(--grey-medium);
+    cursor: not-allowed;
+  }
 
   /* Inline row variant — label width is content-sized instead of a
      fixed 120px grid track, so the toggles get the full remaining

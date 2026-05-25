@@ -156,6 +156,9 @@ function programJSONToProgram(j: any, slot: number): Program {
     constPitch: false, // no documented protocol field
     keyFilter:  false, // no documented protocol field
     mod: modulationFrom(k),
+    // Stash the 140-byte wire payload for round-trip preservation
+    // when we Send back to the device.
+    rawBytesHex: k._raw_bytes_hex ?? '',
   }));
   return {
     slot,
@@ -165,6 +168,7 @@ function programJSONToProgram(j: any, slot: number): Program {
     keyTilt: j.key_tilt ?? 0,
     positionalXfade: Boolean(j.positional_xfade),
     keygroups,
+    rawHeaderHex: j._raw_header_hex ?? '',
   };
 }
 
@@ -241,14 +245,19 @@ function sampleParamsToSample(p: any, slot: number): Sample {
     velXfade: (p.VelXFade ?? 0) === 255,
     tune: ((p.NominalPitch ?? 960) - 960) / 16, // semitones from C3
     loudness: p.LoudOffset ?? 0,
-  };
+    // Stash the 120-byte SPRM block for round-trip on Send.
+    // Wails sends [120]byte as a number array; we mirror that.
+    raw: Array.from(p.Raw ?? []),
+  } as Sample;
 }
 
 function replayModeFrom(b: number | undefined): Sample['mode'] {
   // 'O' = 79 = one-shot, 'L' = 76 = loop, 'A' = 65 = alternating
+  // ('alternating loop' in the S950 manual; surfaced as ping-pong
+  // throughout the UI so sample-level + slice-level terminology lines up).
   switch (b) {
     case 76: return 'loop';
-    case 65: return 'alt';
+    case 65: return 'ping-pong';
     default: return 'one-shot';
   }
 }

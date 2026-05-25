@@ -26,6 +26,10 @@ export function GetSampleParams(arg1) {
   return window['go']['main']['App']['GetSampleParams'](arg1);
 }
 
+export function ImportSample(arg1) {
+  return window['go']['main']['App']['ImportSample'](arg1);
+}
+
 export function InspectSlicing(arg1) {
   return window['go']['main']['App']['InspectSlicing'](arg1);
 }
@@ -36,6 +40,10 @@ export function ListPorts() {
 
 export function SetProgram(arg1, arg2) {
   return window['go']['main']['App']['SetProgram'](arg1, arg2);
+}
+
+export function SetSampleParams(arg1, arg2) {
+  return window['go']['main']['App']['SetSampleParams'](arg1, arg2);
 }
 
 export function Status() {
