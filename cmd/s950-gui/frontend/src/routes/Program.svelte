@@ -4,7 +4,15 @@
   import NumField from '../lib/NumField.svelte';
   import { setSync } from '../lib/sync';
   import { navigate } from '../lib/route';
-  import { programs, selectedSlot, selectedProgram, selectedKeygroupN } from '../lib/state/programs';
+  import {
+    programs,
+    selectedSlot,
+    selectedProgram,
+    selectedKeygroupN,
+    newLocalProgram,
+    pickFreeProgramSlot,
+    type Program,
+  } from '../lib/state/programs';
   import { ensureProgramLoaded } from '../lib/state/catalog';
   import { rangeLabel, midiX, midiW } from '../lib/midi';
   import { get } from 'svelte/store';
@@ -47,6 +55,33 @@
   function onNameInput(e: Event) {
     selectedProgram.update({ name: (e.target as HTMLInputElement).value });
   }
+
+  // EMPTY_PROGRAM is the type-safe fallback while the sidebar is
+  // empty (fresh app, no Connect, no New). Reactive derivations need
+  // a defined Program; the actual empty-state UI is gated by
+  // hasProgram so the user sees the CTA, not these zeroed values.
+  const EMPTY_PROGRAM: Program = {
+    slot: -1, name: '', midiProg: 1, respondPC: false,
+    keyTilt: 0, positionalXfade: false, keygroups: [],
+  };
+  $: prog = $selectedProgram ?? EMPTY_PROGRAM;
+  $: hasProgram = !!$selectedProgram;
+
+  // Allocate a free slot and seed a local-only Program. The user can
+  // then edit and either Send to S950 or Save .json.
+  function newProgram() {
+    const list = get(programs);
+    const slot = pickFreeProgramSlot(list);
+    if (slot < 0) {
+      setSync('error', 'All 100 program slots are occupied');
+      return;
+    }
+    const p = newLocalProgram(slot, '');
+    programs.update((xs) => [...xs, p].sort((a, b) => a.slot - b.slot));
+    selectedSlot.set(slot);
+    selectedKeygroupN.set(1);
+    setSync('dirty', 'Unsaved');
+  }
 </script>
 
 <div class="app app--3row">
@@ -67,10 +102,15 @@
           role="button"
           tabindex="0">
           <span class="program__slot">{padSlot(p.slot)}</span>
-          <span class="program__name">{p.name}</span>
+          <span class="program__name">{p.name || '(unnamed)'}</span>
           <span class="program__kg">{p.keygroups.length} kg</span>
         </div>
       {/each}
+      {#if $programs.length === 0}
+        <div class="sample-list__empty">
+          No programs.<br/>Connect to S950 or click New program.
+        </div>
+      {/if}
     </div>
     <div class="dropzone-hint">
       drop .json program file here<br/>or click + to create
@@ -80,13 +120,27 @@
   <!-- Main editor pane.
        Top row: identity (left) + mini piano-roll overview (right) so
        the wide screen isn't half empty. Below: keygroups table (with
-       its own scroll), then device toolbar pinned to the bottom. -->
+       its own scroll), then device toolbar pinned to the bottom.
+       When the sidebar is empty an empty-state CTA replaces the cards
+       so the user sees what to do first. -->
   <main class="main">
+    {#if !hasProgram}
+      <div class="sample-empty">
+        <div class="sample-empty__title">No programs yet</div>
+        <p class="sample-empty__hint">
+          Connect to your S950 to load its program catalog, or start a
+          new program from scratch.
+        </p>
+        <button type="button" class="btn btn--primary" on:click={newProgram}>
+          New program
+        </button>
+      </div>
+    {:else}
     <section class="card card--form top-form">
       <div class="card__head">
         <div class="card__title">Program</div>
         <div class="card__subtitle">
-          slot {padSlot($selectedProgram.slot)} · {$selectedProgram.keygroups.length} keygroups
+          slot {padSlot(prog.slot)} · {prog.keygroups.length} keygroups
         </div>
       </div>
 
@@ -95,7 +149,7 @@
         <span class="field field--wide field--yellow">
           <input
             type="text"
-            value={$selectedProgram.name}
+            value={prog.name}
             on:input={onNameInput}
             maxlength="12" />
         </span>
@@ -103,7 +157,7 @@
       <div class="row">
         <span class="row__label">Slot</span>
         <NumField
-          value={$selectedProgram.slot}
+          value={prog.slot}
           min={0} max={99}
           format={padSlot}
           on:change={(e) => selectedProgram.update({ slot: e.detail })} />
@@ -111,7 +165,7 @@
       <div class="row">
         <span class="row__label">MIDI prog #</span>
         <NumField
-          value={$selectedProgram.midiProg}
+          value={prog.midiProg}
           min={1} max={128}
           format={(v) => v.toString().padStart(3, '0')}
           on:change={(e) => selectedProgram.update({ midiProg: e.detail })} />
@@ -120,9 +174,9 @@
         <span class="row__label">Respond to PC</span>
         <button
           type="button"
-          class="toggle {$selectedProgram.respondPC ? 'on' : ''}"
-          on:click={() => selectedProgram.update({ respondPC: !$selectedProgram.respondPC })}>
-          {$selectedProgram.respondPC ? 'Enabled' : 'Disabled'}
+          class="toggle {prog.respondPC ? 'on' : ''}"
+          on:click={() => selectedProgram.update({ respondPC: !prog.respondPC })}>
+          {prog.respondPC ? 'Enabled' : 'Disabled'}
         </button>
       </div>
 
@@ -131,7 +185,7 @@
         <div class="row">
           <span class="row__label">Key tilt</span>
           <NumField
-            value={$selectedProgram.keyTilt}
+            value={prog.keyTilt}
             min={-64} max={63}
             on:change={(e) => selectedProgram.update({ keyTilt: e.detail })} />
         </div>
@@ -139,9 +193,9 @@
           <span class="row__label">Positional xfade</span>
           <button
             type="button"
-            class="toggle {$selectedProgram.positionalXfade ? 'on' : ''}"
-            on:click={() => selectedProgram.update({ positionalXfade: !$selectedProgram.positionalXfade })}>
-            {$selectedProgram.positionalXfade ? 'On' : 'Off'}
+            class="toggle {prog.positionalXfade ? 'on' : ''}"
+            on:click={() => selectedProgram.update({ positionalXfade: !prog.positionalXfade })}>
+            {prog.positionalXfade ? 'On' : 'Off'}
           </button>
         </div>
       </details>
@@ -159,7 +213,7 @@
       <div class="kbroll">
         <div class="kbroll__keys" aria-hidden="true"></div>
         <div class="kbroll__zones">
-          {#each $selectedProgram.keygroups as kg (kg.n)}
+          {#each prog.keygroups as kg (kg.n)}
             <span
               class="kbroll__zone"
               style="left: {midiX(kg.lowKey).toFixed(2)}%; width: {midiW(kg.lowKey, kg.highKey).toFixed(2)}%; --zone-bg: var({kg.color});"
@@ -172,7 +226,7 @@
         </div>
       </div>
       <div class="kbroll__legend">
-        {#each $selectedProgram.keygroups as kg (kg.n)}
+        {#each prog.keygroups as kg (kg.n)}
           <span><span class="kg-swatch" style="background: var({kg.color})"></span>{kg.soft.sample || `kg ${kg.n}`}</span>
         {/each}
       </div>
@@ -180,7 +234,7 @@
 
     <section class="card kg-card">
       <div class="card__head">
-        <div class="card__title">Keygroups ({$selectedProgram.keygroups.length})</div>
+        <div class="card__title">Keygroups ({prog.keygroups.length})</div>
         <div class="card__subtitle">jump into Keygroup to edit a row</div>
       </div>
       <div class="kg-table-wrap">
@@ -196,7 +250,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each $selectedProgram.keygroups as kg (kg.n)}
+          {#each prog.keygroups as kg (kg.n)}
             <tr>
               <td class="mono">{kg.n}</td>
               <td class="mono">
@@ -232,12 +286,13 @@
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">
-          <button type="button" class="btn">New program</button>
+          <button type="button" class="btn" on:click={newProgram}>New program</button>
           <button type="button" class="btn">Duplicate</button>
         </div>
         <span class="hint">last synced 2 min ago</span>
       </div>
     </section>
+    {/if}
   </main>
 
   <Statusbar
@@ -246,7 +301,9 @@
       { key: '⌘S', label: 'save .json' },
       { key: '⌘↵', label: 'send to s950' },
     ]}
-    status={`Program slot ${padSlot($selectedProgram.slot)} · ${$selectedProgram.keygroups.length} / 31 keygroups used`}
+    status={hasProgram
+      ? `Program slot ${padSlot(prog.slot)} · ${prog.keygroups.length} / 31 keygroups used`
+      : 'no program selected'}
   />
 </div>
 
@@ -255,7 +312,7 @@
   <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
     <div class="modal">
       <header class="modal__head">
-        <h2 class="modal__title">Ready to send <strong>{$selectedProgram.name}</strong></h2>
+        <h2 class="modal__title">Ready to send <strong>{prog.name}</strong></h2>
         <div class="modal__route">MRCC Port 03 · Ch 0</div>
       </header>
       <div class="modal__body">
@@ -271,7 +328,7 @@
             <span class="preflight__icon">✓</span>
             <div class="preflight__body">
               <span class="preflight__title">Keygroup count</span>
-              <span class="preflight__detail">{$selectedProgram.keygroups.length} keygroups · max 31</span>
+              <span class="preflight__detail">{prog.keygroups.length} keygroups · max 31</span>
             </div>
           </li>
           <li class="preflight__item preflight__item--ok">
@@ -284,7 +341,7 @@
           <li class="preflight__item preflight__item--warn">
             <span class="preflight__icon">⚠</span>
             <div class="preflight__body">
-              <span class="preflight__title">Slot {padSlot($selectedProgram.slot)} occupied (OLD KIT)</span>
+              <span class="preflight__title">Slot {padSlot(prog.slot)} occupied (OLD KIT)</span>
               <span class="preflight__detail">Overwriting will replace the existing program on the device.</span>
               <div class="preflight__action">
                 <button type="button" class="btn">Overwrite</button>
@@ -314,7 +371,7 @@
   <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
     <div class="modal">
       <header class="modal__head">
-        <h2 class="modal__title">Sending <strong>{$selectedProgram.name}</strong> to S950</h2>
+        <h2 class="modal__title">Sending <strong>{prog.name}</strong> to S950</h2>
         <div class="modal__route">MRCC Port 03 · Ch 0</div>
       </header>
       <div class="modal__body">
@@ -335,7 +392,7 @@
           <div class="log__row ok">✓ Sample KICK uploaded to slot 02 (1m 04s)</div>
           <div class="log__row run">▶ Sample SNARE in progress</div>
           <div class="log__row pending">· Sample RIM pending</div>
-          <div class="log__row pending">· Program {$selectedProgram.name} pending</div>
+          <div class="log__row pending">· Program {prog.name} pending</div>
         </div>
       </div>
       <footer class="modal__foot">

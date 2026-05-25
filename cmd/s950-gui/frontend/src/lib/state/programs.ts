@@ -1,10 +1,9 @@
-// Stub program data + the cross-tab "selected program" store.
+// Program bank + cross-tab "selected program" store.
 //
-// Stays a frontend-only store for now so the UI can be exercised
-// without a live S950. Once App.Catalog / App.GetProgram are wired
-// in, this file is the single place to swap in real data — the
-// component API (selectedProgram.update(patch), selectedSlot.set(N))
-// won't change.
+// Like the samples store, the list starts empty: nothing in the app
+// is fictional. Entries enter via catalog.refreshCatalog() on Connect,
+// or via the (future) "New program" action that allocates a free
+// slot for a local-only draft.
 
 import { writable, derived, get } from 'svelte/store';
 
@@ -72,8 +71,9 @@ export type Program = {
 };
 
 // Default modulation block — same values as examples/program.json's
-// new-keygroup defaults so the form looks sane on first render.
-function defaultMod(): Modulation {
+// new-keygroup defaults so a brand-new program has sane envelope
+// shapes instead of all-zero ADSR (would render silent on the device).
+export function defaultMod(): Modulation {
   return {
     ampEnv:    { a: 0,  d: 80, s: 99, r: 30 },
     filterEnv: { a: 20, d: 20, s: 20, r: 20 },
@@ -85,20 +85,15 @@ function defaultMod(): Modulation {
   };
 }
 
-function kg(
-  n: number,
-  lowKey: number,
-  highKey: number,
-  vel: number,
-  softSample: string,
-  softTranspose: number,
-  loudSample: string,
-  color: string,
-): Keygroup {
+// Default keygroup — one zone at C2 covering the whole MIDI range,
+// no sample bound. Used by the (future) "New keygroup" action and as
+// a sentinel inside the empty-state derived stores.
+export function newKeygroup(n: number, color = '--rb-yellow'): Keygroup {
   return {
-    n, lowKey, highKey, vel, color,
-    soft: { sample: softSample, transpose: softTranspose, filter: 99, loudness: 0 },
-    loud: { sample: loudSample, transpose: 0,             filter: 99, loudness: 0 },
+    n, color,
+    lowKey: 0, highKey: 127, vel: 128,
+    soft: { sample: '', transpose: 0, filter: 99, loudness: 0 },
+    loud: { sample: '', transpose: 0, filter: 99, loudness: 0 },
     midiChannel: 16, // OMNI
     voiceOut: 'ALL',
     oneShot: true,
@@ -108,58 +103,34 @@ function kg(
   };
 }
 
-const stub: Program[] = [
-  {
-    slot: 2,
-    name: 'EX KIT',
+// Skeleton for "New program" — a single keygroup, sensible defaults.
+// Mirrors `cli program-template` so the same wire-level shape can be
+// reasoned about from either path.
+export function newLocalProgram(slot: number, name = ''): Program {
+  return {
+    slot, name,
     midiProg: 1,
-    respondPC: true,
-    keyTilt: 0,
-    positionalXfade: false,
-    keygroups: [
-      kg(1, 36, 36, 128, 'KICK',     24, '',           '--rb-yellow'),
-      kg(2, 38, 38, 128, 'SNARE',    22, '',           '--rb-magenta'),
-      kg(3, 42, 42, 128, 'HHC',      18, '',           '--rb-cyan'),
-      kg(4, 46, 46, 128, 'HHO',      14, '',           '--rb-green'),
-      kg(5, 48, 48, 128, 'TOM',      12, '',           '--rb-orange'),
-      kg(6, 50, 50, 128, '808 KICK', 10, '',           '--rb-red'),
-      kg(7, 53, 55, 64,  'CLAP',     0,  'CLAP (loud)', '--rb-purple'),
-    ],
-  },
-  {
-    slot: 5,
-    name: 'PIANO',
-    midiProg: 2,
-    respondPC: true,
-    keyTilt: 0,
-    positionalXfade: true,
-    keygroups: [
-      kg(1, 21, 35, 128, 'PIANO_LO1', 0, '', '--rb-blue'),
-      kg(2, 36, 47, 128, 'PIANO_LO2', 0, '', '--rb-cyan'),
-      kg(3, 48, 59, 128, 'PIANO_MID', 0, '', '--rb-green'),
-      kg(4, 60, 71, 128, 'PIANO_HI1', 0, '', '--rb-yellow'),
-      kg(5, 72, 83, 128, 'PIANO_HI2', 0, '', '--rb-orange'),
-      kg(6, 84, 108, 128, 'PIANO_HI3', 0, '', '--rb-red'),
-    ],
-  },
-  {
-    slot: 12,
-    name: 'BASS',
-    midiProg: 3,
     respondPC: false,
     keyTilt: 0,
     positionalXfade: false,
-    keygroups: [
-      kg(1, 24, 29, 128, 'BASS_LO',  0, '', '--rb-green'),
-      kg(2, 30, 35, 128, 'BASS_MID', 0, '', '--rb-yellow'),
-      kg(3, 36, 40, 128, 'BASS_HI',  0, '', '--rb-orange'),
-      kg(4, 41, 43, 128, 'BASS_TOP', 0, '', '--rb-red'),
-    ],
-  },
-];
+    keygroups: [newKeygroup(1)],
+  };
+}
 
-export const programs = writable<Program[]>(stub);
-export const selectedSlot = writable<number>(stub[0].slot);
+// Lowest unused program slot in `list`, or -1 if all 100 are full.
+// Same shape as samples.pickFreeSlot — used by "New program" so a
+// fresh draft gets a predictable destination.
+export function pickFreeProgramSlot(list: Program[]): number {
+  const taken = new Set(list.map((p) => p.slot));
+  for (let i = 0; i < 100; i++) {
+    if (!taken.has(i)) return i;
+  }
+  return -1;
+}
+
+export const programs = writable<Program[]>([]);
+// Default to slot 0 so the sidebar selection survives an empty start.
+export const selectedSlot = writable<number>(0);
 
 // Which keygroup is currently being edited on the Keygroup tab. Set
 // when Edit ↗ is clicked on the Program tab; persists across tab
@@ -200,11 +171,15 @@ export const selectedProgram = makeSelectedProgram();
 // Derived view of the currently-selected keygroup, with an
 // `update(patch)` that writes back through `programs`. Patches can
 // target nested fields (soft, loud, mod) via partial helpers.
+//
+// Returns undefined when no programs exist — the component is
+// expected to guard via $hasProgram before reading fields.
 function makeSelectedKeygroup() {
   const inner = derived(
     [programs, selectedSlot, selectedKeygroupN],
     ([$programs, $selectedSlot, $n]) => {
       const p = $programs.find((p) => p.slot === $selectedSlot) ?? $programs[0];
+      if (!p) return undefined;
       return p.keygroups.find((k) => k.n === $n) ?? p.keygroups[0];
     }
   );
@@ -228,14 +203,17 @@ function makeSelectedKeygroup() {
     },
     updateSoft(patch: Partial<Layer>) {
       const k = get(inner);
+      if (!k) return;
       this.update({ soft: { ...k.soft, ...patch } });
     },
     updateLoud(patch: Partial<Layer>) {
       const k = get(inner);
+      if (!k) return;
       this.update({ loud: { ...k.loud, ...patch } });
     },
     updateMod(patch: Partial<Modulation>) {
       const k = get(inner);
+      if (!k) return;
       this.update({ mod: { ...k.mod, ...patch } });
     },
   };

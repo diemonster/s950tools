@@ -9,8 +9,11 @@
     selectedProgram,
     selectedKeygroupN,
     selectedKeygroup,
+    newKeygroup,
     type Keygroup,
+    type Program,
   } from '../lib/state/programs';
+  import { navigate } from '../lib/route';
   import {
     samples,
     selectedSampleSlot,
@@ -50,10 +53,21 @@
     dragging = false;
   }
 
+  // Empty-state sentinels. The Keygroup tab depends on the user
+  // having loaded/created a program first. We render a CTA when
+  // that's not the case; these defaults keep reactive derivations
+  // type-safe while the CTA is shown.
+  const EMPTY_PROGRAM: Program = {
+    slot: -1, name: '', midiProg: 1, respondPC: false,
+    keyTilt: 0, positionalXfade: false, keygroups: [],
+  };
+  const EMPTY_KEYGROUP: Keygroup = newKeygroup(1);
+
   // Convenience accessors so templates stay readable. The reactive
   // derived stores keep these in sync as the user clicks around.
-  $: kg = $selectedKeygroup;
-  $: prog = $selectedProgram;
+  $: kg = $selectedKeygroup ?? EMPTY_KEYGROUP;
+  $: prog = $selectedProgram ?? EMPTY_PROGRAM;
+  $: hasKeygroup = !!$selectedKeygroup;
 
   // Options for the Soft/Loud sample combobox. Sourced from the
   // shared samples store so adding samples elsewhere reflects here.
@@ -254,7 +268,24 @@
     </div>
   </aside>
 
-  <!-- 2D zone canvas -->
+  <!-- 2D zone canvas. When no program/keygroup is loaded (fresh app,
+       no Connect, no New) we show a CTA that points the user back to
+       the Program tab — the keygroup editor has nothing to operate on
+       without a program. The splitter + properties panel are hidden
+       below for the same reason. -->
+  {#if !hasKeygroup}
+    <section class="canvas">
+      <div class="sample-empty">
+        <div class="sample-empty__title">No keygroup selected</div>
+        <p class="sample-empty__hint">
+          A keygroup belongs to a program. Pick or create a program first.
+        </p>
+        <button type="button" class="btn btn--primary" on:click={() => navigate('program')}>
+          Go to Program tab
+        </button>
+      </div>
+    </section>
+  {:else}
   <section class="canvas">
     <div class="canvas__head">
       <div class="group">
@@ -571,6 +602,7 @@
       </div>
     </div>
   </section>
+  {/if}
 
   <Statusbar
     hints={[
@@ -578,7 +610,9 @@
       { key: 'drag', label: 'edges to resize' },
       { key: 'drop', label: 'wav / aiff to add sample' },
     ]}
-    status={`${mode === 'drum' ? 'Drum Kit' : 'Ranged'} mode · ${prog.keygroups.length} keygroups`}
+    status={hasKeygroup
+      ? `${mode === 'drum' ? 'Drum Kit' : 'Ranged'} mode · ${prog.keygroups.length} keygroups`
+      : 'no keygroup selected'}
   />
 </div>
 
