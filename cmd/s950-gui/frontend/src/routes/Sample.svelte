@@ -20,11 +20,12 @@
     slicesFor,
     MAX_SLICES,
     commitSlices,
+    clearSlicingForSlots,
     type SliceMode,
     type SliceLoopMode,
     type Division,
   } from '../lib/state/slicing';
-  import { ensureSampleLoaded } from '../lib/state/catalog';
+  import { ensureSampleLoaded, refreshCatalog } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
   import * as preview from '../lib/preview';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
@@ -54,8 +55,14 @@
   // memory until Apply Slicing.
   //
   // path === '' opens the native file picker; a non-empty path
-  // (drag-and-drop) imports that file directly.
-  async function importSample(path = '') {
+  // (drag-and-drop) imports that file directly. mode picks placement:
+  //   • 'replace' — overwrite the currently selected slot in place.
+  //     Falls back to 'add' if nothing is selected (empty list).
+  //   • 'add'     — always allocate a new free slot, never touch the
+  //     existing selection. Used by the sidebar drop target so the
+  //     "Samples" list grows instead of mutating the row the user
+  //     happens to have highlighted.
+  async function importSample(path = '', mode: 'replace' | 'add' = 'replace') {
     setSync('sending', 'Importing...');
     try {
       const info = await (App as any).ImportSample(path);
@@ -66,16 +73,10 @@
       const list = get(samples);
       const curSlot = get(selectedSampleSlot);
       const existing = list.find((x) => x.slot === curSlot);
-      // If the selected slot already holds a row, replace its audio in
-      // place (drag onto an existing entry = "replace this sample").
-      // The sample flips back to 'local' because the audio is no
-      // longer what the S950 has at that slot, even if the row came
-      // from the catalog.
-      //
-      // If nothing is selected (empty sidebar) we allocate the lowest
-      // free slot via pickFreeSlot — gives drag-onto-empty-sidebar
-      // a predictable home (slot 0, then 1, etc.).
-      if (existing) {
+      // Replace path: only when the caller asked for it AND there IS
+      // something to replace. Otherwise fall through to allocate a new
+      // slot — drop-onto-empty-sidebar lands at the lowest free slot.
+      if (mode === 'replace' && existing) {
         samples.update((xs) =>
           xs.map((x) =>
             x.slot === curSlot
@@ -122,15 +123,23 @@
   // are out of scope for now (would need to allocate consecutive
   // slots, similar to slicing). Non-audio extensions get a setSync
   // error so the user knows the drop was seen but ignored.
+  //
+  // Wails delivers a single OnFileDrop callback regardless of which
+  // dropzone fired, so we track the most recently entered zone via
+  // the per-target dragenter handlers and consult it here to choose
+  // between "add new" (sidebar) and "replace selected" (waveform).
   const AUDIO_EXT = /\.(wav|wave|aif|aiff)$/i;
   function onFileDrop(paths: string[]) {
     if (!paths || paths.length === 0) return;
     const first = paths.find((p) => AUDIO_EXT.test(p));
     if (!first) {
       setSync('error', 'Drop a .wav or .aif file');
+      lastDropTarget = null;
       return;
     }
-    void importSample(first);
+    const mode = lastDropTarget === 'sidebar' ? 'add' : 'replace';
+    lastDropTarget = null;
+    void importSample(first, mode);
   }
 
   onMount(() => {
@@ -156,10 +165,19 @@
   // (Wails delivers paths via OnFileDrop). dragDepth is a per-target
   // counter — enter increments, leave decrements — so traversing
   // nested children doesn't flicker the hover class on and off.
+  //
+  // lastDropTarget is set by the per-zone dragenter handlers and
+  // read once by onFileDrop to pick add vs replace semantics. The
+  // sidebar zone resolves to 'add' (grow the list), the waveform
+  // and empty-state zones resolve to 'replace' (overwrite current
+  // sample, or fall through to add when nothing is selected).
+  type DropTarget = 'sidebar' | 'waveform' | 'empty';
   let dragDepth = 0;
-  function onDragEnter(e: DragEvent) {
+  let lastDropTarget: DropTarget | null = null;
+  function onDragEnter(e: DragEvent, target: DropTarget) {
     if (!e.dataTransfer?.types.includes('Files')) return;
     dragDepth++;
+    lastDropTarget = target;
   }
   function onDragLeave(e: DragEvent) {
     if (!e.dataTransfer?.types.includes('Files')) return;
@@ -301,17 +319,37 @@
       // On success, any committed children that fed this upload are
       // now duplicates — the device has the real samples at new
       // slots, and the local children should be discarded so the
-      // sidebar doesn't show both. Catalog refresh (next Connect /
-      // explicit Get) will surface the new device entries.
+      // sidebar doesn't show both.
       if (hasCommitted) {
         const childSlots = new Set(committedChildren.map((c) => c.slot));
         samples.update((xs) => xs.filter((s) => !childSlots.has(s.slot)));
       }
-      // We just wrote N samples to the device — refresh the memory
-      // chip so the user can see how much free space they have for
-      // the next slice run. Fire-and-forget: the modal completion
-      // doesn't need to wait for it.
-      void scanMemory();
+      // Drop the per-slot slicing state for the source slot AND
+      // every destination slot we just wrote to. After Apply the
+      // source slot has been overwritten by the first slice child
+      // (same slot number, totally different sample) — without this
+      // the parent's slice marks would render on top of the new
+      // child's waveform, complete with start/length values that
+      // overflow the child's tiny length. The destination slots
+      // come from preflight's projected allocation.
+      const sourceSlot = get(selectedSampleSlot);
+      const destSlots: number[] = Array.isArray(slicePreflight.sampleSlots)
+        ? slicePreflight.sampleSlots
+        : [];
+      clearSlicingForSlots([sourceSlot, ...destSlots]);
+      // Refresh the catalog so the newly-uploaded slice samples +
+      // their auto-generated program appear in the sidebars/lists
+      // immediately. Without this, the user has to disconnect or
+      // hit "Get from S950" to see what they just sent — confusing
+      // because the sample list looks stale right after a
+      // successful upload. Memory scan runs after, against the
+      // refreshed sample list, so the topbar chip reflects the new
+      // device occupancy. Fire-and-forget: the success modal
+      // doesn't block on either.
+      void (async () => {
+        try { await refreshCatalog(); } catch {}
+        try { await scanMemory();    } catch {}
+      })();
     } catch (e: any) {
       sliceError = String(e?.message ?? e);
       slicePhase = 'error';
@@ -787,7 +825,7 @@
     <div class="sidebar__panel"
       class:is-dragging={isDragging}
       style="--wails-drop-target: drop;"
-      on:dragenter={onDragEnter}
+      on:dragenter={(e) => onDragEnter(e, 'sidebar')}
       on:dragleave={onDragLeave}
       on:dragover={onDragOver}>
       <div class="sidebar__head">
@@ -833,7 +871,8 @@
         {#if $samples.length === 0}
           drag .wav / .aiff files here<br/>to import
         {:else}
-          drag .wav / .aiff files here<br/>to replace the selected sample
+          drag .wav / .aiff files here<br/>to add a new sample<br/>
+          <span class="sidebar__hint__alt">(drop on the waveform to replace)</span>
         {/if}
       </div>
     </div>
@@ -848,7 +887,7 @@
       <div class="empty-state"
         class:is-dragging={isDragging}
         style="--wails-drop-target: drop;"
-        on:dragenter={onDragEnter}
+        on:dragenter={(e) => onDragEnter(e, 'empty')}
         on:dragleave={onDragLeave}
         on:dragover={onDragOver}>
         <div class="empty-state__title">No samples loaded</div>
@@ -915,7 +954,7 @@
     <section class="card waveform-card"
       class:is-dragging={isDragging}
       style="--wails-drop-target: drop;"
-      on:dragenter={onDragEnter}
+      on:dragenter={(e) => onDragEnter(e, 'waveform')}
       on:dragleave={onDragLeave}
       on:dragover={onDragOver}>
       <div class="card__head">
@@ -1078,7 +1117,19 @@
                 on:keydown={(e) => e.key === 'Enter' && selectSlice(i)}
                 role="button"
                 tabindex="0">
-                <span class="slice-marker__head">{String(i + 1).padStart(2, '0')}</span>
+                <!-- Double-click on the head deletes the slice (Ableton
+                     parity). The drag handler on the parent runs on
+                     mousedown but only commits if the pointer actually
+                     moved >1px, so the dblclick's two mousedown/mouseup
+                     pairs don't shift the slice. Disabled at 1 slice. -->
+                <span
+                  class="slice-marker__head"
+                  title={$slicing.slices.length > 1
+                    ? 'Drag to move · double-click to delete'
+                    : 'Drag to move'}
+                  on:dblclick|stopPropagation|preventDefault={() => {
+                    if ($slicing.slices.length > 1) removeSliceAt(i);
+                  }}>{String(i + 1).padStart(2, '0')}</span>
                 <span class="slice-marker__line"></span>
               </div>
             {/each}
@@ -1246,6 +1297,20 @@
                       ? 'Preview slice'
                       : 'Import audio to enable preview'}
                     on:click|stopPropagation={() => previewSlice(i)}>▶</button>
+                  <!-- Per-row delete. Disabled at 1 slice because
+                       removeSliceAt refuses to drop below one (the
+                       waveform always needs a covering span). The
+                       neighbouring slice expands into the gap so the
+                       sample's full range stays covered. -->
+                  <button
+                    type="button"
+                    class="slice-list__del"
+                    aria-label={`Delete slice ${i + 1}`}
+                    disabled={$slicing.slices.length <= 1}
+                    title={$slicing.slices.length <= 1
+                      ? 'Need at least one slice'
+                      : 'Delete slice (neighbour expands to fill)'}
+                    on:click|stopPropagation={() => removeSliceAt(i)}>×</button>
                 </div>
               {/each}
             </div>
@@ -2027,7 +2092,7 @@
   }
   .slice-list__row {
     display: grid;
-    grid-template-columns: 28px 1fr auto 22px;
+    grid-template-columns: 28px 1fr auto 22px 22px;
     align-items: center;
     gap: 6px;
     padding: 3px 8px;
@@ -2039,7 +2104,8 @@
   .slice-list__row.is-selected .slice-list__loop { color: var(--ink); }
   .slice-list__num { font-weight: 700; color: var(--grey-dark); }
   .slice-list__loop { color: var(--grey-dark); font-size: 10px; }
-  .slice-list__play {
+  .slice-list__play,
+  .slice-list__del {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2053,7 +2119,12 @@
     padding: 0;
   }
   .slice-list__play:hover:not([disabled]) { background: var(--rb-yellow); color: var(--ink); }
-  .slice-list__play[disabled] {
+  /* Red wash on hover so the destructive action reads differently
+     from the yellow preview button next to it. */
+  .slice-list__del { font-size: 14px; line-height: 1; }
+  .slice-list__del:hover:not([disabled]) { background: var(--rb-red); color: var(--paper); }
+  .slice-list__play[disabled],
+  .slice-list__del[disabled] {
     background: var(--grey-light);
     color: var(--grey-medium);
     cursor: not-allowed;

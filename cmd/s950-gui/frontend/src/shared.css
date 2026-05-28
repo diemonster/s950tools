@@ -501,6 +501,16 @@ body {
   text-align: center;
   font-style: italic;
 }
+/* Secondary hint line under the sidebar drop affordance — smaller +
+   muted so the primary "add a new sample" message stays prominent
+   and the "drop on the waveform to replace" hint reads as a side
+   note rather than a competing instruction. */
+.sidebar__hint__alt {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--grey-medium);
+}
 .waveform-card.is-dragging {
   /* The waveform card already has its own border via .card; switching
      to an inset shadow keeps layout stable (no border-width shift). */

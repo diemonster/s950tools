@@ -123,6 +123,21 @@ export function updateSlicing(patch: Partial<SlicingState>) {
   }));
 }
 
+// Drop any persisted slicing config for these slots. Called after a
+// successful Apply: the source slot and every destination slot have
+// just been overwritten by NEW device samples (the slice children),
+// so the parent's slice marks would otherwise appear on top of the
+// freshly-uploaded child waveforms. Keeps state for unrelated slots
+// the user might be editing in parallel.
+export function clearSlicingForSlots(slots: number[]) {
+  if (slots.length === 0) return;
+  stateBySlot.update((m) => {
+    const next = { ...m };
+    for (const s of slots) delete next[s];
+    return next;
+  });
+}
+
 // Convenience helpers for nested updates.
 export function setSliceMode(mode: SliceMode) {
   const cur = get(slicing);
