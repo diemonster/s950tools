@@ -22,11 +22,14 @@ import (
 
 // Global flags (populated by cobra in PersistentPreRunE).
 var (
-	flagIn      string
-	flagOut     string
-	flagChannel int
-	flagVerbose bool
-	flagTimeout time.Duration
+	flagIn          string
+	flagOut         string
+	flagChannel     int
+	flagVerbose     bool
+	flagTimeout     time.Duration
+	flagSerialPort  string
+	flagSerialBaud  int
+	flagSerialFlow  string
 )
 
 func main() {
@@ -48,6 +51,13 @@ func main() {
 		"hex-dump every SysEx exchanged with the device to stderr")
 	rootCmd.PersistentFlags().DurationVar(&flagTimeout, "timeout", 5*time.Second,
 		"per-request timeout")
+	rootCmd.PersistentFlags().StringVar(&flagSerialPort, "rs232", "",
+		"open RS-232 serial port instead of MIDI (e.g. /dev/cu.usbserial-XXXX). "+
+			"S950 must have controller-select set to RS-232C in overall settings")
+	rootCmd.PersistentFlags().IntVar(&flagSerialBaud, "baud", 38400,
+		"serial baud rate (must match S950's overall-settings baud)")
+	rootCmd.PersistentFlags().StringVar(&flagSerialFlow, "flow", "none",
+		"serial flow control: none | rtscts")
 
 	rootCmd.AddCommand(
 		newPortsCmd(),
@@ -57,7 +67,9 @@ func main() {
 		newPutProgramCmd(),
 		newProgramTemplateCmd(),
 		newPutSampleCmd(),
+		newGetSampleCmd(),
 		newMonitorCmd(),
+		newSetBaudCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -65,17 +77,28 @@ func main() {
 	}
 }
 
-// openTransport opens MIDI in/out using the global flags.
-func openTransport() (*transport.Transport, error) {
-	opts := transport.Options{
+// openTransport opens the user's chosen backend (MIDI by default, or
+// RS-232 when --rs232 is set) and returns it through the same
+// Transport interface so the device layer is backend-agnostic.
+func openTransport() (transport.Transport, error) {
+	logf := func(format string, args ...interface{}) {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
+	if flagSerialPort != "" {
+		return transport.OpenSerial(transport.SerialOptions{
+			Port:        flagSerialPort,
+			Baud:        flagSerialBaud,
+			FlowControl: flagSerialFlow,
+			Verbose:     flagVerbose,
+			LogFunc:     logf,
+		})
+	}
+	return transport.Open(transport.Options{
 		In:      flagIn,
 		Out:     flagOut,
 		Verbose: flagVerbose,
-		LogFunc: func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, format, args...)
-		},
-	}
-	return transport.Open(opts)
+		LogFunc: logf,
+	})
 }
 
 // newDevice opens the transport and wraps it in a Device.
@@ -93,7 +116,7 @@ func newDevice() (*device.Device, func(), error) {
 func newPortsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ports",
-		Short: "List available MIDI input/output ports",
+		Short: "List available MIDI and RS-232 ports",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ins, outs, err := transport.ListPorts()
 			if err != nil {
@@ -106,6 +129,18 @@ func newPortsCmd() *cobra.Command {
 			fmt.Println("MIDI outputs:")
 			for _, p := range outs {
 				fmt.Printf("  [%d] %s\n", p.Index, p.Name)
+			}
+			ser, err := transport.ListSerialPorts()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: list serial ports: %v\n", err)
+				return nil
+			}
+			fmt.Println("Serial (RS-232):")
+			if len(ser) == 0 {
+				fmt.Println("  (none)")
+			}
+			for _, p := range ser {
+				fmt.Printf("  %s\n", p)
 			}
 			return nil
 		},

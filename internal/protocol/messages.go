@@ -199,8 +199,13 @@ func BuildRequestSampleDump(num byte) []byte {
 	return []byte{SOX, UniversalNRT, CodeRSD, num & 0x7F, 0x00, EOX}
 }
 
-// BuildHandshake returns a 4-byte handshake message: F0 7E <code> F7.
-// code must be CodeACKS, CodeNAKS, or CodeASD.
+// BuildHandshake returns a 4-byte handshake: F0 7E <code> F7.
+// code must be CodeACKS, CodeNAKS, or CodeASD. This is the shape
+// the S950 both emits (as slave after an upload) and accepts (as
+// master during a sample-dump receive). Hardware-verified: the
+// 6-byte SDS-standard form with channel + packet# is silently
+// ignored by the S950's dump state machine; the 4-byte form is
+// the actual wire ACK.
 func BuildHandshake(code byte) []byte {
 	return []byte{SOX, UniversalNRT, code, EOX}
 }

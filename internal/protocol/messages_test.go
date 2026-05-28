@@ -98,6 +98,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 			t.Errorf("IsHandshake on % X = (%v,0x%02X), want (true,0x%02X)", msg, ok, got, code)
 		}
 	}
+
 	// Negative cases.
 	if ok, _ := IsHandshake(nil); ok {
 		t.Error("nil should not be a handshake")

@@ -1,6 +1,6 @@
 module github.com/bivers/s950
 
-go 1.24.2
+go 1.25.0
 
 require (
 	github.com/go-audio/aiff v1.1.0
@@ -9,6 +9,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/wailsapp/wails/v2 v2.12.0
 	gitlab.com/gomidi/midi/v2 v2.3.23
+	go.bug.st/serial v1.7.1
 )
 
 require (
@@ -41,6 +42,6 @@ require (
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 )

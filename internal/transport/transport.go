@@ -50,11 +50,73 @@ type Options struct {
 	// LogFunc receives Printf-style verbose hex dumps. If nil, no logs are
 	// emitted regardless of Verbose.
 	LogFunc func(format string, args ...interface{})
+	// OnWire is a structured callback fired for every inbound and outbound
+	// SysEx. Direction is "tx" or "rx"; `msg` is the complete envelope
+	// (`F0 …​ F7`). The byte slice is owned by the caller — copy if it
+	// needs to outlive the call. Always fires when set, regardless of
+	// Verbose; the GUI uses this to populate the wire-log panel without
+	// the CLI's Printf-style sink getting in the way.
+	OnWire func(direction string, msg []byte)
 }
 
-// Transport is one open MIDI in/out pair ready for SysEx I/O. Each Transport
-// owns its driver listener; Close releases both ports.
-type Transport struct {
+// PartialRecvTransport is an optional capability some transports
+// (RS-232) implement: surfacing the raw inbound byte stream instead
+// of only complete F0..F7 envelopes. The device layer uses this to
+// do per-block synchronous ACKing on closed-loop sample dumps —
+// MIDI's rtmidi driver doesn't expose mid-envelope bytes, so the
+// MIDI path falls back to the pre-emptive ACK pump strategy.
+//
+// Usage contract: call BeginStream before driving a closed-loop
+// receive, RecvBytes to drain the raw queue, EndStream when done.
+// During a stream the envelope assembler is suspended — RecvSysEx
+// returns nothing until EndStream restores it.
+type PartialRecvTransport interface {
+	Transport
+	BeginStream()
+	EndStream()
+	RecvBytes(buf []byte, timeout time.Duration) (int, error)
+}
+
+// Transport is the protocol-level connection to an S950. Wire-format
+// callers (the device layer) talk to this interface and never to a
+// concrete implementation, so swapping MIDI for RS232 (or a future
+// virtual / network bridge) is a constructor change, not a parser
+// rewrite. The S950's protocol surface is identical across physical
+// transports — same SysEx envelopes, same handshake codes — only the
+// framing and flow-control semantics differ. Each method is safe to
+// call from a single goroutine; concurrent users should serialise.
+type Transport interface {
+	// Send writes raw bytes to the device. For SysEx, b must be a
+	// complete F0..F7 envelope on MIDI; on RS232 it may be sent
+	// as a continuous byte stream without per-envelope framing
+	// (still F0-prefixed, but F7 may be deferred until end-of-
+	// dump for the closed-loop sample dump flow).
+	Send(b []byte) error
+	// RecvSysEx returns the next complete inbound SysEx envelope
+	// (F0..F7) or an error on timeout. Implementations are
+	// allowed to buffer/assemble depending on the underlying
+	// transport — MIDI delivers atomic envelopes; RS232 reads
+	// byte-by-byte and assembles.
+	RecvSysEx(timeout time.Duration) ([]byte, error)
+	// Drain discards any pending inbound bytes. Useful before
+	// starting a new request/response cycle so a stale reply
+	// doesn't get mistaken for the current one.
+	Drain()
+	// Close releases the underlying ports / serial handle.
+	Close() error
+	// InName / OutName return the human-readable port names
+	// the transport was opened against — used by the GUI's
+	// connection status chip and the wire log.
+	InName() string
+	OutName() string
+}
+
+// midiTransport is the gomidi+rtmidi backend — the implementation
+// used by every consumer today. It delivers complete F0..F7 SysEx
+// envelopes via gomidi's listener callback; partial SysEx receive
+// is not supported (a hardware limitation of the underlying
+// library, see docs/S950_CLI_HANDOFF.md and the Phase 1C notes).
+type midiTransport struct {
 	in   drivers.In
 	out  drivers.Out
 	stop func()
@@ -70,9 +132,11 @@ type Transport struct {
 // dump (~966KB) with comfortable headroom.
 const DefaultSysExBufferBytes = 2 * 1024 * 1024
 
-// Open opens the MIDI in and out ports matching the names in opts and starts
-// the listener that delivers complete SysEx envelopes via RecvSysEx.
-func Open(opts Options) (*Transport, error) {
+// Open opens MIDI in/out ports matching the names in opts and starts the
+// listener that delivers complete SysEx envelopes via RecvSysEx. Returns
+// the Transport interface so callers stay decoupled from the MIDI backend
+// — see the package docstring for the rationale.
+func Open(opts Options) (Transport, error) {
 	if opts.SysExBufferBytes == 0 {
 		opts.SysExBufferBytes = DefaultSysExBufferBytes
 	}
@@ -102,7 +166,7 @@ func Open(opts Options) (*Transport, error) {
 		return nil, fmt.Errorf("open out: %w", err)
 	}
 
-	t := &Transport{
+	t := &midiTransport{
 		in:   inPort,
 		out:  outPort,
 		opts: opts,
@@ -137,16 +201,23 @@ func ListPorts() (ins, outs []PortInfo, err error) {
 // Send writes raw MIDI bytes to the output port. For SysEx, b must be a full
 // F0..F7 message; rtmidi splits it across MIDIPacketLists internally as
 // needed (CoreMIDI's per-list cap is 64KB).
-func (t *Transport) Send(b []byte) error {
+func (t *midiTransport) Send(b []byte) error {
 	if t.opts.Verbose && t.opts.LogFunc != nil {
 		t.opts.LogFunc("TX (%d bytes): % X\n", len(b), prefixForLog(b))
+	}
+	if t.opts.OnWire != nil {
+		// Copy: callers should be free to retain the slice past the
+		// send-call return without worrying about driver reuse.
+		cp := make([]byte, len(b))
+		copy(cp, b)
+		t.opts.OnWire("tx", cp)
 	}
 	return t.out.Send(b)
 }
 
 // RecvSysEx returns the next complete inbound SysEx message (F0..F7) or
 // (nil, error) on timeout.
-func (t *Transport) RecvSysEx(timeout time.Duration) ([]byte, error) {
+func (t *midiTransport) RecvSysEx(timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		if msg, ok := t.popOneSysEx(); ok {
@@ -169,14 +240,14 @@ func (t *Transport) RecvSysEx(timeout time.Duration) ([]byte, error) {
 
 // Drain discards any pending inbound bytes. Useful before starting a new
 // request/response cycle.
-func (t *Transport) Drain() {
+func (t *midiTransport) Drain() {
 	t.mu.Lock()
 	t.rxQ = t.rxQ[:0]
 	t.mu.Unlock()
 }
 
 // Close stops listening and releases the ports.
-func (t *Transport) Close() error {
+func (t *midiTransport) Close() error {
 	if t.stop != nil {
 		t.stop()
 	}
@@ -194,14 +265,15 @@ func (t *Transport) Close() error {
 }
 
 // InName returns the name of the open input port.
-func (t *Transport) InName() string { return t.in.String() }
+func (t *midiTransport) InName() string { return t.in.String() }
 
 // OutName returns the name of the open output port.
-func (t *Transport) OutName() string { return t.out.String() }
+func (t *midiTransport) OutName() string { return t.out.String() }
 
 // handleMessage is invoked by gomidi for each parsed inbound message.
-// For SysEx, data is the full F0..F7 envelope. We append it to rxQ verbatim.
-func (t *Transport) handleMessage(msg midi.Message, _ int32) {
+// For SysEx, data is the full F0..F7 envelope. We append it to rxQ
+// verbatim.
+func (t *midiTransport) handleMessage(msg midi.Message, _ int32) {
 	data := []byte(msg)
 	if len(data) == 0 {
 		return
@@ -212,6 +284,11 @@ func (t *Transport) handleMessage(msg midi.Message, _ int32) {
 	}
 	if t.opts.Verbose && t.opts.LogFunc != nil {
 		t.opts.LogFunc("RX (%d bytes): % X\n", len(data), prefixForLog(data))
+	}
+	if t.opts.OnWire != nil {
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		t.opts.OnWire("rx", cp)
 	}
 	t.mu.Lock()
 	t.rxQ = append(t.rxQ, data...)
@@ -227,7 +304,7 @@ func (t *Transport) handleMessage(msg midi.Message, _ int32) {
 }
 
 // popOneSysEx removes and returns the first complete SysEx from rxQ.
-func (t *Transport) popOneSysEx() ([]byte, bool) {
+func (t *midiTransport) popOneSysEx() ([]byte, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.rxQ) == 0 {
