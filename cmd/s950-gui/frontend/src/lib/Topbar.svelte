@@ -15,12 +15,39 @@
     refreshState, refreshAllFromDevice, cancelRefresh, resetRefresh,
   } from './state/refresh';
   import { theme, toggleTheme } from './state/theme';
+  import * as App from '../../wailsjs/go/main/App';
 
   // Picker option values are prefixed so a single <select> can hold
   // both MIDI and serial entries while still letting the change
   // handler tell them apart. "midi:<name>" vs "serial:<name>".
+  // The PROBE sentinel is a third synthetic option that triggers
+  // the auto-discovery flow instead of selecting a port directly.
   const MIDI = 'midi:';
   const SERIAL = 'serial:';
+  const PROBE = '__probe__';
+
+  // Probe state machine — drives the dropdown entry's label so the
+  // user sees "Probing…" while scanning. On success the picker
+  // auto-selects the discovered port + flips to serial; on miss it
+  // surfaces the error inline (via linkError, same path as Connect).
+  let probing = false;
+  async function runProbe() {
+    if (probing) return;
+    probing = true;
+    linkError.set('');
+    try {
+      const result = await App.ProbeForS950();
+      pickSerial(result.port);
+      // SERIAL_BAUDS is the closed list our picker offers; the
+      // probe's baud might be a sub-bound (9600/19200) that's in
+      // the list anyway, so set directly.
+      baud.set(result.baud as any);
+    } catch (e: any) {
+      linkError.set(String(e?.message ?? e));
+    } finally {
+      probing = false;
+    }
+  }
 
   function pickerValue(kind: 'midi' | 'serial', name: string): string {
     return name ? `${kind === 'serial' ? SERIAL : MIDI}${name}` : '';
@@ -33,12 +60,28 @@
   }
 
   function onPickIn(e: Event) {
-    const raw = (e.currentTarget as HTMLSelectElement).value;
+    const sel = e.currentTarget as HTMLSelectElement;
+    const raw = sel.value;
+    if (raw === PROBE) {
+      // Snap the select back to the previous value visually — the
+      // probe option is a one-shot trigger, not a selection. Without
+      // this the dropdown would stay stuck on "Probe…" until the
+      // user picks something else.
+      sel.value = currentInValue();
+      void runProbe();
+      return;
+    }
     if (raw.startsWith(SERIAL)) pickSerial(raw.slice(SERIAL.length));
     else pickMidi('in', raw.startsWith(MIDI) ? raw.slice(MIDI.length) : '');
   }
   function onPickOut(e: Event) {
-    const raw = (e.currentTarget as HTMLSelectElement).value;
+    const sel = e.currentTarget as HTMLSelectElement;
+    const raw = sel.value;
+    if (raw === PROBE) {
+      sel.value = currentOutValue();
+      void runProbe();
+      return;
+    }
     if (raw.startsWith(SERIAL)) pickSerial(raw.slice(SERIAL.length));
     else pickMidi('out', raw.startsWith(MIDI) ? raw.slice(MIDI.length) : '');
   }
@@ -51,13 +94,22 @@
   // before dismissing. Cancel is best-effort: the in-flight Wails
   // call completes before the loop checks the flag.
   let refreshModalOpen = false;
-  function openRefreshModal() { refreshModalOpen = true; }
+  // Audio pass toggle on the idle-phase confirmation. Default ON
+  // (matches the documented behavior — refresh is supposed to
+  // include audio). Users can uncheck for a fast metadata-only
+  // run when they know audio hasn't drifted (e.g. they only
+  // edited programs on the front panel).
+  let refreshIncludeAudio = true;
+  function openRefreshModal() {
+    refreshModalOpen = true;
+    refreshIncludeAudio = true; // reset toggle each open
+  }
   function closeRefreshModal() {
     refreshModalOpen = false;
     resetRefresh();
   }
   async function startRefresh() {
-    await refreshAllFromDevice();
+    await refreshAllFromDevice(refreshIncludeAudio);
     // Modal stays open on 'done' / 'error' so the user reads the
     // outcome — closeRefreshModal() resets the store on dismiss.
   }
@@ -143,9 +195,16 @@
        matters on a point-to-point serial link. -->
   <label class="chip chip--select" title={$linkError || ($transportKind === 'serial' ? 'RS-232 port (bidirectional)' : 'MIDI input port')}>
     <span class="chip__label">{$transportKind === 'serial' ? 'RS-232' : 'MIDI in'}</span>
-    <span class="chip__value">{$selectedIn || '— pick —'}</span>
-    <select value={currentInValue()} on:change={onPickIn}>
+    <span class="chip__value">{probing ? 'Probing…' : ($selectedIn || '— pick —')}</span>
+    <select value={currentInValue()} on:change={onPickIn} disabled={probing}>
       <option value="">— pick —</option>
+      <!-- Probe: synthetic entry that runs auto-discovery instead of
+           selecting a port. Hidden in MIDI-only setups (no serial
+           devices means there's nothing to probe). Visible when at
+           least one USB-serial candidate exists. -->
+      {#if $serialPortsList.length > 0}
+        <option value={PROBE}>🔍 Probe for S950… (~15s)</option>
+      {/if}
       {#if $inputPorts.length > 0}
         <optgroup label="MIDI inputs">
           {#each $inputPorts as p (p.name)}
@@ -295,11 +354,20 @@
       <div class="modal__body">
         {#if $refreshState.phase === 'idle'}
           <div class="modal__step">
-            Pulls the device catalog, every program, every sample's SPRM
-            <strong>and</strong> any sample audio that's not already cached
-            on disk. Worst case ~10 min for a fully-loaded EXM005; subsequent
-            refreshes skip cached audio and finish in seconds.
+            Pulls the device catalog, every program, and every sample's SPRM.
+            Sample audio is pulled too by default — uncheck below for a fast
+            metadata-only refresh when you know the audio hasn't changed
+            (e.g. you only edited programs on the front panel).
           </div>
+          <label class="modal__toggle">
+            <input type="checkbox" bind:checked={refreshIncludeAudio} />
+            <span>Include sample audio</span>
+            <span class="modal__toggle-hint">
+              {refreshIncludeAudio
+                ? 'worst case ~10 min for a full EXM005; cached audio is skipped'
+                : 'metadata only — seconds, not minutes'}
+            </span>
+          </label>
           <div class="modal__hint">
             Use this when the on-device state has drifted from what the app
             shows (e.g. you edited programs or recorded samples on the front
@@ -416,5 +484,27 @@
   :global(.chip--btn:disabled) {
     color: var(--grey-medium);
     cursor: not-allowed;
+  }
+
+  /* Modal-body toggle row used by the Refresh "include audio"
+     checkbox. Sits between the explanation paragraph and the
+     hint footer; hint text under the label gives a live ETA
+     summary so the user sees the impact of toggling. */
+  :global(.modal__toggle) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  :global(.modal__toggle input[type="checkbox"]) {
+    margin: 0;
+    cursor: pointer;
+  }
+  :global(.modal__toggle-hint) {
+    color: var(--grey-medium);
+    font-size: 11px;
+    margin-left: auto;
   }
 </style>

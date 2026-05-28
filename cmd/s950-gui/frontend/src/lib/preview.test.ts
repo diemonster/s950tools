@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasHostAudio, buildPingPongLoopBuffer } from './preview';
+import { hasHostAudio, buildPingPongLoopBuffer, zohRenderPCM } from './preview';
 import { newLocalSample } from './state/samples';
 
 // Most of preview.ts is Web Audio-bound and isn't worth mocking
@@ -105,5 +105,71 @@ describe('buildPingPongLoopBuffer', () => {
     expect(out.length).toBe(8);
     expect(out[0]).toBeCloseTo(0.4);
     expect(out[7]).toBeCloseTo(0.4);
+  });
+});
+
+// zohRenderPCM is the host-side emulation of the S950's lack of
+// playback anti-aliasing — when a sub-rate sample is rendered into
+// a higher-rate AudioBuffer, each source sample is held across the
+// rate ratio instead of sinc-interpolated. These tests pin the
+// math + edge cases that would otherwise manifest as audio clicks
+// (NaN frames) or unexpected pitch shifts.
+describe('zohRenderPCM', () => {
+  it('passes through samples 1:1 when fromRate === toRate', () => {
+    const src = [100, 200, 300, 400];
+    const out = new Float32Array(4);
+    zohRenderPCM(src, 22050, 22050, out);
+    expect(Array.from(out)).toEqual([100 / 32768, 200 / 32768, 300 / 32768, 400 / 32768]);
+  });
+
+  it('nearest-neighbor upsamples when fromRate < toRate', () => {
+    // 2 source samples → 6 output frames at 3× rate. Each source
+    // sample should be held for 3 output frames (zero-order hold).
+    const src = [1000, 2000];
+    const out = new Float32Array(6);
+    zohRenderPCM(src, 10000, 30000, out);
+    const scaled = (n: number) => n / 32768;
+    expect(Array.from(out)).toEqual([
+      scaled(1000), scaled(1000), scaled(1000),
+      scaled(2000), scaled(2000), scaled(2000),
+    ]);
+  });
+
+  it('clamps srcIdx at the last source frame (no NaN on final output)', () => {
+    // Without the bounds clamp, the last output frame computed via
+    // floor((n-1) * fromRate / toRate) can land at pcm.length and
+    // read `undefined`, producing NaN. Audible as a click. Verify
+    // the final frame is real, not NaN.
+    const src = [500, 1500, 2500];
+    const out = new Float32Array(10); // big enough to provoke overrun
+    zohRenderPCM(src, 10000, 30000, out);
+    for (let i = 0; i < out.length; i++) {
+      expect(Number.isFinite(out[i])).toBe(true);
+    }
+    // The tail should hold the last source value.
+    expect(out[out.length - 1]).toBeCloseTo(2500 / 32768);
+  });
+
+  it('leaves output untouched for empty source', () => {
+    // Defends against a sample with no PCM somehow reaching the
+    // renderer. The output buffer is pre-zeroed by createBuffer;
+    // we should not write NaN into it. Use 0.5 as the sentinel —
+    // float32-exact, so strict equality survives the buffer's
+    // implicit quantization.
+    const src: number[] = [];
+    const out = new Float32Array(8);
+    out.fill(0.5);
+    zohRenderPCM(src, 22050, 44100, out);
+    expect(out.every((v) => v === 0.5)).toBe(true);
+  });
+
+  it('downsample path uses pass-through copy capped at out.length', () => {
+    // For fromRate > toRate we delegate to the browser's
+    // resampler on play; this path just copies what fits. Verifies
+    // the truncation doesn't read past either buffer.
+    const src = [10, 20, 30, 40, 50, 60];
+    const out = new Float32Array(3);
+    zohRenderPCM(src, 44100, 22050, out);
+    expect(Array.from(out)).toEqual([10 / 32768, 20 / 32768, 30 / 32768]);
   });
 });

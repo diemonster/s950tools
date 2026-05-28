@@ -32,6 +32,7 @@ vi.mock('../../wailsjs/go/main/App', () => ({
   InspectSlicing:      vi.fn().mockResolvedValue({ ok: true }),
   ListPorts:           vi.fn().mockResolvedValue({ ins: [], outs: [] }),
   PutCachedWaveform:   vi.fn().mockResolvedValue(undefined),
+  SendSample:          vi.fn().mockResolvedValue(undefined),
   SetProgram:          vi.fn().mockResolvedValue(undefined),
   SetSampleParams:     vi.fn().mockResolvedValue(undefined),
   Status:              vi.fn().mockResolvedValue({ connected: false, channel: 0 }),
@@ -375,6 +376,123 @@ describe('Sample tab — Copy from S950 (Phase 1C)', () => {
     const s = get(samples).find((x) => x.slot === 7);
     expect(s?.words12).toBeUndefined();
     expect((App as any).PutCachedWaveform).not.toHaveBeenCalled();
+    cleanup();
+  });
+});
+
+// ---------- Send to S950 ----------
+
+describe('Sample tab — Send to S950', () => {
+  // Helper: a local sample with host-side PCM/words ready to upload.
+  // newLocalSample doesn't attach audio (that's import's job), so we
+  // splice in a small fake buffer just to satisfy the words12 guard.
+  function withLocalReady(slot = 0, name = 'KICK'): SampleT {
+    const s: SampleT = {
+      ...newLocalSample(slot, name, 26040, 200),
+      source: 'local',
+      pcm: [0, 1, 2, 3],
+      words12: [0x800, 0x801, 0x802, 0x803],
+    };
+    samples.set([s]);
+    selectedSampleSlot.set(slot);
+    return s;
+  }
+
+  it('shows "Send to S950" on local samples, "Send SPRM to S950" on device samples', () => {
+    // Local: primary upload action.
+    withLocalReady();
+    let { container } = render(Sample);
+    const localBtns = Array.from(container.querySelectorAll('button.btn')).map((b) => b.textContent ?? '');
+    expect(localBtns.some((t) => /^send to s950$/i.test(t.trim()))).toBe(true);
+    expect(localBtns.some((t) => /^send sprm to s950$/i.test(t.trim()))).toBe(false);
+    cleanup();
+
+    // Device: params-only action.
+    samples.set([{ ...newLocalSample(5, 'TONE', 26040, 5000), source: 'device' }]);
+    selectedSampleSlot.set(5);
+    ({ container } = render(Sample));
+    const devBtns = Array.from(container.querySelectorAll('button.btn')).map((b) => b.textContent ?? '');
+    expect(devBtns.some((t) => /^send to s950$/i.test(t.trim()))).toBe(false);
+    expect(devBtns.some((t) => /^send sprm to s950$/i.test(t.trim()))).toBe(true);
+    cleanup();
+  });
+
+  it('disables Send to S950 when local sample has no host audio', () => {
+    samples.set([{ ...newLocalSample(0, 'EMPTY', 26040, 100), source: 'local' }]);
+    selectedSampleSlot.set(0);
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /^send to s950$/i.test((b.textContent ?? '').trim())) as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    expect(btn.disabled).toBe(true);
+    cleanup();
+  });
+
+  it('click calls App.SendSample with slot + words + rate + params', async () => {
+    withLocalReady(3, 'SNARE');
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /^send to s950$/i.test((b.textContent ?? '').trim())) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+
+    expect((App as any).SendSample).toHaveBeenCalledTimes(1);
+    const [slot, words, rate, params] = (App as any).SendSample.mock.calls[0];
+    expect(slot).toBe(3);
+    expect(words).toEqual([0x800, 0x801, 0x802, 0x803]);
+    expect(rate).toBe(26040);
+    // SampleParams shape: high-level fields encoded into the
+    // wire-style struct. Name space-padded to 10 chars; ReplayMode
+    // is the byte for the current mode.
+    expect(params.Name).toBe('SNARE     ');
+    expect(params.TotalWords).toBe(200);
+    expect(params.ReplayMode).toBe(79); // 'O' = one-shot default
+    cleanup();
+  });
+
+  it('promotes the sample from local to device on successful upload', async () => {
+    withLocalReady(7, 'HAT');
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /^send to s950$/i.test((b.textContent ?? '').trim())) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+    await tick();
+    const s = get(samples).find((x) => x.slot === 7);
+    expect(s?.source).toBe('device');
+    cleanup();
+  });
+
+  it('shows an error modal when SendSample rejects', async () => {
+    ((App as any).SendSample as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('3 NAKs during upload'));
+    withLocalReady(0, 'BUSTED');
+    const { container, findByText } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /^send to s950$/i.test((b.textContent ?? '').trim())) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    expect(await findByText(/3 naks during upload/i)).toBeTruthy();
+    // Source stays 'local' on failure — the row shouldn't lie about
+    // device residency just because the user clicked the button.
+    const s = get(samples).find((x) => x.slot === 0);
+    expect(s?.source).toBe('local');
+    cleanup();
+  });
+
+  it('Send SPRM calls SetSampleParams (no audio upload)', async () => {
+    samples.set([{ ...newLocalSample(5, 'TONE', 26040, 5000), source: 'device' }]);
+    selectedSampleSlot.set(5);
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /^send sprm to s950$/i.test((b.textContent ?? '').trim())) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+
+    expect((App as any).SetSampleParams).toHaveBeenCalledTimes(1);
+    expect((App as any).SendSample).not.toHaveBeenCalled();
+    const [slot, params] = (App as any).SetSampleParams.mock.calls[0];
+    expect(slot).toBe(5);
+    expect(params.Name).toBe('TONE      ');
     cleanup();
   });
 });

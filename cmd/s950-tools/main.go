@@ -70,6 +70,10 @@ func main() {
 		newGetSampleCmd(),
 		newMonitorCmd(),
 		newSetBaudCmd(),
+		newGetOverallCmd(),
+		newSetOverallCmd(),
+		newGetDrumCmd(),
+		newSetDrumCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

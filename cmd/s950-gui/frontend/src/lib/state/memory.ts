@@ -91,7 +91,9 @@ export async function scanMemory(): Promise<void> {
         // continueApplySlicing. Replacing would force the waveform
         // back to the synthetic squiggle the moment scanMemory ran.
         samples.update((xs) => xs.map((x) =>
-          x.slot === s.slot ? { ...full, pcm: x.pcm, words12: x.words12 } : x,
+          x.slot === s.slot
+            ? { ...full, pcm: x.pcm, words12: x.words12, originalSource: x.originalSource ?? full.originalSource }
+            : x,
         ));
       } catch {
         // Skip individual failures — one bad slot shouldn't abort

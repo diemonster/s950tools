@@ -15,6 +15,7 @@ import { programs, type Program, type Keygroup } from './programs';
 import { samples, type Sample } from './samples';
 import { phase } from './connection';
 import { setSync } from '../sync';
+import { sampleToSampleParams } from './converters';
 
 // Debounce window. 400ms is the sweet spot per design discussion:
 // long enough that a knob sweep settles into one Send, short enough
@@ -74,6 +75,16 @@ export async function flushProgramWriteback() {
 
 export function scheduleSampleWriteback(slot: number) {
   if (!isConnected()) return;
+  // Only live-sync samples that are coherent with the device. Once
+  // an edit has flipped source to 'local' (e.g. resample changed
+  // the host PCM), pushing SPRM to the device would mismatch its
+  // unchanged stored SDATA — SPRM would say "rate 22050" while the
+  // device still has the original-rate audio bytes, producing
+  // pitched-down playback on the next trigger. The user has to
+  // explicitly Send-to-S950 (which uploads both SDATA + SPRM
+  // together) before live-sync makes sense again.
+  const s = get(samples).find((x) => x.slot === slot);
+  if (!s || s.source !== 'device') return;
   samplePendingSlot = slot;
   setSync('dirty', 'Editing...');
   if (sampleTimer) clearTimeout(sampleTimer);
@@ -94,7 +105,7 @@ export async function flushSampleWriteback() {
 
   setSync('sending', 'Sending...');
   try {
-    await App.SetSampleParams(slot, sampleToParams(s));
+    await App.SetSampleParams(slot, sampleToSampleParams(s) as any);
     setSync('synced', 'Synced');
   } catch (e: any) {
     console.error(`SetSampleParams(${slot}) failed:`, e);
@@ -182,23 +193,8 @@ function voiceOutByte(label: string): number {
   return 255;
 }
 
-// sampleToParams inverts catalog.ts's sampleParamsToSample. The raw
-// 120-byte SPRM block — if we have it — is passed back so reserved
-// bytes round-trip. Stored on the Sample as Raw[] (set by the
-// converter on load).
-export function sampleToParams(s: Sample): any {
-  return {
-    Raw:           (s as any).raw ?? new Array(120).fill(0),
-    Name:          s.name,
-    TotalWords:    s.length,
-    SampleRateHz:  s.rate,
-    NominalPitch:  Math.round(960 + s.tune * 16),
-    LoudOffset:    s.loudness,
-    ReplayMode:    s.mode === 'loop' ? 0x4C : s.mode === 'ping-pong' ? 0x41 : 0x4F,
-    End:           s.end,
-    Start:         s.start,
-    LoopLength:    s.loopLength,
-    VelXFade:      s.velXfade ? 255 : 0,
-    Reversed:      s.reverse ? 0x52 : 0x4E,
-  };
-}
+// sampleToParams used to live here as a parallel mapping. It was
+// merged into ./converters.ts (sampleToSampleParams) so the live-
+// edit debounce path and the explicit Send-SPRM path can't drift
+// — every previous bug in this file (e.g. the inverted tune
+// direction) had to be fixed twice. Single source of truth wins.

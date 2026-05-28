@@ -34,6 +34,14 @@ export function GetCachedWaveform(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetCachedWaveform'](arg1, arg2, arg3);
 }
 
+export function GetDrum() {
+  return window['go']['main']['App']['GetDrum']();
+}
+
+export function GetOverall() {
+  return window['go']['main']['App']['GetOverall']();
+}
+
 export function GetProgram(arg1) {
   return window['go']['main']['App']['GetProgram'](arg1);
 }
@@ -54,8 +62,44 @@ export function ListPorts() {
   return window['go']['main']['App']['ListPorts']();
 }
 
+export function OpenProgramJSON() {
+  return window['go']['main']['App']['OpenProgramJSON']();
+}
+
+export function PreviewMidi(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['PreviewMidi'](arg1, arg2, arg3, arg4);
+}
+
+export function ProbeForS950() {
+  return window['go']['main']['App']['ProbeForS950']();
+}
+
 export function PutCachedWaveform(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['PutCachedWaveform'](arg1, arg2, arg3, arg4);
+}
+
+export function ResampleSample(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ResampleSample'](arg1, arg2, arg3);
+}
+
+export function SaveProgramJSON(arg1, arg2) {
+  return window['go']['main']['App']['SaveProgramJSON'](arg1, arg2);
+}
+
+export function SaveSampleWav(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SaveSampleWav'](arg1, arg2, arg3);
+}
+
+export function SendSample(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SendSample'](arg1, arg2, arg3, arg4);
+}
+
+export function SetDrum(arg1) {
+  return window['go']['main']['App']['SetDrum'](arg1);
+}
+
+export function SetOverall(arg1) {
+  return window['go']['main']['App']['SetOverall'](arg1);
 }
 
 export function SetProgram(arg1, arg2) {

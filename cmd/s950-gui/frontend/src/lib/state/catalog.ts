@@ -13,7 +13,7 @@ import {
   type Program, type Keygroup, type Layer, type Modulation,
 } from './programs';
 import { scanMemory } from './memory';
-import { sampleParamsToSample } from './converters';
+import { sampleParamsToSample, sampleToSampleParams } from './converters';
 
 // Set of slots whose full data has been fetched from the device. We
 // don't refetch on re-selection unless the user explicitly forces it
@@ -60,6 +60,7 @@ function skinnySample(slot: number, name: string): Sample {
     reverse: false, velXfade: false,
     tune: 0, loudness: 0,
     source: 'device',
+    originalSource: 'device',
   };
 }
 
@@ -142,26 +143,95 @@ export async function ensureProgramLoaded(slot: number, force = false): Promise<
 
 export async function ensureSampleLoaded(slot: number, force = false): Promise<void> {
   if (!force && loadedSamples.has(slot)) return;
+  // Skip when the slot has no sample row at all — the merge below
+  // is a map-and-filter that would leave the store unchanged
+  // anyway, so the SysEx round-trip is pure waste. Also avoids a
+  // spurious GetSampleParams at module load (the selectedSampleSlot
+  // subscriber auto-fires for the initial value 0 before any
+  // catalog refresh has populated the store).
+  const existing = get(samples).find((s) => s.slot === slot);
+  if (!existing) return;
   // Skip local-only samples — fetching SPRM would either fail (no
   // audio on device for this slot) or, worse, overwrite the
   // imported PCM with phantom device data. Local samples live in
   // host memory only until the user explicitly uploads.
-  const existing = get(samples).find((s) => s.slot === slot);
-  if (existing && existing.source === 'local') return;
+  if (existing.source === 'local') return;
   try {
     const params = await App.GetSampleParams(slot);
     const full = sampleParamsToSample(params, slot);
     // Merge rather than replace so host-side audio attached via
     // import / post-Apply capture survives a lazy SPRM fetch. See
     // memory.ts scanMemory for the same pattern + rationale.
+    // originalSource is the immutable origin marker; preserve it
+    // explicitly since `full` (from sampleParamsToSample) doesn't
+    // know whether this row was loaded fresh from the catalog or
+    // already existed as a local import shadowed by a device slot.
     samples.update((list) => list.map((s) =>
-      s.slot === slot ? { ...full, pcm: s.pcm, words12: s.words12 } : s,
+      s.slot === slot
+        ? { ...full, pcm: s.pcm, words12: s.words12, originalSource: s.originalSource ?? full.originalSource }
+        : s,
     ));
     loadedSamples.add(slot);
   } catch (e) {
     console.error(`GetSampleParams(${slot}) failed:`, e);
     throw e;
   }
+}
+
+// revertSampleToDevice discards local edits on a sample that was
+// originally pulled from the S950. Two paths depending on whether
+// we have a pre-edit snapshot:
+//
+//   A. Snapshot present (the common case after live-edit + resample):
+//      restore the snapshot byte-identically (PCM + SPRM fields all
+//      come back), AND push the snapshot's SPRM to the device. The
+//      push is critical — live-sync may have written intermediate
+//      edits to the device's SPRM that no longer match its stored
+//      SDATA (e.g. a resample would have changed the SPRM rate
+//      without re-uploading audio, causing pitched-down playback).
+//      Re-writing the snapshot's SPRM puts the device back in sync
+//      with its actual audio bytes.
+//
+//   B. No snapshot (sample never edited since load): fetch fresh
+//      SPRM from the device. Cheap and correct since the device
+//      state IS the truth in this case.
+//
+// originalSource is preserved through both paths so a future
+// re-edit can still be reverted.
+//
+// Throws if the wire call fails. Samples store is untouched on
+// failure so local edits survive a transient link blip.
+export async function revertSampleToDevice(slot: number): Promise<void> {
+  const cur = get(samples).find((s) => s.slot === slot);
+  const snap = cur?.deviceSnapshot;
+  if (snap) {
+    // Path A: restore snapshot, then re-establish device coherence
+    // by re-writing the snapshot's SPRM. The device's SDATA was
+    // never touched by our live-sync (we only push SPRM), so
+    // matching the SPRM back to the snapshot is enough.
+    samples.update((xs) => xs.map((x) =>
+      x.slot === slot ? { ...snap, deviceSnapshot: undefined } : x,
+    ));
+    try {
+      await App.SetSampleParams(slot, sampleToSampleParams(snap as Sample) as any);
+    } catch (e) {
+      // Non-fatal: the local state is restored either way. The
+      // device's SPRM may still hold the latest edited values
+      // until the next manual Send or revert succeeds.
+      console.warn(`Revert: SPRM re-sync to device failed:`, e);
+    }
+    loadedSamples.add(slot);
+    return;
+  }
+  // Path B: no snapshot — fall back to fresh fetch.
+  const params = await App.GetSampleParams(slot);
+  const fresh = sampleParamsToSample(params, slot);
+  samples.update((xs) => xs.map((x) =>
+    x.slot === slot
+      ? { ...fresh, originalSource: x.originalSource ?? fresh.originalSource }
+      : x,
+  ));
+  loadedSamples.add(slot);
 }
 
 // ---------- Converters: protocol → frontend ----------
@@ -171,7 +241,9 @@ export async function ensureSampleLoaded(slot: number, force = false): Promise<v
 // nested layers + modulation block. Fields that have no protocol
 // counterpart (constPitch, keyFilter, voiceOut labels) default to
 // safe values — they'll write back as no-ops until we model them.
-function programJSONToProgram(j: any, slot: number): Program {
+// Exported so the Program tab's Open .json flow can convert a
+// loaded JSON without re-implementing the field mapping.
+export function programJSONToProgram(j: any, slot: number): Program {
   const keygroups: Keygroup[] = (j.keygroups ?? []).map((k: any, i: number) => ({
     n: i + 1,
     lowKey: k.lower_key ?? 36,

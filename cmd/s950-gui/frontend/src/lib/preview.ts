@@ -124,6 +124,42 @@ function audioContext(): AudioContext {
 // Invalidated when the sample's PCM changes (different identity).
 const bufferCache = new Map<number, { pcm: number[]; rate: number; buf: AudioBuffer }>();
 
+// zohRenderPCM renders source-rate int16 PCM into a destination-rate
+// Float32 buffer using nearest-neighbor (zero-order-hold) when
+// upsampling. The S950 has no anti-aliasing filter on playback —
+// it just holds each sample's value until the next clock tick —
+// so the host preview needs to do the same to sound like the
+// device. Without this, Web Audio would sinc-interpolate the
+// source PCM into the AudioContext rate and we'd lose the
+// characteristic stair-step / aliasing of low-rate samples.
+//
+// When fromRate >= toRate we let the browser's downsampler handle
+// it (the inverse case — S950 samples up to 65 kHz on a 48 kHz
+// AudioContext is rare and not the lo-fi-character path).
+export function zohRenderPCM(pcm: number[], fromRate: number, toRate: number, out: Float32Array): void {
+  if (pcm.length === 0) return; // empty input → silent buffer (already zeroed)
+  if (fromRate >= toRate) {
+    // Pass-through 1:1 (or browser handles the downsample on play).
+    const n = Math.min(out.length, pcm.length);
+    for (let i = 0; i < n; i++) out[i] = pcm[i] / 32768;
+    return;
+  }
+  // Nearest-neighbor upsample. Each output frame indexes back into
+  // the source via floor(i * fromRate / toRate). Multiple consecutive
+  // outputs landing on the same source sample = the held value,
+  // which is exactly what the S950's DAC does. Clamp the index to
+  // the last source frame — Math.floor rounding plus the dstFrames
+  // ceil() in the caller can push srcIdx one past the end on the
+  // very last output frame, which would otherwise read `undefined`
+  // and produce NaN in the AudioBuffer (audible as clicks).
+  const lastSrc = pcm.length - 1;
+  for (let i = 0; i < out.length; i++) {
+    let srcIdx = Math.floor((i * fromRate) / toRate);
+    if (srcIdx > lastSrc) srcIdx = lastSrc;
+    out[i] = pcm[srcIdx] / 32768;
+  }
+}
+
 function bufferFor(s: Sample): AudioBuffer | null {
   if (!s.pcm || s.pcm.length === 0) return null;
   const cached = bufferCache.get(s.slot);
@@ -133,13 +169,19 @@ function bufferFor(s: Sample): AudioBuffer | null {
     return cached.buf;
   }
   const ac = audioContext();
-  const buf = ac.createBuffer(1, s.pcm.length, s.rate);
-  const ch = buf.getChannelData(0);
-  const pcm = s.pcm;
-  for (let i = 0; i < pcm.length; i++) {
-    ch[i] = pcm[i] / 32768;
-  }
-  bufferCache.set(s.slot, { pcm, rate: s.rate, buf });
+  // Render at the AudioContext's native rate so the browser doesn't
+  // re-interpolate a sub-rate buffer with its (high-quality) built-in
+  // resampler — that would smooth away the lo-fi character the
+  // resample-on-upload feature was meant to add. ZOH expansion
+  // (sample-and-hold) keeps the device's stair-step audible. For
+  // same-or-higher source rates this is a 1:1 copy.
+  const dstRate = ac.sampleRate;
+  const dstFrames = s.rate < dstRate
+    ? Math.ceil((s.pcm.length * dstRate) / s.rate)
+    : s.pcm.length;
+  const buf = ac.createBuffer(1, dstFrames, dstRate);
+  zohRenderPCM(s.pcm, s.rate, dstRate, buf.getChannelData(0));
+  bufferCache.set(s.slot, { pcm: s.pcm, rate: s.rate, buf });
   return buf;
 }
 
@@ -149,6 +191,10 @@ function bufferFor(s: Sample): AudioBuffer | null {
 // and playing the result forward. Built per preview call rather than
 // cached — the range can change with each click (slice vs sample,
 // edited Start/End) so a cache key would have to include them.
+//
+// Like bufferFor, we render at the AudioContext's native rate via
+// zero-order-hold expansion so a low-rate (lo-fi) sample doesn't
+// get smoothed by the browser's built-in resampler on playback.
 function buildReversedRegion(
   s: Sample,
   startWord: number,
@@ -159,12 +205,20 @@ function buildReversedRegion(
   const total = s.pcm.length;
   const begin = Math.max(0, Math.min(total, startWord));
   const len   = Math.max(1, Math.min(lengthWords, total - begin));
-  const buf = ac.createBuffer(1, len, s.rate);
-  const ch  = buf.getChannelData(0);
-  const pcm = s.pcm;
+  // Reverse first in source space — a contiguous int16 slice — then
+  // ZOH-expand to destination rate. Order doesn't matter mathematically
+  // (the two operations commute on nearest-neighbor expansion), and
+  // building the reverse buffer first keeps the helper one-shot.
+  const reversed: number[] = new Array(len);
   for (let i = 0; i < len; i++) {
-    ch[i] = pcm[begin + len - 1 - i] / 32768;
+    reversed[i] = s.pcm[begin + len - 1 - i];
   }
+  const dstRate = ac.sampleRate;
+  const dstFrames = s.rate < dstRate
+    ? Math.ceil((len * dstRate) / s.rate)
+    : len;
+  const buf = ac.createBuffer(1, dstFrames, dstRate);
+  zohRenderPCM(reversed, s.rate, dstRate, buf.getChannelData(0));
   return buf;
 }
 

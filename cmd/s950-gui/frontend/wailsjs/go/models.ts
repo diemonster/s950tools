@@ -194,6 +194,38 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class ProbeResult {
+	    port: string;
+	    baud: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProbeResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.port = source["port"];
+	        this.baud = source["baud"];
+	    }
+	}
+	export class ResampledSample {
+	    pcm: number[];
+	    words: number[];
+	    rate: number;
+	    length: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResampledSample(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pcm = source["pcm"];
+	        this.words = source["words"];
+	        this.rate = source["rate"];
+	        this.length = source["length"];
+	    }
+	}
 	
 	export class SlicingPreflight {
 	    ok: boolean;
@@ -286,6 +318,18 @@ export namespace main {
 
 export namespace protocol {
 	
+	export class DrumSettings {
+	    Bytes: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DrumSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Bytes = source["Bytes"];
+	    }
+	}
 	export class KeygroupJSON {
 	    lower_key: number;
 	    upper_key: number;
@@ -370,6 +414,42 @@ export namespace protocol {
 	        this.loud_filter = source["loud_filter"];
 	        this.loud_loudness = source["loud_loudness"];
 	        this._raw_bytes_hex = source["_raw_bytes_hex"];
+	    }
+	}
+	export class OverallSettings {
+	    ProgName: string;
+	    MidiTxChannel: number;
+	    RxSimChannel: number;
+	    RxSimKey: number;
+	    RxSimVelocity: number;
+	    BasicChannel: number;
+	    OmniOn: boolean;
+	    LoudnessOnCC7: boolean;
+	    ControllerSelect: number;
+	    MPEEnabled: boolean;
+	    PitchWheelRange: number;
+	    BaudRate: number;
+	    Raw: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new OverallSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ProgName = source["ProgName"];
+	        this.MidiTxChannel = source["MidiTxChannel"];
+	        this.RxSimChannel = source["RxSimChannel"];
+	        this.RxSimKey = source["RxSimKey"];
+	        this.RxSimVelocity = source["RxSimVelocity"];
+	        this.BasicChannel = source["BasicChannel"];
+	        this.OmniOn = source["OmniOn"];
+	        this.LoudnessOnCC7 = source["LoudnessOnCC7"];
+	        this.ControllerSelect = source["ControllerSelect"];
+	        this.MPEEnabled = source["MPEEnabled"];
+	        this.PitchWheelRange = source["PitchWheelRange"];
+	        this.BaudRate = source["BaudRate"];
+	        this.Raw = source["Raw"];
 	    }
 	}
 	export class SampleSpec {

@@ -414,6 +414,21 @@ body {
   background: var(--rb-orange);
   color: var(--ink);
 }
+/* Edited-from-device tag. Distinct colour from --local so the user
+   can tell at a glance "this row has local edits I can revert" vs
+   "this row is purely local". Rendered as a button (clickable to
+   revert), hence the cursor + hover treatment. */
+.sample__tag--edited {
+  background: var(--rb-magenta);
+  color: var(--paper);
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.sample__tag--edited:hover { filter: brightness(1.1); }
 /* × button on local sample rows. Faint until hovered so it doesn't
    shout next to the LOCAL tag; flips magenta on hover as a "this
    destroys something" cue. stopPropagation in the handler keeps a

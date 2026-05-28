@@ -14,11 +14,13 @@
     isAssignedSample,
     type Program,
   } from '../lib/state/programs';
-  import { ensureProgramLoaded } from '../lib/state/catalog';
+  import { ensureProgramLoaded, programJSONToProgram } from '../lib/state/catalog';
   import { status as connectionStatus } from '../lib/state/connection';
   import { rangeLabel, midiX, midiW } from '../lib/midi';
   import { get } from 'svelte/store';
   import { onMount } from 'svelte';
+  import * as App from '../../wailsjs/go/main/App';
+  import { programToJSON } from '../lib/state/livesync';
 
   // Connection identifier for modal subtitles / log lines. Mirrors
   // the same helper in Sample.svelte: "<port> · Ch <n>" on MIDI,
@@ -90,6 +92,70 @@
     }
     const p = newLocalProgram(slot, '');
     programs.update((xs) => [...xs, p].sort((a, b) => a.slot - b.slot));
+    selectedSlot.set(slot);
+    selectedKeygroupN.set(1);
+    setSync('dirty', 'Unsaved');
+  }
+
+  // Save / Open .json: minimal scope — programs only, no embedded
+  // sample audio. The on-disk shape matches the CLI's put-program
+  // / get-program, so a JSON saved here uploads with `s950-tools
+  // put-program file.json` and vice versa. Bundled-sample "patch"
+  // archives are an unbuilt larger feature; the user manages WAVs
+  // separately for now.
+  async function saveProgramJSON() {
+    if (!hasProgram) return;
+    try {
+      const json = programToJSON(prog);
+      const suggested = (prog.name || `program-${prog.slot}`).trim() + '.json';
+      const written = await App.SaveProgramJSON(json as any, suggested);
+      if (written) setSync('synced', 'Saved');
+    } catch (e: any) {
+      setSync('error', 'Save failed: ' + String(e?.message ?? e));
+    }
+  }
+  async function openProgramJSON() {
+    try {
+      const json = await App.OpenProgramJSON();
+      if (!json) return; // user cancelled
+      const list = get(programs);
+      const slot = pickFreeProgramSlot(list);
+      if (slot < 0) {
+        setSync('error', 'All 100 program slots are occupied');
+        return;
+      }
+      const loaded = programJSONToProgram(json as any, slot);
+      programs.update((xs) => [...xs, loaded].sort((a, b) => a.slot - b.slot));
+      selectedSlot.set(slot);
+      selectedKeygroupN.set(1);
+      // Mark dirty — JSON was loaded into a LOCAL slot, not pulled
+      // from the device. Send to S950 (or Save .json again to a
+      // different file) commits the user's intent from here.
+      setSync('dirty', 'Loaded from JSON · unsaved on device');
+    } catch (e: any) {
+      setSync('error', 'Open failed: ' + String(e?.message ?? e));
+    }
+  }
+
+  // Duplicate the currently-selected program into the next free
+  // slot. Keygroups + all editable fields are deep-cloned so future
+  // edits to the copy don't bleed back into the original. The new
+  // row lands as `DUP <orig name>` so it's easy to spot in the
+  // sidebar; the user renames after if they want something cleaner.
+  function duplicateProgram() {
+    if (!hasProgram) return;
+    const src = prog;
+    const list = get(programs);
+    const slot = pickFreeProgramSlot(list);
+    if (slot < 0) {
+      setSync('error', 'All 100 program slots are occupied');
+      return;
+    }
+    const dup: Program = JSON.parse(JSON.stringify(src));
+    dup.slot = slot;
+    // Prepend "DUP " and clip to the S950's 10-char name limit.
+    dup.name = ('DUP ' + (src.name ?? '')).slice(0, 10);
+    programs.update((xs) => [...xs, dup].sort((a, b) => a.slot - b.slot));
     selectedSlot.set(slot);
     selectedKeygroupN.set(1);
     setSync('dirty', 'Unsaved');
@@ -295,13 +361,13 @@
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">
-          <button type="button" class="btn">Open .json...</button>
-          <button type="button" class="btn">Save .json...</button>
+          <button type="button" class="btn" on:click={openProgramJSON}>Open .json...</button>
+          <button type="button" class="btn" on:click={saveProgramJSON} disabled={!hasProgram}>Save .json...</button>
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">
           <button type="button" class="btn" on:click={newProgram}>New program</button>
-          <button type="button" class="btn">Duplicate</button>
+          <button type="button" class="btn" on:click={duplicateProgram} disabled={!hasProgram}>Duplicate</button>
         </div>
         <span class="hint">last synced 2 min ago</span>
       </div>

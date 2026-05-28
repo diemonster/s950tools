@@ -159,16 +159,56 @@ func ListSerialPorts() ([]string, error) {
 	return serial.GetPortsList()
 }
 
+// sysexAssembler is a pure F0..F7 byte-stream parser. Feed it one
+// byte at a time via Step; a non-nil return is a complete envelope
+// (including the leading F0 and trailing F7). Stateful across calls
+// — accumulates partial envelopes between Steps so a single
+// envelope split across multiple OS reads still assembles.
+//
+// Behavior:
+//   - F0 always resets the accumulator (mid-envelope F0 drops the
+//     partial as the device must have aborted).
+//   - Bytes outside an envelope are ignored — RS-232 shouldn't
+//     normally produce any but defends against running-status
+//     leakage if it does.
+//   - The returned slice is a fresh copy; the caller owns it.
+//
+// Extracted from readLoop so its byte-level state machine can be
+// unit-tested without spinning up a serial.Port.
+type sysexAssembler struct {
+	envelope []byte
+	inSysEx  bool
+}
+
+func (a *sysexAssembler) Step(b byte) []byte {
+	switch {
+	case b == 0xF0:
+		a.envelope = a.envelope[:0]
+		a.envelope = append(a.envelope, b)
+		a.inSysEx = true
+	case a.inSysEx:
+		a.envelope = append(a.envelope, b)
+		if b == 0xF7 {
+			out := make([]byte, len(a.envelope))
+			copy(out, a.envelope)
+			a.envelope = a.envelope[:0]
+			a.inSysEx = false
+			return out
+		}
+	}
+	return nil
+}
+
 // readLoop pulls bytes from the serial port and assembles complete
-// F0..F7 envelopes, posting each to rxQ as it lands. Any non-SysEx
-// bytes between envelopes (running status / active sensing leakage —
-// unlikely on RS-232 but possible) are discarded.
+// F0..F7 envelopes via sysexAssembler, posting each to rxQ as it
+// lands. Any non-SysEx bytes between envelopes (running status /
+// active sensing leakage — unlikely on RS-232 but possible) are
+// discarded by the assembler.
 func (t *serialTransport) readLoop() {
 	defer close(t.rxDone)
 	var (
-		buf      = make([]byte, 1024)
-		envelope []byte // accumulator for the in-progress F0..F7
-		inSysEx  bool
+		buf       = make([]byte, 1024)
+		assembler sysexAssembler
 	)
 	for {
 		select {
@@ -210,26 +250,8 @@ func (t *serialTransport) readLoop() {
 			continue
 		}
 		for i := 0; i < n; i++ {
-			b := buf[i]
-			switch {
-			case b == 0xF0:
-				// Start of new envelope — if we were mid-envelope,
-				// the device must have aborted; drop the partial.
-				envelope = envelope[:0]
-				envelope = append(envelope, b)
-				inSysEx = true
-			case inSysEx:
-				envelope = append(envelope, b)
-				if b == 0xF7 {
-					cp := make([]byte, len(envelope))
-					copy(cp, envelope)
-					t.deliver(cp)
-					envelope = envelope[:0]
-					inSysEx = false
-				}
-			default:
-				// Bytes outside an envelope are ignored — RS-232
-				// shouldn't normally produce any.
+			if env := assembler.Step(buf[i]); env != nil {
+				t.deliver(env)
 			}
 		}
 	}

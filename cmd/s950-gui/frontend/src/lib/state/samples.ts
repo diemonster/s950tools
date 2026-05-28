@@ -32,6 +32,21 @@ export type Sample = {
   // text so the user can never mistake a local-only file for a
   // committed device slot.
   source: 'device' | 'local';
+  // Immutable origin: set once on first creation, never mutated.
+  // Lets the UI distinguish "purely local import" from "was on the
+  // device, then edited" — the latter is revertable (click the
+  // sidebar chip → re-pull SPRM from device, drop host PCM). The
+  // existing `source` field collapses both cases to 'local' on
+  // edit, which is why we need a separate immutable marker.
+  originalSource?: 'device' | 'local';
+  // Pre-edit snapshot of the device-coherent state. Captured on
+  // the first user edit to a sample that was originally synced
+  // with the device, so revert can restore the exact pre-edit
+  // PCM + SPRM fields (we can't re-fetch from the device because
+  // live-sync may have pushed intermediate writes to it). Cleared
+  // on revert or successful Send-to-S950. SampleSnapshot omits
+  // deviceSnapshot itself to avoid recursive nesting.
+  deviceSnapshot?: SampleSnapshot;
   // Set on samples that were Commit-Slices'd from a parent source.
   // Lets the slicing UI re-lock the Commit button until the children
   // have been uploaded (source: 'device') — prevents double-committing
@@ -49,6 +64,11 @@ export type Sample = {
   pcm?: number[];
   words12?: number[];
 };
+
+// SampleSnapshot is the captured pre-edit state — same shape as
+// Sample minus the snapshot field. Used by revert to restore
+// exactly what was on the device before the user touched anything.
+export type SampleSnapshot = Omit<Sample, 'deviceSnapshot'>;
 
 // Defaults used by both the import path and any future "add empty
 // sample row" affordance. Centralised here so callers don't reinvent
@@ -69,6 +89,7 @@ export function newLocalSample(slot: number, name = '', rate = 26040, length = 0
     tune: 0,
     loudness: 0,
     source: 'local',
+    originalSource: 'local',
   };
 }
 
@@ -128,7 +149,43 @@ function makeSelectedSample() {
     update(patch: Partial<Sample>) {
       const slot = get(selectedSampleSlot);
       samples.update((list) =>
-        list.map((x) => (x.slot === slot ? { ...x, ...patch } : x))
+        list.map((x) => {
+          if (x.slot !== slot) return x;
+          // Capture the device-coherent pre-edit state on the FIRST
+          // user edit so revert can restore it byte-identically.
+          // Why not re-fetch from the device on revert? Because
+          // live-sync may have already pushed earlier edits to the
+          // device's SPRM — the device no longer has the original
+          // state to fetch. Snapshot here is the only source of
+          // truth for "what was synced before the user touched it".
+          // Only capture for samples that originated from the
+          // device (originalSource === 'device') AND are currently
+          // still synced (source === 'device'); purely-local rows
+          // have no device counterpart to revert to.
+          //
+          // Caller can explicitly clear by passing
+          // `deviceSnapshot: undefined` in patch — that override
+          // takes precedence (used by Send-to-S950 success +
+          // revert). The `'deviceSnapshot' in patch` check makes
+          // the explicit-clear path safe; we only auto-set when
+          // the caller didn't opine.
+          let snapshot = x.deviceSnapshot;
+          if (snapshot === undefined
+              && !('deviceSnapshot' in patch)
+              && x.source === 'device'
+              && x.originalSource === 'device') {
+            // Strip deviceSnapshot from the captured copy — the
+            // SampleSnapshot type omits it to avoid recursive
+            // nesting on subsequent edits.
+            const { deviceSnapshot: _ignore, ...rest } = x;
+            snapshot = rest;
+          }
+          const merged: Sample = { ...x, ...patch };
+          if (!('deviceSnapshot' in patch)) {
+            merged.deviceSnapshot = snapshot;
+          }
+          return merged;
+        })
       );
       // Schedule SPRM write-back. Lazy-imported to avoid the
       // livesync ↔ samples circular import.

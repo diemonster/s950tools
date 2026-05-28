@@ -316,6 +316,59 @@ func (a *App) SetSampleParams(slot int, p protocol.SampleParams) error {
 	return d.SetParams(byte(slot), &p)
 }
 
+// GetOverall reads the device's Overall Settings block. Wrapped
+// here as a Wails binding so the frontend can fetch (and later
+// edit) device-wide config. Currently no UI consumes this — it
+// ships as a CLI-accessible protocol surface and stays available
+// for a future Settings tab without another backend round-trip.
+func (a *App) GetOverall() (*protocol.OverallSettings, error) {
+	d, err := a.lockDevice()
+	if err != nil {
+		return nil, err
+	}
+	defer a.mu.Unlock()
+	return d.GetOverall()
+}
+
+// SetOverall writes Overall Settings back. The frontend is
+// responsible for validating ranges (the protocol-layer Encode
+// also rejects nonsense, but a UI form should fail fast on bad
+// input). M1RS2 writes are silently dropped by the device firmware
+// — front panel only for controller-select. See
+// project-ovs-write-restriction memory.
+func (a *App) SetOverall(o protocol.OverallSettings) error {
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
+	return d.SetOverall(&o)
+}
+
+// GetDrum reads Drum Settings as an opaque round-trip blob. The
+// byte layout isn't part of our model, so the returned struct
+// carries only the raw 480 bytes; pair with SetDrum for backup +
+// restore workflows.
+func (a *App) GetDrum() (*protocol.DrumSettings, error) {
+	d, err := a.lockDevice()
+	if err != nil {
+		return nil, err
+	}
+	defer a.mu.Unlock()
+	return d.GetDrum()
+}
+
+// SetDrum writes Drum Settings back. Round-trip the bytes from
+// GetDrum to restore a previously-saved state.
+func (a *App) SetDrum(s protocol.DrumSettings) error {
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
+	return d.SetDrum(&s)
+}
+
 // SetProgram uploads a program (ProgramJSON shape) to slot N. The
 // frontend is responsible for running pre-flight checks before
 // calling this — the device may NAK on slot collisions or oversize

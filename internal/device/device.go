@@ -129,6 +129,16 @@ func (d *Device) SetProgram(num byte, p *protocol.Program) error {
 // adjust SNOMP for retuning. num must match the slot you're targeting; the
 // SPRM's encoded sample number doesn't matter to the S950 — the message-
 // header num does.
+//
+// Device-side cache caveat: some SPRM fields (notably the Reversed
+// flag) live in an "active edit buffer" the S950 only refreshes when
+// the sample is re-selected on the front panel (ENT keypress). SysEx
+// writes update the stored slot but not the active buffer, so a
+// freshly-toggled Reverse won't take effect on the next playback
+// until the user presses ENT on the device. We tried a follow-up
+// RSPRM read to force a refresh — empirically it didn't help — and
+// removed it. This is now a documented hardware limitation; the
+// GUI surfaces a tooltip on the Reverse toggle.
 func (d *Device) SetParams(num byte, p *protocol.SampleParams) error {
 	payload := p.EncodePayload()
 	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncSPRM, num, payload)
@@ -137,6 +147,72 @@ func (d *Device) SetParams(num byte, p *protocol.SampleParams) error {
 	}
 	// The S950 doesn't reply to SPRM writes, but the bytes still take wall-
 	// clock time to drain at MIDI rate (129 bytes ~= 41 ms).
+	time.Sleep(ExpectedDrainTime(len(msg)))
+	return nil
+}
+
+// GetOverall reads the device's Overall Settings (OVS) block — the
+// MIDI-menu device-wide config (default program name, channels,
+// pitch wheel range, RS-232 baud, etc.).
+func (d *Device) GetOverall() (*protocol.OverallSettings, error) {
+	d.T.Drain()
+	if err := d.T.Send(protocol.BuildAkaiRequest(d.Channel, protocol.FuncROVS, 0)); err != nil {
+		return nil, fmt.Errorf("send ROVS: %w", err)
+	}
+	reply, err := d.waitForFunction(protocol.FuncOVS, d.RequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("await OVS: %w", err)
+	}
+	return protocol.ParseOverallSettings(reply.Payload)
+}
+
+// SetOverall writes Overall Settings back. The S950 firmware
+// silently ignores writes to the M1RS2 (controller-select) field
+// — that mode flip can only be done via the front-panel MIDI menu.
+// Other fields (baud, channels, etc.) take effect immediately;
+// if BaudRate changed the caller is responsible for re-opening the
+// transport at the new rate.
+func (d *Device) SetOverall(o *protocol.OverallSettings) error {
+	payload, err := o.EncodePayload()
+	if err != nil {
+		return fmt.Errorf("encode OVS: %w", err)
+	}
+	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncOVS, 0, payload)
+	if err := d.T.Send(msg); err != nil {
+		return fmt.Errorf("send OVS: %w", err)
+	}
+	time.Sleep(ExpectedDrainTime(len(msg)))
+	return nil
+}
+
+// GetDrum reads the device's Drum Settings (DRS) — 8 hardware
+// drum-input definitions, 480 data bytes total. Currently opaque:
+// the byte layout isn't part of our protocol model so the returned
+// struct only carries the raw bytes, suitable for backup +
+// round-trip restore via SetDrum.
+func (d *Device) GetDrum() (*protocol.DrumSettings, error) {
+	d.T.Drain()
+	if err := d.T.Send(protocol.BuildAkaiRequest(d.Channel, protocol.FuncRDRS, 0)); err != nil {
+		return nil, fmt.Errorf("send RDRS: %w", err)
+	}
+	reply, err := d.waitForFunction(protocol.FuncDRS, d.RequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("await DRS: %w", err)
+	}
+	return protocol.ParseDrumSettings(reply.Payload)
+}
+
+// SetDrum writes a DRS payload back to the device. Pairs with
+// GetDrum for backup/restore — round-trip is byte-identical.
+func (d *Device) SetDrum(s *protocol.DrumSettings) error {
+	payload, err := s.EncodePayload()
+	if err != nil {
+		return fmt.Errorf("encode DRS: %w", err)
+	}
+	msg := protocol.BuildAkaiData(d.Channel, protocol.FuncDRS, 0, payload)
+	if err := d.T.Send(msg); err != nil {
+		return fmt.Errorf("send DRS: %w", err)
+	}
 	time.Sleep(ExpectedDrainTime(len(msg)))
 	return nil
 }

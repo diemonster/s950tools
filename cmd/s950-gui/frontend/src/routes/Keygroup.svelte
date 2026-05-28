@@ -26,8 +26,6 @@
   // status here is always "Synced" since edits are local.
   onMount(() => setSync('synced', 'Synced'));
 
-  let mode: 'drum' | 'ranged' = 'drum';
-
   // ---------- Splitter drag ----------
   // Same behavior as the mockup: drag the 6px bar to shrink/grow the
   // properties row. Reads/writes --props-h on the .app element.
@@ -300,10 +298,6 @@
   {:else}
   <section class="canvas">
     <div class="canvas__head">
-      <div class="group">
-        <button class="head-chip {mode === 'drum' ? 'on' : ''}" on:click={() => mode = 'drum'}>Drum Kit</button>
-        <button class="head-chip {mode === 'ranged' ? 'on' : ''}" on:click={() => mode = 'ranged'}>Ranged</button>
-      </div>
       <div class="group">
         <button class="head-chip">Distribute</button>
         <button class="head-chip">Add Zone</button>
@@ -680,7 +674,7 @@
       { key: 'drop', label: 'wav / aiff to add sample' },
     ]}
     status={hasKeygroup
-      ? `${mode === 'drum' ? 'Drum Kit' : 'Ranged'} mode · ${prog.keygroups.length} keygroups`
+      ? `${prog.keygroups.length} keygroups`
       : 'no keygroup selected'}
   />
 </div>
@@ -768,7 +762,6 @@
     background: transparent;
     cursor: pointer;
   }
-  .head-chip.on { background: var(--rb-yellow); color: var(--ink); border-color: var(--rb-yellow); }
 
   .y-axis {
     display: flex;

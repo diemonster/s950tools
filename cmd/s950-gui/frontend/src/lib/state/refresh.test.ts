@@ -130,6 +130,23 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
     expect((App as any).CopySampleAudio).not.toHaveBeenCalled();
   });
 
+  it('skips the entire audio phase when called with withAudio=false', async () => {
+    // Modal's "Include sample audio" toggle off → metadata-only.
+    // The progress-bar machinery should hop straight to done after
+    // programs without entering the audio phase at all. Include
+    // both a program and a sample so the message-asserting
+    // "audio skipped" branch fires (the empty-device path has a
+    // different message).
+    programs.set([
+      { slot: 0, name: 'P', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
+    ]);
+    samples.set([deviceSample(5, 'WOULD-PULL')]);
+    await refreshAllFromDevice(false);
+    expect((App as any).CopySampleAudio).not.toHaveBeenCalled();
+    expect(get(refreshState).phase).toBe('done');
+    expect(get(refreshState).message).toMatch(/audio skipped/i);
+  });
+
   it('attaches words+pcm + caches each pulled sample', async () => {
     samples.set([deviceSample(5, 'TONE', 3)]);
 

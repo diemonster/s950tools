@@ -47,6 +47,30 @@
     dropped = 0;
   }
 
+  // Plain-text copy: one line per envelope, tab-separated, matches
+  // the rendered row order so paste-into-spreadsheet works as well
+  // as paste-into-bug-report. `copyState` drives a short-lived
+  // "Copied!" affordance on the button so the user knows the
+  // clipboard call landed (the alternative is silent success which
+  // looks broken).
+  let copyState: 'idle' | 'ok' | 'err' = 'idle';
+  let copyResetHandle: ReturnType<typeof setTimeout> | null = null;
+  async function copy() {
+    const lines = messages.map(
+      (m) => `${fmtTime(m.stampMs)}\t${m.direction.toUpperCase()}\t${m.length}B\t${m.hexBytes}`,
+    );
+    if (dropped > 0) lines.unshift(`(${dropped} older messages dropped from the buffer)`);
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      copyState = 'ok';
+    } catch {
+      copyState = 'err';
+    }
+    if (copyResetHandle) clearTimeout(copyResetHandle);
+    copyResetHandle = setTimeout(() => (copyState = 'idle'), 1500);
+  }
+
   // HH:MM:SS.mmm — short enough for a left-column timestamp, long
   // enough to correlate with anything else the user is timing against.
   function fmtTime(ms: number): string {
@@ -79,6 +103,13 @@
     <header class="wire-log__head">
       <span class="wire-log__title">SysEx wire log</span>
       <span class="wire-log__count">{messages.length}{dropped > 0 ? ` (+${dropped} dropped)` : ''}</span>
+      <button
+        type="button"
+        class="wire-log__btn"
+        disabled={messages.length === 0}
+        on:click={copy}>
+        {copyState === 'ok' ? 'Copied!' : copyState === 'err' ? 'Failed' : 'Copy'}
+      </button>
       <button type="button" class="wire-log__btn" on:click={clear}>Clear</button>
       <button type="button" class="wire-log__btn" on:click={() => (open = false)}>×</button>
     </header>
@@ -179,7 +210,12 @@
     border-radius: 3px;
     cursor: pointer;
   }
-  .wire-log__btn:hover { background: rgba(255,255,255,0.1); }
+  .wire-log__btn:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+  .wire-log__btn:disabled {
+    color: var(--grey-medium);
+    border-color: var(--grey-dark);
+    cursor: not-allowed;
+  }
 
   .wire-log__body {
     flex: 1 1 auto;

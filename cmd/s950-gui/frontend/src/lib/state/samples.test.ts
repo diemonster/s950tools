@@ -89,6 +89,114 @@ describe('selectedSample', () => {
   });
 });
 
+// deviceSnapshot captures the pre-edit device-coherent state so
+// revertSampleToDevice can restore byte-identically. The capture
+// rule is subtle: only fire on the FIRST edit to a sample that is
+// currently synced with the device (source === 'device' AND
+// originalSource === 'device'). These tests pin the contract; a
+// regression here breaks the sidebar's revert affordance silently.
+
+function deviceSample(slot: number, patch: Partial<Sample> = {}): Sample {
+  // newLocalSample defaults source='local', originalSource='local'.
+  // Override both to mimic a sample loaded from the device's
+  // catalog (the production code does this via skinnySample /
+  // sampleParamsToSample).
+  return {
+    ...newLocalSample(slot, `S${slot}`, 26040, 100),
+    source: 'device',
+    originalSource: 'device',
+    ...patch,
+  };
+}
+
+describe('selectedSample.update — deviceSnapshot capture', () => {
+  it('captures pre-edit state on FIRST edit to a synced device sample', () => {
+    samples.set([deviceSample(0, { tune: 0 })]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({ tune: 5 });
+
+    const updated = get(samples)[0];
+    expect(updated.tune).toBe(5); // patch applied
+    expect(updated.deviceSnapshot).toBeDefined();
+    expect(updated.deviceSnapshot?.tune).toBe(0); // snapshot pre-edit
+  });
+
+  it('does not re-capture on subsequent edits — snapshot is pre-FIRST-edit', () => {
+    samples.set([deviceSample(0, { tune: 0 })]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({ tune: 5 });
+    selectedSample.update({ tune: 10 });
+
+    const s = get(samples)[0];
+    expect(s.tune).toBe(10);
+    // Snapshot stays at the ORIGINAL (0), not the intermediate (5).
+    expect(s.deviceSnapshot?.tune).toBe(0);
+  });
+
+  it('captures PCM and words12 alongside the SPRM fields', () => {
+    // Critical for the resample case: snapshot must hold the
+    // pre-resample audio so revert restores it (we can't re-fetch
+    // host PCM from the device cheaply).
+    samples.set([deviceSample(0, {
+      pcm: [100, 200, 300],
+      words12: [0x800, 0x900, 0xA00],
+      rate: 44100,
+    })]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({
+      rate: 22050,
+      pcm: [50],
+      words12: [0x800],
+      source: 'local',
+    });
+
+    const snap = get(samples)[0].deviceSnapshot;
+    expect(snap?.rate).toBe(44100);
+    expect(snap?.pcm).toEqual([100, 200, 300]);
+    expect(snap?.words12).toEqual([0x800, 0x900, 0xA00]);
+  });
+
+  it('skips capture for purely-local samples (no device counterpart)', () => {
+    // newLocalSample defaults are source='local' and
+    // originalSource='local'. An edit shouldn't fabricate a
+    // snapshot of "what was on the device" because nothing was.
+    samples.set([newLocalSample(0, 'IMPORT', 26040, 100)]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({ tune: 5 });
+
+    expect(get(samples)[0].deviceSnapshot).toBeUndefined();
+  });
+
+  it('skips capture when source is already local (mid-edit re-update)', () => {
+    // If a previous edit already flipped source to 'local' but
+    // never captured a snapshot for some reason, a subsequent
+    // edit shouldn't backfill — the "pre-edit truth" is already
+    // lost. Defensive against state-machine confusion.
+    samples.set([{
+      ...deviceSample(0),
+      source: 'local', // already diverged
+    }]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({ tune: 5 });
+
+    expect(get(samples)[0].deviceSnapshot).toBeUndefined();
+  });
+
+  it('respects an explicit deviceSnapshot: undefined override in the patch', () => {
+    // Send-to-S950 success path passes { deviceSnapshot: undefined }
+    // to clear the snapshot (local state is now the device state).
+    // The capture-on-first-edit logic must not override that clear.
+    samples.set([{
+      ...deviceSample(0, { tune: 5 }),
+      deviceSnapshot: { ...deviceSample(0, { tune: 0 }) },
+    }]);
+    selectedSampleSlot.set(0);
+    selectedSample.update({ source: 'device', deviceSnapshot: undefined });
+
+    expect(get(samples)[0].deviceSnapshot).toBeUndefined();
+  });
+});
+
 describe('removeLocalSample', () => {
   // Convenience: a sample marked as living on the device. removeLocal
   // must refuse to touch these — the S950 has no remote-delete

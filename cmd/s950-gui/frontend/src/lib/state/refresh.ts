@@ -62,7 +62,13 @@ export function cancelRefresh() {
 // time so the progress bar can advance in real time. Failures on
 // individual programs are logged and skipped — one bad slot
 // shouldn't tank the whole sync.
-export async function refreshAllFromDevice(): Promise<void> {
+//
+// `withAudio` controls whether the audio phase runs (Phase 1C
+// per-sample SDATA pulls). Default true: matches the documented
+// modal copy. Setting false runs metadata-only — useful when the
+// user just wants names/loop/program state and audio hasn't
+// drifted (typical "I edited a program on the front panel" case).
+export async function refreshAllFromDevice(withAudio = true): Promise<void> {
   refreshState.set({
     ...INITIAL,
     phase: 'catalog',
@@ -126,6 +132,22 @@ export async function refreshAllFromDevice(): Promise<void> {
     // doesn't fire after the final iteration, so re-check here
     // before we kick off the (potentially slow) audio phase.
     if (get(refreshState).cancelled) return finishCancelled();
+
+    // User opted out of audio via the modal toggle. Skip straight
+    // to done — metadata-only refresh is the fast path (seconds vs
+    // minutes) and matches the "I edited programs on the front
+    // panel" use case.
+    if (!withAudio) {
+      refreshState.set({
+        ...INITIAL,
+        phase: 'done',
+        message: total === 0
+          ? 'Refresh complete (no programs on device)'
+          : `Refreshed ${total} program${total === 1 ? '' : 's'} + samples (audio skipped)`,
+        progress: 100,
+      });
+      return;
+    }
 
     // Audio pass: pull SDATA for every device sample that doesn't
     // already have host-side PCM. Phase 1B's disk cache means

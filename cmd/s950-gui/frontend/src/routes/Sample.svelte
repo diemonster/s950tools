@@ -28,9 +28,84 @@
     type Division,
     type CapturedAudio,
   } from '../lib/state/slicing';
-  import { ensureSampleLoaded, refreshCatalog } from '../lib/state/catalog';
+  import { ensureSampleLoaded, refreshCatalog, revertSampleToDevice } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
   import { transportKind, status as connectionStatus } from '../lib/state/connection';
+  import { sampleToSampleParams } from '../lib/state/converters';
+  import { programs } from '../lib/state/programs';
+
+  // S950-friendly resample targets. The Lo-Fi group mirrors the
+  // CLI's `--rate` aliases — these are the documented vibe presets
+  // (SP1200, MPC60) plus telephone/lofi as anchors for extra-grainy
+  // character. Standard group is the everyday rates a user might
+  // want without crossing into bit-crush territory. All values
+  // sit inside the S950's ~2k..65k Hz range; backend clamps if
+  // anyone hand-feeds something outside.
+  const RATE_LOFI_PRESETS: { label: string; rate: number }[] = [
+    { label: 'MPC60 (40000)',    rate: 40000 },
+    { label: 'SP1200 (26040)',   rate: 26040 },
+    { label: 'Lofi (10000)',     rate: 10000 },
+    { label: 'Telephone (8000)', rate: 8000  },
+  ];
+  const RATE_STANDARD_PRESETS: number[] = [48000, 44100, 32000, 22050, 16000];
+
+  // resampleInFlight gates UI while the backend re-runs the
+  // resampler. Pure host-side op (no wire traffic) so usually a
+  // few hundred ms for small samples, longer for multi-MB ones.
+  let resampleInFlight = false;
+  async function onRateChange(e: Event) {
+    if (!smp) return;
+    const sel = e.currentTarget as HTMLSelectElement;
+    const target = parseInt(sel.value, 10);
+    sel.value = String(smp.rate); // snap-back so an error leaves it sane
+    if (!Number.isFinite(target) || target === smp.rate) return;
+    if (!smp.pcm || smp.pcm.length === 0) {
+      // Device-only samples (no host PCM) can't be resampled
+      // without first running Copy from S950. UI should already
+      // hide the dropdown for those, but guard defensively.
+      return;
+    }
+    resampleInFlight = true;
+    try {
+      const result = await (App as any).ResampleSample(smp.pcm, smp.rate, target);
+      const oldLen = smp.length;
+      const newLen = result.length;
+      // Scale start/end/loop markers so the user's edit doesn't
+      // get clobbered by the resample. ratio = newLen/oldLen;
+      // floor to keep markers inside the new range. Loop length
+      // can collapse to 0 (one-shot) at extreme downsampling —
+      // that's fine, the device treats <5 as one-shot anyway.
+      const ratio = newLen / Math.max(1, oldLen);
+      const scaledStart      = Math.min(newLen, Math.floor(smp.start      * ratio));
+      const scaledEnd        = Math.min(newLen, Math.floor(smp.end        * ratio));
+      const scaledLoopStart  = Math.min(newLen, Math.floor(smp.loopStart  * ratio));
+      const scaledLoopLength = Math.max(0, Math.floor(smp.loopLength * ratio));
+      // Resampling diverges host audio from the device's stored
+      // copy. Flip source to 'local' so the Sample-tab actions
+      // switch from "Send SPRM" (params-only) to "Send to S950"
+      // (full re-upload). Device-side audio in the same slot is
+      // untouched until the user explicitly Sends.
+      // parentSlot is intentionally NOT in the patch — the
+      // selectedSample.update merge preserves it from the existing
+      // sample so slice-children stay linked to their parent
+      // through a resample.
+      selectedSample.update({
+        rate:       result.rate,
+        length:     newLen,
+        pcm:        result.pcm,
+        words12:    result.words,
+        start:      scaledStart,
+        end:        scaledEnd,
+        loopStart:  scaledLoopStart,
+        loopLength: scaledLoopLength,
+        source:     'local',
+      });
+    } catch (e) {
+      console.error('ResampleSample failed:', e);
+    } finally {
+      resampleInFlight = false;
+    }
+  }
 
   // Short connection label for modal subtitles + identity strips.
   // Lifts the device-side identifier out of the connection store
@@ -46,6 +121,7 @@
   import { persistSamplesToCache, wordsToPcm } from '../lib/state/waveformcache';
   import * as preview from '../lib/preview';
   import { playhead } from '../lib/preview';
+  import { previewMode, PREVIEW_NOTE, PREVIEW_VELOCITY } from '../lib/state/preview-mode';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
@@ -59,11 +135,36 @@
   // ---------- Modal flow ----------
   // Two parallel modals: the stub one (Get/Send/Replace/etc. — not
   // wired yet) and the real Apply-slicing flow (Inspect → Preflight
-  // → Apply → Transfer with live progress events).
-  type ModalKind = 'closed' | 'transfer';
-  let modalKind: ModalKind = 'closed';
-  function openTransfer() { modalKind = 'transfer'; }
-  function cancel()       { modalKind = 'closed'; }
+  // Revert wrapper. The sidebar's EDITED tag fires this; we just
+  // delegate to the catalog action and shove errors at the console.
+  // Failure here means the device link blipped — the user can retry.
+  async function revertSample(slot: number) {
+    try {
+      await revertSampleToDevice(slot);
+    } catch (e) {
+      console.error(`Revert sample ${slot} failed:`, e);
+    }
+  }
+
+  // Save .wav — writes the host PCM to disk via the OS file dialog.
+  // Pairs with Import on the opposite direction. Disabled when the
+  // sample has no host audio (device-only sample that hasn't been
+  // Copy-from-S950'd yet, or pristine empty row). Async-fire-and-
+  // forget; errors land in the console + a setSync chip flip.
+  let saveWavBusy = false;
+  async function saveWav() {
+    if (!smp || !smp.pcm || smp.pcm.length === 0 || saveWavBusy) return;
+    saveWavBusy = true;
+    try {
+      const written = await (App as any).SaveSampleWav(smp.name || `sample-${smp.slot}`, smp.rate, smp.pcm);
+      if (written) setSync('synced', 'Saved .wav');
+    } catch (e: any) {
+      console.error('SaveSampleWav failed:', e);
+      setSync('error', 'Save failed');
+    } finally {
+      saveWavBusy = false;
+    }
+  }
 
   // Import: decode + clamp + convert audio and stash on the selected
   // sample's slot. Bypasses livesync deliberately — the device doesn't
@@ -374,6 +475,140 @@
     copyPhase = 'idle';
     copyError = '';
     stopCopyTicker();
+  }
+
+  // ---------- Send to S950 ----------
+  // Per-sample upload of audio + SPRM. Two button paths land here:
+  // (1) "Send to S950" for local samples — pushes SDATA + SPRM and
+  //     flips the row to source='device' on success.
+  // (2) "Send SPRM to S950" for device samples — params only, no
+  //     audio re-upload. Same flow as (1) but skips the audio.
+  // Phase events come from the backend's "sendsample:progress"
+  // Wails channel; the modal subscribes for a live phase label.
+  type SendPhase = 'idle' | 'sending' | 'done' | 'error';
+  let sendPhase: SendPhase = 'idle';
+  let sendError = '';
+  let sendStatus = '';  // current "phase / message" from backend events
+  let sendKind: 'full' | 'sprm' = 'full';  // distinguishes the two flows in the modal title
+  let sendUnsub: (() => void) | null = null;
+  // Synthetic progress timing — same pattern as the Copy modal. The
+  // Wails Send path is open-loop (the OS queues the whole envelope
+  // in one shot), so we can't drive a real progress bar from a byte
+  // counter. Elapsed / estimated gives the user "yes, still working"
+  // feedback. SPRM-only sends finish in <1s and skip the bar.
+  let sendStartMs = 0;
+  let sendElapsedMs = 0;
+  let sendTickHandle: ReturnType<typeof setInterval> | null = null;
+
+  // sendPercent mirrors copyPercent. Estimated time is dominated by
+  // the SDATA dump (the SPRM write is ~150 bytes — sub-1s), so we
+  // use the same wire-rate estimator as Copy. Returns 0 for the
+  // SPRM-only path so the bar doesn't appear in that modal flow.
+  $: sendPercent = (() => {
+    if (sendPhase === 'done')  return 100;
+    if (sendPhase === 'error') return 0;
+    if (sendPhase !== 'sending' || !smp || sendKind !== 'full') return 0;
+    const estMs = estimatedCopySeconds(smp.length) * 1000;
+    if (estMs <= 0) return 0;
+    const pct = (sendElapsedMs / estMs) * 100;
+    if (pct >= 95) return Math.min(99, 95 + (pct - 95) / 5);
+    return Math.min(99, Math.max(0, pct));
+  })();
+
+  function startSendTicker() {
+    stopSendTicker();
+    sendElapsedMs = 0;
+    sendTickHandle = setInterval(() => {
+      sendElapsedMs = Date.now() - sendStartMs;
+    }, 100);
+  }
+  function stopSendTicker() {
+    if (sendTickHandle !== null) {
+      clearInterval(sendTickHandle);
+      sendTickHandle = null;
+    }
+  }
+
+  function startSendListener() {
+    if (sendUnsub) return;
+    sendUnsub = EventsOn('sendsample:progress', (p: any) => {
+      sendStatus = p?.message ?? '';
+    });
+  }
+  function stopSendListener() {
+    if (sendUnsub) { sendUnsub(); sendUnsub = null; }
+  }
+
+  async function sendToDevice() {
+    if (!smp) return;
+    if (sendPhase === 'sending') return;
+    const slot = smp.slot;
+    if (!smp.words12 || smp.words12.length === 0) {
+      sendError = 'No host-side audio to upload. Re-import the sample or Copy from S950.';
+      sendPhase = 'error';
+      sendKind = 'full';
+      return;
+    }
+    sendPhase = 'sending';
+    sendKind = 'full';
+    sendError = '';
+    sendStatus = `Preparing upload to slot ${slot}…`;
+    sendStartMs = Date.now();
+    startSendTicker();
+    startSendListener();
+    try {
+      const params = sampleToSampleParams(smp);
+      await (App as any).SendSample(slot, smp.words12, smp.rate, params);
+      // Promote the row from local to device — it's on the S950 now
+      // and Send-to-S950 would otherwise reappear after the upload
+      // succeeded. Also clear deviceSnapshot: the local state IS the
+      // device state now, so any pre-edit snapshot is stale (and a
+      // subsequent edit should snapshot the just-uploaded state, not
+      // some older one).
+      samples.update((xs) => xs.map((s) => (s.slot === slot ? { ...s, source: 'device', deviceSnapshot: undefined } : s)));
+      sendPhase = 'done';
+      setSync('synced', 'Synced');
+      // Background: persist this sample's audio to the disk cache
+      // now that we know what name it has on the device. Future
+      // sessions hydrate without a re-fetch.
+      void persistSamplesToCache([slot]);
+      // Re-scan device memory so the topbar chip reflects the
+      // newly-added words. Cheap (one SPRM per device sample) and
+      // matches what Apply Slicing does on completion.
+      void scanMemory();
+    } catch (e: any) {
+      sendError = String(e?.message ?? e);
+      sendPhase = 'error';
+    } finally {
+      stopSendListener();
+      stopSendTicker();
+    }
+  }
+
+  async function sendSPRMToDevice() {
+    if (!smp) return;
+    if (sendPhase === 'sending') return;
+    const slot = smp.slot;
+    sendPhase = 'sending';
+    sendKind = 'sprm';
+    sendError = '';
+    sendStatus = `Writing parameters to slot ${slot}…`;
+    try {
+      const params = sampleToSampleParams(smp);
+      await (App as any).SetSampleParams(slot, params);
+      sendPhase = 'done';
+      setSync('synced', 'Synced');
+    } catch (e: any) {
+      sendError = String(e?.message ?? e);
+      sendPhase = 'error';
+    }
+  }
+
+  function closeSendModal() {
+    sendPhase = 'idle';
+    sendError = '';
+    sendStatus = '';
+    stopSendTicker();
   }
 
   // ---------- Apply Slicing ----------
@@ -718,11 +953,95 @@
     preview.previewSlice(smp, s);
   }
 
-  // Whole-sample preview from the identity strip's ▶ button. Plays
-  // the [Start..End] window honouring the SPRM replay mode + loop.
+  // Whole-sample preview from the identity strip's ▶ button.
+  //   host   → Web Audio playback of the [Start..End] window
+  //            honouring SPRM replay mode + loop.
+  //   device → MIDI Note On to the S950 (held for the sample's
+  //            audible duration). Audible only if a program maps
+  //            PREVIEW_NOTE (C3) to this sample. Slice play
+  //            buttons stay host-only — uncommitted slices have
+  //            no device-side mapping to trigger.
   function previewWhole() {
-    preview.previewSample(smp);
+    if ($previewMode === 'device') {
+      void previewWholeViaMidi();
+    } else {
+      preview.previewSample(smp);
+    }
   }
+  // deviceMapping locates a loaded program / keygroup that
+  // references the current sample by name, so MIDI preview can
+  // trigger the right note (instead of always sending C3 and
+  // hoping a kit happens to map it). null = no mapping found;
+  // the user will hear silence on Device-mode preview.
+  type DeviceMapping = {
+    programSlot: number;
+    programName: string;
+    keygroupN: number;
+    note: number;
+  };
+  $: deviceMapping = ((): DeviceMapping | null => {
+    if (!smp || smp.source !== 'device') return null;
+    const targetName = smp.name.trim();
+    if (!targetName) return null;
+    for (const p of $programs) {
+      for (const k of p.keygroups) {
+        if (k.soft.sample.trim() === targetName || k.loud.sample.trim() === targetName) {
+          return {
+            programSlot: p.slot,
+            programName: p.name || `slot ${p.slot}`,
+            keygroupN: k.n,
+            // Use the keygroup's centre key — most kits map a
+            // sample to a single key, in which case low == high.
+            // For ranged keygroups, picking the middle is the
+            // least-surprising default.
+            note: Math.floor((k.lowKey + k.highKey) / 2),
+          };
+        }
+      }
+    }
+    return null;
+  })();
+
+  // midiPreviewing toggles the play button's "live" styling for
+  // the MIDI mode — the host-side playhead store doesn't fire when
+  // audio is coming from the device, so we keep a local mirror.
+  let midiPreviewing = false;
+  async function previewWholeViaMidi() {
+    if (!smp) return;
+    // Hold for the sample's audible window (Start..End) at its
+    // natural rate. Add a small tail so the device's own release
+    // stage doesn't get clipped. Caps at PreviewMaxDuration on
+    // the backend so a runaway value can't lock the wire.
+    const playableWords = Math.max(1, (smp.end || smp.length) - smp.start);
+    const durationMs = Math.ceil((playableWords / smp.rate) * 1000) + 100;
+    // Use the discovered keygroup mapping's note when one exists,
+    // otherwise fall back to C3. Without a mapping the device will
+    // be silent (no keygroup → no audio); we still send the note
+    // so the user sees TX traffic in the wire log and isn't left
+    // wondering whether the call dispatched.
+    const note = deviceMapping?.note ?? PREVIEW_NOTE;
+    midiPreviewing = true;
+    try {
+      await (App as any).PreviewMidi(
+        note,
+        PREVIEW_VELOCITY,
+        $connectionStatus.channel ?? 0,
+        durationMs,
+      );
+    } catch (e) {
+      console.warn('PreviewMidi failed:', e);
+    } finally {
+      midiPreviewing = false;
+    }
+  }
+
+  // Reactive "is the current sample being previewed right now?"
+  // Drives the play button's active styling. Host mode reads the
+  // shared playhead store (already maintained by preview.ts) so
+  // the button highlights whether playback started from this
+  // button OR the spacebar. MIDI mode reads the local mirror.
+  $: isPreviewing = midiPreviewing
+    || ($playhead.active && $playhead.sampleSlot === smp.slot);
 
   // ---------- Manual slice placement ----------
   // In Manual mode, clicking on empty waveform inserts a new slice
@@ -1063,7 +1382,18 @@
             tabindex="0">
             <span class="sample__slot">{s.slot.toString().padStart(2, '0')}</span>
             <span class="sample__name">{s.name || '(unnamed)'}</span>
-            {#if s.source === 'local'}
+            {#if s.source === 'local' && s.originalSource === 'device'}
+              <!-- Device-originated sample that's been edited locally
+                   (resampled, retuned, etc.). Click the tag to revert:
+                   re-pull SPRM from device + drop host PCM. No ×
+                   button — revert is the way to "remove" the local
+                   divergence; the device row stays. -->
+              <button
+                type="button"
+                class="sample__tag sample__tag--edited"
+                title="Local edits diverged from S950 · click to revert (re-pull SPRM, drop host audio)"
+                on:click|stopPropagation={() => revertSample(s.slot)}>↺ EDITED</button>
+            {:else if s.source === 'local'}
               <!-- LOCAL tag + close button for un-uploaded imports.
                    Sits in the same column as the rate so device
                    samples still show kHz — the two never apply at the
@@ -1143,7 +1473,40 @@
         </div>
         <div class="identity__cell">
           <span class="row__label">Rate</span>
-          <span class="field">{(smp.rate / 1000).toFixed(2)} kHz</span>
+          {#if smp.pcm && smp.pcm.length > 0}
+            <!-- Resample available for any sample with host PCM —
+                 imports AND Copy-from-S950'd device samples both
+                 qualify. The dropdown groups standard rates and
+                 the lo-fi presets so the user sees both the "I
+                 want a clean conversion" and "I want SP1200
+                 character" options without leaving the cell.
+                 Resampling a device sample diverges its host PCM
+                 from the device's stored audio; the onRateChange
+                 handler flips source to 'local' so the user gets
+                 the Send-to-S950 button to re-sync. -->
+            <label class="chip chip--select identity__rate-select" title={resampleInFlight ? 'Resampling…' : 'Resample host audio before Send to S950'}>
+              <span class="chip__value">{resampleInFlight ? 'Resampling…' : `${(smp.rate / 1000).toFixed(2)} kHz`}</span>
+              <select value={smp.rate} on:change={onRateChange} disabled={resampleInFlight}>
+                <option value={smp.rate}>{(smp.rate / 1000).toFixed(2)} kHz (current)</option>
+                <optgroup label="Lo-Fi">
+                  {#each RATE_LOFI_PRESETS as p (p.rate)}
+                    {#if p.rate !== smp.rate}
+                      <option value={p.rate}>{p.label}</option>
+                    {/if}
+                  {/each}
+                </optgroup>
+                <optgroup label="Standard">
+                  {#each RATE_STANDARD_PRESETS as r (r)}
+                    {#if r !== smp.rate}
+                      <option value={r}>{(r / 1000).toFixed(2)} kHz</option>
+                    {/if}
+                  {/each}
+                </optgroup>
+              </select>
+            </label>
+          {:else}
+            <span class="field">{(smp.rate / 1000).toFixed(2)} kHz</span>
+          {/if}
         </div>
         <div class="identity__cell">
           <span class="row__label">Length</span>
@@ -1155,15 +1518,53 @@
         </div>
         <div class="identity__cell identity__cell--preview">
           <span class="row__label">Preview</span>
-          <button
-            type="button"
-            class="identity__play"
-            on:click={previewWhole}
-            disabled={!preview.hasHostAudio(smp)}
-            title={preview.hasHostAudio(smp)
-              ? 'Play (Start → End) · spacebar'
-              : 'Import .wav / .aiff to enable host-side preview'}
-            aria-label="Preview sample">▶</button>
+          <div class="preview-row">
+            <button
+              type="button"
+              class="identity__play"
+              class:identity__play--active={isPreviewing}
+              on:click={previewWhole}
+              disabled={$previewMode === 'host'
+                ? !preview.hasHostAudio(smp)
+                : !$connectionStatus.connected}
+              title={$previewMode === 'host'
+                ? (preview.hasHostAudio(smp)
+                    ? 'Play (Start → End) · spacebar'
+                    : 'Import .wav / .aiff to enable host-side preview')
+                : !$connectionStatus.connected
+                  ? 'Connect to the S950 to trigger MIDI preview'
+                  : deviceMapping
+                    ? `Trigger MIDI note ${deviceMapping.note} on channel ${$connectionStatus.channel} — mapped by program "${deviceMapping.programName}" (kg ${deviceMapping.keygroupN})`
+                    : 'No loaded program maps this sample — the device will be silent. Switch to Host preview or upload + map this sample to a keygroup first.'}
+              aria-label="Preview sample">▶</button>
+            <!-- Preview routing — Host plays via Web Audio (instant),
+                 Device sends a MIDI Note On to the S950. Choice is
+                 global (per-session) so flipping between samples
+                 doesn't change mode. -->
+            <label class="chip chip--select preview-source" title="Where to send preview audio">
+              <span class="chip__value">{$previewMode === 'device' ? 'Device' : 'Host'}</span>
+              <select bind:value={$previewMode}>
+                <option value="host">Host (Web Audio)</option>
+                <option value="device">Device (MIDI trigger)</option>
+              </select>
+            </label>
+          </div>
+          <!-- Device-mode mapping affordance. MIDI preview is only
+               audible when a loaded program maps this sample to a
+               note; we surface the discovered mapping (or its
+               absence) so the user sees what'll happen before
+               clicking play. Hidden in Host mode (irrelevant). -->
+          {#if $previewMode === 'device'}
+            {#if deviceMapping}
+              <div class="preview-hint preview-hint--ok">
+                via <strong>{deviceMapping.programName}</strong> · kg {deviceMapping.keygroupN} · note {deviceMapping.note}
+              </div>
+            {:else}
+              <div class="preview-hint preview-hint--warn">
+                No loaded program maps this sample — device will be silent.
+              </div>
+            {/if}
+          {/if}
         </div>
       </div>
     </section>
@@ -1486,7 +1887,11 @@
           </div>
           <div class="row">
             <span class="row__label">Reverse</span>
-            <button type="button" class="toggle {smp.reverse ? 'on' : ''}" on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
+            <button
+              type="button"
+              class="toggle {smp.reverse ? 'on' : ''}"
+              title="Host preview applies this immediately. Device-side playback caches the active SPRM at program-load time, so newly-toggled Reverse won't take effect on the S950 until you press ENT on the sample's edit page (front panel)."
+              on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
               {smp.reverse ? 'On' : 'Off'}
             </button>
           </div>
@@ -1693,9 +2098,38 @@
                 : 'Pull SDATA for this slot from the S950 and cache it on disk'}
               on:click={copyFromDevice}>Copy from S950</button>
           {/if}
-          <button type="button" class="btn" on:click={openTransfer}>Download .wav...</button>
+          <button
+            type="button"
+            class="btn"
+            disabled={!smp.pcm || smp.pcm.length === 0 || saveWavBusy}
+            title={!smp.pcm || smp.pcm.length === 0
+              ? 'No host audio to save. Copy from S950 first, or import a .wav.'
+              : 'Save the current host PCM to disk as a 16-bit mono .wav'}
+            on:click={saveWav}>Save .wav...</button>
           <hr class="panel__divider" />
-          <button type="button" class="btn">Send SPRM to S950</button>
+          <!-- Context-aware Send. Local samples get the full "audio
+               + SPRM" upload (primary); device samples already have
+               audio on the device, so the only meaningful change is
+               the SPRM block (parameters). One button visible at a
+               time matches what the user can actually do for the
+               row's state. -->
+          {#if smp.source === 'local'}
+            <button
+              type="button"
+              class="btn btn--primary"
+              disabled={!smp.words12 || smp.words12.length === 0 || sendPhase === 'sending'}
+              title={!smp.words12 || smp.words12.length === 0
+                ? 'No host-side audio to upload — re-import the sample'
+                : 'Upload audio + SPRM to the chosen slot on the S950'}
+              on:click={sendToDevice}>Send to S950</button>
+          {:else}
+            <button
+              type="button"
+              class="btn"
+              disabled={sendPhase === 'sending'}
+              title="Write the edited parameters back to this slot's SPRM block (audio unchanged)"
+              on:click={sendSPRMToDevice}>Send SPRM to S950</button>
+          {/if}
           <button type="button" class="btn" on:click={getSPRMFromDevice}>Get SPRM from S950</button>
         </div>
       </div>
@@ -1715,41 +2149,6 @@
       : 'no sample selected'}
   />
 </div>
-
-{#if modalKind === 'transfer'}
-  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
-    <div class="modal">
-      <header class="modal__head">
-        <h2 class="modal__title">Uploading <strong>{smp.name}</strong> to S950</h2>
-        <div class="modal__route">{connectionLabel} · slot {smp.slot.toString().padStart(2, '0')}</div>
-      </header>
-      <div class="modal__body">
-        <div class="modal__step">
-          Sample data · block 104 of 207
-          <strong>{smp.name} → slot {smp.slot.toString().padStart(2, '0')} ({Math.floor(smp.length / 2).toLocaleString()} / {smp.length.toLocaleString()} words)</strong>
-        </div>
-        <div class="progress">
-          <div class="progress__bar" style="width: 50%;"></div>
-          <div class="progress__label">50%</div>
-        </div>
-        <div class="modal__times">
-          <span>Elapsed 0m 32s</span>
-          <span>~0m 32s remaining</span>
-        </div>
-        <div class="log">
-          <div class="log__row ok">✓ Connected to S950 on {connectionLabel}</div>
-          <div class="log__row warn">⚠ Slot {smp.slot.toString().padStart(2, '0')} occupied — overwriting</div>
-          <div class="log__row ok">✓ Sample header accepted (ACK)</div>
-          <div class="log__row run">▶ Sending blocks 1–207 · ACK 103/207</div>
-          <div class="log__row pending">· SPRM update pending</div>
-        </div>
-      </div>
-      <footer class="modal__foot">
-        <button type="button" class="btn" on:click={cancel}>Cancel transfer</button>
-      </footer>
-    </div>
-  </div>
-{/if}
 
 <!-- ===== Apply slicing modals =====
      Three states share the same backdrop:
@@ -1941,6 +2340,71 @@
   </div>
 {/if}
 
+<!-- Send-to-S950 modal. Three phases: sending (live status from
+     backend events), done (✓ summary), error (close). Full upload
+     (sendKind='full') and SPRM-only (sendKind='sprm') share the
+     modal — title differs, body content is the same shape. The
+     wire-time portion is open-loop (PutSampleOpenLoop queues the
+     full envelope to the OS in one shot), so we surface the
+     backend's phase label instead of a synthetic progress bar:
+     "Uploading…", "Draining…", "Writing parameters…". -->
+{#if sendPhase !== 'idle'}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">
+          {#if sendPhase === 'sending' && sendKind === 'full'}Sending to S950 — <strong>{smp.name}</strong>
+          {:else if sendPhase === 'sending'}Writing SPRM — <strong>{smp.name}</strong>
+          {:else if sendPhase === 'done' && sendKind === 'full'}Uploaded — <strong>{smp.name}</strong>
+          {:else if sendPhase === 'done'}SPRM written — <strong>{smp.name}</strong>
+          {:else}Send error
+          {/if}
+        </h2>
+        <div class="modal__route">slot {smp.slot.toString().padStart(2, '0')} · {connectionLabel}</div>
+      </header>
+      <div class="modal__body">
+        {#if sendPhase === 'sending'}
+          <div class="modal__step">{sendStatus || 'Working…'}</div>
+          {#if sendKind === 'full'}
+            <!-- Synthetic progress bar — ticks against the estimated
+                 upload time. PutSampleOpenLoop is open-loop (the OS
+                 queues the full envelope in one shot), so no real
+                 byte counter is available. Same heuristic as Copy:
+                 caps at 99% until the wire call returns, then snaps
+                 to 100% via the 'done' phase. -->
+            <div class="progress">
+              <div class="progress__bar" style="width: {sendPercent}%;"></div>
+              <div class="progress__label">
+                {Math.floor(sendPercent)}% · {Math.max(0, Math.round(sendElapsedMs / 1000))}s
+                / ~{estimatedCopySeconds(smp.length)}s
+              </div>
+            </div>
+          {/if}
+          <div class="modal__hint">
+            Don't close this window. Upload is open-loop — the OS buffers the
+            full envelope, then the device parses it block by block.
+          </div>
+        {:else if sendPhase === 'done'}
+          <div class="modal__step">
+            ✓ {sendKind === 'full'
+              ? `Audio + SPRM written to slot ${smp.slot}.`
+              : `Parameters written to slot ${smp.slot}.`}
+          </div>
+        {:else}
+          <div class="modal__step modal__step--error">{sendError}</div>
+        {/if}
+      </div>
+      <footer class="modal__foot">
+        {#if sendPhase === 'sending'}
+          <span class="modal__waitnote">do not close · upload in progress</span>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={closeSendModal}>Close</button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* Flex column. Identity is fixed at the top, controls fixed at the
      bottom, the waveform card flexes to whatever space is left.
@@ -2000,11 +2464,58 @@
     justify-content: center;
   }
   .identity__play:hover:not([disabled]) { background: var(--rb-magenta); color: var(--paper); }
+  /* Active styling while audio is in flight. Matches the hover
+     colour so the visual language stays consistent — yellow =
+     idle/ready, magenta = active. Pulses subtly so a long-running
+     loop preview reads as "still playing" rather than "stuck on". */
+  .identity__play--active {
+    background: var(--rb-magenta);
+    color: var(--paper);
+    animation: identity-play-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes identity-play-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 0, 152, 0.6); }
+    50%      { box-shadow: 0 0 0 4px rgba(255, 0, 152, 0); }
+  }
   .identity__play[disabled] {
     background: var(--grey-light);
     color: var(--grey-medium);
     cursor: not-allowed;
   }
+  /* Play button + mode chip on one row. The chip is the standard
+     chip--select pattern (transparent <select> over a styled label),
+     just sized down for the identity cell's narrow column. */
+  .preview-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  :global(.preview-source) {
+    font-size: 11px;
+    padding: 1px 18px 1px 8px;
+    height: 26px;
+  }
+  /* Rate dropdown in the identity strip. Sized to match the static
+     .field display it replaces so the strip's column widths don't
+     reflow when a sample flips between local (dropdown) and device
+     (static text). */
+  :global(.identity__rate-select) {
+    font-size: 12px;
+    padding: 2px 18px 2px 8px;
+    min-height: 22px;
+  }
+  /* Device-mode mapping affordance. Sits below the play row, small
+     enough to feel like supplementary info rather than a primary
+     control. Two states: --ok (mapping discovered, green-ish text)
+     and --warn (no mapping, muted red — the device will be silent). */
+  .preview-hint {
+    margin-top: 4px;
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--grey-medium);
+  }
+  .preview-hint--ok strong { color: var(--ink); }
+  .preview-hint--warn { color: var(--rb-magenta); }
   /* Sample-tab specific empty-state styling is now in shared.css as
      .empty-state so Program + Keygroup tabs match. The drag-over
      `.is-dragging` class still drives the yellow-tinted hover
