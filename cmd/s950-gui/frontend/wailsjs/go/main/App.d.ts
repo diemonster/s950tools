@@ -11,6 +11,10 @@ export function ClearWaveformCache():Promise<void>;
 
 export function Connect(arg1:string,arg2:string,arg3:number):Promise<void>;
 
+export function ConnectSerial(arg1:string,arg2:number):Promise<void>;
+
+export function CopySampleAudio(arg1:number):Promise<Array<number>>;
+
 export function Disconnect():Promise<void>;
 
 export function GetCachedWaveform(arg1:number,arg2:string,arg3:number):Promise<Array<number>>;

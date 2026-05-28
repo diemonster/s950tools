@@ -158,10 +158,6 @@ export async function ensureSampleLoaded(slot: number, force = false): Promise<v
       s.slot === slot ? { ...full, pcm: s.pcm, words12: s.words12 } : s,
     ));
     loadedSamples.add(slot);
-    // Same logic as ensureProgramLoaded: a forced Get is the moment
-    // to re-scan, in case the user changed device state outside the
-    // app between connect and now.
-    if (force) void scanMemory();
   } catch (e) {
     console.error(`GetSampleParams(${slot}) failed:`, e);
     throw e;

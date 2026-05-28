@@ -15,9 +15,20 @@
     type Program,
   } from '../lib/state/programs';
   import { ensureProgramLoaded } from '../lib/state/catalog';
+  import { status as connectionStatus } from '../lib/state/connection';
   import { rangeLabel, midiX, midiW } from '../lib/midi';
   import { get } from 'svelte/store';
   import { onMount } from 'svelte';
+
+  // Connection identifier for modal subtitles / log lines. Mirrors
+  // the same helper in Sample.svelte: "<port> · Ch <n>" on MIDI,
+  // bare port on serial.
+  $: connectionLabel = (() => {
+    const s = $connectionStatus;
+    if (!s.connected) return 'Not connected';
+    if (s.kind === 'serial') return s.in ?? 'serial';
+    return `${s.in ?? '?'} · Ch ${s.channel}`;
+  })();
 
   // Program is the explicit-Send tab — local edits are dirty until the
   // user presses Send. Real impl will flip to 'synced' on a successful
@@ -275,7 +286,7 @@
     <section class="card device-card">
       <div class="card__head">
         <div class="card__title">Device</div>
-        <div class="card__subtitle">MRCC Port 03 · Ch 0</div>
+        <div class="card__subtitle">{connectionLabel}</div>
       </div>
       <div class="actions">
         <div class="actions__group">
@@ -316,7 +327,7 @@
     <div class="modal">
       <header class="modal__head">
         <h2 class="modal__title">Ready to send <strong>{prog.name}</strong></h2>
-        <div class="modal__route">MRCC Port 03 · Ch 0</div>
+        <div class="modal__route">{connectionLabel}</div>
       </header>
       <div class="modal__body">
         <ul class="preflight">
@@ -324,7 +335,7 @@
             <span class="preflight__icon">✓</span>
             <div class="preflight__body">
               <span class="preflight__title">Connection</span>
-              <span class="preflight__detail">MRCC Port 03 · S950 responded to catalog request</span>
+              <span class="preflight__detail">{connectionLabel} · S950 responded to catalog request</span>
             </div>
           </li>
           <li class="preflight__item preflight__item--ok">
@@ -375,7 +386,7 @@
     <div class="modal">
       <header class="modal__head">
         <h2 class="modal__title">Sending <strong>{prog.name}</strong> to S950</h2>
-        <div class="modal__route">MRCC Port 03 · Ch 0</div>
+        <div class="modal__route">{connectionLabel}</div>
       </header>
       <div class="modal__body">
         <div class="modal__step">
@@ -391,7 +402,7 @@
           <span>~2m 18s remaining</span>
         </div>
         <div class="log">
-          <div class="log__row ok">✓ Connected to S950 on MRCC Port 03</div>
+          <div class="log__row ok">✓ Connected to S950 on {connectionLabel}</div>
           <div class="log__row ok">✓ Sample KICK uploaded to slot 02 (1m 04s)</div>
           <div class="log__row run">▶ Sample SNARE in progress</div>
           <div class="log__row pending">· Sample RIM pending</div>

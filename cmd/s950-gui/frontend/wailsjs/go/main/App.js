@@ -18,6 +18,14 @@ export function Connect(arg1, arg2, arg3) {
   return window['go']['main']['App']['Connect'](arg1, arg2, arg3);
 }
 
+export function ConnectSerial(arg1, arg2) {
+  return window['go']['main']['App']['ConnectSerial'](arg1, arg2);
+}
+
+export function CopySampleAudio(arg1) {
+  return window['go']['main']['App']['CopySampleAudio'](arg1);
+}
+
 export function Disconnect() {
   return window['go']['main']['App']['Disconnect']();
 }

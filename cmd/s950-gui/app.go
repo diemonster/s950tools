@@ -50,9 +50,17 @@ type App struct {
 	ctx context.Context
 
 	mu      sync.Mutex
-	tport   *transport.Transport // nil until Connect succeeds
+	tport   transport.Transport // nil until Connect succeeds
 	dev     *device.Device
 	channel byte
+	// kind tracks which constructor opened the transport: "midi" or
+	// "serial". Surfaced via Status so the frontend can gate
+	// transport-specific features (Copy-from-S950 only works over
+	// serial). Empty when disconnected.
+	kind string
+	// baud records the serial line rate the transport was opened at,
+	// so Status can echo it back to the topbar. Zero for MIDI.
+	baud int
 	// cache is the lazily-initialised cross-session waveform store
 	// (Phase 1B). Behind the same mutex as the transport because
 	// wavecache() can be called from multiple Wails-pool goroutines
@@ -72,16 +80,19 @@ func (a *App) startup(ctx context.Context) {
 
 // ---------- Connection management ----------
 
-// ListPorts enumerates MIDI in/out ports from the rtmidi driver.
-// Safe to call before Connect — does not touch the transport.
+// ListPorts enumerates MIDI in/out ports and RS-232 serial devices.
+// Safe to call before Connect — does not touch the transport. The
+// serial list is best-effort: if the OS rejects the query we still
+// return MIDI ports rather than failing the whole call.
 func (a *App) ListPorts() (*PortList, error) {
 	ins, outs, err := transport.ListPorts()
 	if err != nil {
 		return nil, fmt.Errorf("list MIDI ports: %w", err)
 	}
 	out := &PortList{
-		Ins:  make([]Port, 0, len(ins)),
-		Outs: make([]Port, 0, len(outs)),
+		Ins:    make([]Port, 0, len(ins)),
+		Outs:   make([]Port, 0, len(outs)),
+		Serial: make([]SerialPort, 0),
 	}
 	for _, p := range ins {
 		out.Ins = append(out.Ins, Port{Name: p.Name})
@@ -89,12 +100,16 @@ func (a *App) ListPorts() (*PortList, error) {
 	for _, p := range outs {
 		out.Outs = append(out.Outs, Port{Name: p.Name})
 	}
+	if ser, serr := transport.ListSerialPorts(); serr == nil {
+		for _, p := range ser {
+			out.Serial = append(out.Serial, SerialPort{Name: p})
+		}
+	}
 	return out, nil
 }
 
-// Connect opens a transport with the chosen ports + MIDI channel and
-// constructs a Device. Closes any prior transport first so swapping
-// ports is one call from the frontend's perspective.
+// Connect opens a MIDI transport with the chosen ports + MIDI
+// channel and constructs a Device. Closes any prior transport first.
 func (a *App) Connect(in, out string, channel int) error {
 	if channel < 0 || channel > 15 {
 		return fmt.Errorf("channel %d out of range (0..15)", channel)
@@ -102,36 +117,87 @@ func (a *App) Connect(in, out string, channel int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.tport != nil {
-		_ = a.tport.Close()
-		a.tport = nil
-		a.dev = nil
-	}
+	a.closeTransportLocked()
 
 	t, err := transport.Open(transport.Options{
-		In:  in,
-		Out: out,
-		// Pump every SysEx envelope through to the frontend wire-log
-		// panel via Wails events. Cheap — `wruntime.EventsEmit` is a
-		// JSON-marshal + write to the WebView2 channel, and we only
-		// publish completed messages (no per-byte traffic).
-		OnWire: func(direction string, msg []byte) {
-			wruntime.EventsEmit(a.ctx, "wire:traffic", WireMessage{
-				Direction: direction,
-				Length:    len(msg),
-				HexBytes:  hexBytes(msg),
-				StampMs:   time.Now().UnixMilli(),
-			})
-		},
+		In:     in,
+		Out:    out,
+		OnWire: a.makeOnWire(),
 	})
 	if err != nil {
 		return fmt.Errorf("open MIDI transport: %w", err)
 	}
+	a.adoptTransportLocked(t, "midi", byte(channel), 0)
+	return nil
+}
+
+// ConnectSerial opens an RS-232 transport. The S950 must already
+// have controller-select set to RS-232C on its front panel (M1RS2
+// is silently rejected on OVS writes — see project memory). Closes
+// any prior transport first.
+func (a *App) ConnectSerial(port string, baud int) error {
+	if port == "" {
+		return fmt.Errorf("serial port name required")
+	}
+	if baud <= 0 {
+		baud = 38400
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.closeTransportLocked()
+
+	t, err := transport.OpenSerial(transport.SerialOptions{
+		Port:   port,
+		Baud:   baud,
+		OnWire: a.makeOnWire(),
+	})
+	if err != nil {
+		return fmt.Errorf("open serial transport: %w", err)
+	}
+	// MIDI channel is moot on RS-232 (point-to-point cable), but the
+	// Device wrapper still uses it to address AKAI-exclusive
+	// requests. Default to channel 0 — the S950's basic-channel
+	// field has omni-on by default, so anything works.
+	a.adoptTransportLocked(t, "serial", 0, baud)
+	return nil
+}
+
+// closeTransportLocked releases any open transport and clears the
+// derived state. Caller must hold a.mu.
+func (a *App) closeTransportLocked() {
+	if a.tport != nil {
+		_ = a.tport.Close()
+		a.tport = nil
+		a.dev = nil
+		a.kind = ""
+		a.baud = 0
+	}
+}
+
+// adoptTransportLocked wires a freshly-opened transport into the
+// App's state. Caller must hold a.mu.
+func (a *App) adoptTransportLocked(t transport.Transport, kind string, channel byte, baud int) {
 	a.tport = t
-	a.channel = byte(channel)
+	a.channel = channel
+	a.kind = kind
+	a.baud = baud
 	a.dev = device.New(t, a.channel)
 	a.dev.RequestTimeout = 5 * time.Second
-	return nil
+}
+
+// makeOnWire returns the wire-log callback the transport publishes
+// every SysEx envelope through. Identical for MIDI and serial so
+// the frontend's wire-log panel doesn't care which is in use.
+func (a *App) makeOnWire() func(direction string, msg []byte) {
+	return func(direction string, msg []byte) {
+		wruntime.EventsEmit(a.ctx, "wire:traffic", WireMessage{
+			Direction: direction,
+			Length:    len(msg),
+			HexBytes:  hexBytes(msg),
+			StampMs:   time.Now().UnixMilli(),
+		})
+	}
 }
 
 // Disconnect closes the active transport, if any. Idempotent.
@@ -144,6 +210,8 @@ func (a *App) Disconnect() error {
 	err := a.tport.Close()
 	a.tport = nil
 	a.dev = nil
+	a.kind = ""
+	a.baud = 0
 	return err
 }
 
@@ -156,9 +224,11 @@ func (a *App) Status() *ConnectionStatus {
 	}
 	return &ConnectionStatus{
 		Connected: true,
+		Kind:      a.kind,
 		In:        a.tport.InName(),
 		Out:       a.tport.OutName(),
 		Channel:   int(a.channel),
+		Baud:      a.baud,
 	}
 }
 
@@ -166,10 +236,11 @@ func (a *App) Status() *ConnectionStatus {
 
 // Catalog returns programs + samples on the connected device.
 func (a *App) Catalog() (*Catalog, error) {
-	d, err := a.requireDevice()
+	d, err := a.lockDevice()
 	if err != nil {
 		return nil, err
 	}
+	defer a.mu.Unlock()
 	entries, err := d.Catalog()
 	if err != nil {
 		return nil, err
@@ -196,13 +267,14 @@ func (a *App) Catalog() (*Catalog, error) {
 // human-editable JSON shape. The hex Raw fields round-trip so unknown
 // bytes are preserved on the next SetProgram.
 func (a *App) GetProgram(slot int) (*protocol.ProgramJSON, error) {
-	d, err := a.requireDevice()
-	if err != nil {
-		return nil, err
-	}
 	if slot < 0 || slot > 99 {
 		return nil, fmt.Errorf("slot %d out of range (0..99)", slot)
 	}
+	d, err := a.lockDevice()
+	if err != nil {
+		return nil, err
+	}
+	defer a.mu.Unlock()
 	p, err := d.GetProgram(byte(slot))
 	if err != nil {
 		return nil, err
@@ -216,13 +288,14 @@ func (a *App) GetProgram(slot int) (*protocol.ProgramJSON, error) {
 // fetch: selecting a sample in the sidebar triggers this to fill in
 // the start / end / loop / rate / nominal-pitch fields.
 func (a *App) GetSampleParams(slot int) (*protocol.SampleParams, error) {
-	d, err := a.requireDevice()
-	if err != nil {
-		return nil, err
-	}
 	if slot < 0 || slot > 99 {
 		return nil, fmt.Errorf("slot %d out of range (0..99)", slot)
 	}
+	d, err := a.lockDevice()
+	if err != nil {
+		return nil, err
+	}
+	defer a.mu.Unlock()
 	return d.GetParams(byte(slot))
 }
 
@@ -232,13 +305,14 @@ func (a *App) GetSampleParams(slot int) (*protocol.SampleParams, error) {
 // only the high-level fields we modelled, so reserved/undocumented
 // bytes from the original read round-trip safely.
 func (a *App) SetSampleParams(slot int, p protocol.SampleParams) error {
-	d, err := a.requireDevice()
-	if err != nil {
-		return err
-	}
 	if slot < 0 || slot > 99 {
 		return fmt.Errorf("slot %d out of range (0..99)", slot)
 	}
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
 	return d.SetParams(byte(slot), &p)
 }
 
@@ -247,10 +321,6 @@ func (a *App) SetSampleParams(slot int, p protocol.SampleParams) error {
 // calling this — the device may NAK on slot collisions or oversize
 // keygroup counts.
 func (a *App) SetProgram(slot int, j protocol.ProgramJSON) error {
-	d, err := a.requireDevice()
-	if err != nil {
-		return err
-	}
 	if slot < 0 || slot > 99 {
 		return fmt.Errorf("slot %d out of range (0..99)", slot)
 	}
@@ -258,6 +328,11 @@ func (a *App) SetProgram(slot int, j protocol.ProgramJSON) error {
 	if err := p.FromJSON(&j); err != nil {
 		return fmt.Errorf("decode ProgramJSON: %w", err)
 	}
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
 	return d.SetProgram(byte(slot), &p)
 }
 
@@ -265,10 +340,17 @@ func (a *App) SetProgram(slot int, j protocol.ProgramJSON) error {
 
 var errNotConnected = errors.New("not connected — pick MIDI in/out and click Connect")
 
-func (a *App) requireDevice() (*device.Device, error) {
+// lockDevice acquires the wire mutex and returns the active device,
+// or an error if disconnected. Callers MUST defer a.mu.Unlock() so
+// the lock is held for the full duration of the wire conversation
+// — Wails dispatches JS-originated calls on its own goroutine pool,
+// and any two concurrent device operations would otherwise interleave
+// SysEx bytes on the transport. Holding the lock for the whole call
+// keeps the request/response cycle atomic on the wire.
+func (a *App) lockDevice() (*device.Device, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.dev == nil {
+		a.mu.Unlock()
 		return nil, errNotConnected
 	}
 	return a.dev, nil

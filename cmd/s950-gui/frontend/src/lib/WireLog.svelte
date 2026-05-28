@@ -103,8 +103,14 @@
 <style>
   /* Inline toggle — rendered inside the statusbar so it never floats
      over page content. Counter shows current buffered messages; "+"
-     suffix indicates the oldest have rolled off the MAX_MESSAGES cap. */
+     suffix indicates the oldest have rolled off the MAX_MESSAGES cap.
+     position:relative + z-index lifts it above the .modal-backdrop
+     (z=100, see shared.css), so when the user is stuck on a transfer
+     modal they can still pop the wire log to diagnose. The drawer
+     uses an even higher z so it stacks over the modal when open. */
   .wire-toggle {
+    position: relative;
+    z-index: 101;
     font-family: var(--font-mono);
     font-size: 10px;
     padding: 1px 7px;
@@ -124,14 +130,17 @@
   }
 
   /* Drawer pinned to the bottom-right; intentionally non-modal so the
-     user can drive the app while watching wire traffic in real time. */
+     user can drive the app while watching wire traffic in real time.
+     z=110 keeps it above the modal-backdrop (z=100) — diagnosing a
+     stuck SysEx exchange while the modal is up requires the drawer
+     to render on top. */
   .wire-log {
     position: fixed;
     right: 12px;
     bottom: 36px;
     width: min(720px, calc(100vw - 24px));
     height: 360px;
-    z-index: 49;
+    z-index: 110;
     background: var(--canvas);
     color: var(--canvas-text);
     border: 1px solid var(--black);

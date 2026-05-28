@@ -34,11 +34,27 @@ const extras: AudioBufferSourceNode[] = [];
 // (which is real diagnostic information they'd want to fix).
 const FADE_SEC = 0.002;
 
-function makeFadeInGain(ac: AudioContext): GainNode {
+// S950 loudness is ±50 in 0.375 dB steps (see protocol.program.go's
+// SoftLoudness comment), so map directly to a linear gain factor.
+// Positive values can exceed unity — the device clips there too, so
+// matching that behaviour keeps preview faithful.
+function loudnessToGain(loudness: number): number {
+  return Math.pow(10, (loudness * 0.375) / 20);
+}
+
+// S950 tune is stored in 1/16-semitone units but the UI keeps it in
+// semitones (with optional fractional cents). Web Audio's
+// playbackRate scales both pitch and duration, which is exactly how
+// the device's pitched playback works (no separate time-stretch).
+function tuneToRate(tune: number): number {
+  return Math.pow(2, tune / 12);
+}
+
+function makeFadeInGain(ac: AudioContext, target: number): GainNode {
   const gain = ac.createGain();
   const now = ac.currentTime;
   gain.gain.setValueAtTime(0, now);
-  gain.gain.linearRampToValueAtTime(1, now + FADE_SEC);
+  gain.gain.linearRampToValueAtTime(target, now + FADE_SEC);
   gain.connect(ac.destination);
   return gain;
 }
@@ -84,6 +100,31 @@ function bufferFor(s: Sample): AudioBuffer | null {
     ch[i] = pcm[i] / 32768;
   }
   bufferCache.set(s.slot, { pcm, rate: s.rate, buf });
+  return buf;
+}
+
+// buildReversedRegion synthesises a back-to-front copy of one sample
+// range as a fresh AudioBuffer. Web Audio's playbackRate must be > 0,
+// so reverse playback is implemented by reversing the PCM up front
+// and playing the result forward. Built per preview call rather than
+// cached — the range can change with each click (slice vs sample,
+// edited Start/End) so a cache key would have to include them.
+function buildReversedRegion(
+  s: Sample,
+  startWord: number,
+  lengthWords: number,
+  ac: AudioContext,
+): AudioBuffer | null {
+  if (!s.pcm || s.pcm.length === 0) return null;
+  const total = s.pcm.length;
+  const begin = Math.max(0, Math.min(total, startWord));
+  const len   = Math.max(1, Math.min(lengthWords, total - begin));
+  const buf = ac.createBuffer(1, len, s.rate);
+  const ch  = buf.getChannelData(0);
+  const pcm = s.pcm;
+  for (let i = 0; i < len; i++) {
+    ch[i] = pcm[begin + len - 1 - i] / 32768;
+  }
   return buf;
 }
 
@@ -149,21 +190,44 @@ export function previewRegion(
   loopMode: 'one-shot' | 'loop' | 'ping-pong' = 'one-shot',
   loopStartWord = 0,
   loopLengthWord = 0,
+  reverse = false,
 ): boolean {
-  const buf = bufferFor(s);
-  if (!buf) return false;
   stop();
   const ac = audioContext();
 
-  const startSec  = startWord  / s.rate;
+  // For reverse playback, build a one-off reversed buffer over the
+  // play region and treat the source coordinates as if start=0.
+  // loopStartWord (a forward offset from the region start) flips to
+  // count from the back of the (now-reversed) region. The rest of
+  // the function uses these effective values uniformly so the
+  // ping-pong / one-shot / loop branches don't need their own
+  // reverse-aware paths.
+  let buf: AudioBuffer | null;
+  let effStartWord: number;
+  let effLoopStartWord: number;
+  if (reverse) {
+    buf = buildReversedRegion(s, startWord, lengthWords, ac);
+    effStartWord = 0;
+    effLoopStartWord = Math.max(0, lengthWords - (loopStartWord + loopLengthWord));
+  } else {
+    buf = bufferFor(s);
+    effStartWord = startWord;
+    effLoopStartWord = loopStartWord;
+  }
+  if (!buf) return false;
+
+  const startSec  = effStartWord  / s.rate;
   const lenSec    = lengthWords / s.rate;
-  const loopStartAbs = startSec + loopStartWord / s.rate;
-  const loopEndAbs   = startSec + (loopStartWord + loopLengthWord) / s.rate;
+  const loopStartAbs = startSec + effLoopStartWord / s.rate;
+  const loopEndAbs   = startSec + (effLoopStartWord + loopLengthWord) / s.rate;
+
+  const rate    = tuneToRate(s.tune ?? 0);
+  const gainAmt = loudnessToGain(s.loudness ?? 0);
 
   // Build the per-session gain node now so every source we wire
   // below routes through it. Fade-in is scheduled inside the
   // factory; fade-out is scheduled below or in stop().
-  const gain = makeFadeInGain(ac);
+  const gain = makeFadeInGain(ac, gainAmt);
 
   // ---------- Ping-pong ----------
   // Web Audio's native loop is forward-only. We synthesise ping-pong
@@ -176,6 +240,7 @@ export function previewRegion(
     // loop region (the standard ping-pong entry), no loop.
     const preRoll = ac.createBufferSource();
     preRoll.buffer = buf;
+    preRoll.playbackRate.value = rate;
     preRoll.connect(gain);
     const preRollEnd = loopEndAbs;       // absolute seconds in source buffer
     const preRollDur = preRollEnd - startSec;
@@ -195,8 +260,13 @@ export function previewRegion(
     const loopSrc = ac.createBufferSource();
     loopSrc.buffer = pingBuf;
     loopSrc.loop = true;
+    loopSrc.playbackRate.value = rate;
     loopSrc.connect(gain);
-    loopSrc.start(ac.currentTime + preRollDur);
+    // playbackRate scales the pre-roll's real-time duration, so the
+    // loop must start later/earlier than the source-buffer duration
+    // would suggest. preRollDur is in source seconds; divide by rate
+    // to get wall-clock seconds.
+    loopSrc.start(ac.currentTime + preRollDur / rate);
 
     extras.push(preRoll);
     current = loopSrc;
@@ -207,6 +277,7 @@ export function previewRegion(
   // ---------- One-shot + forward loop ----------
   const src = ac.createBufferSource();
   src.buffer = buf;
+  src.playbackRate.value = rate;
 
   if (loopMode === 'loop') {
     src.loop = true;
@@ -223,9 +294,12 @@ export function previewRegion(
   // tail of the clip ramps to silence instead of cutting at lenSec.
   // Clamp to half the clip length so very short samples don't
   // double-fade (in→out overlap = audible pop). For ≤2*FADE_SEC
-  // clips, skip the out-fade entirely.
-  if (loopMode === 'one-shot' && lenSec > 2 * FADE_SEC) {
-    const endTime = ac.currentTime + lenSec;
+  // clips, skip the out-fade entirely. lenSec is in source-buffer
+  // seconds; divide by rate to convert to wall-clock seconds for
+  // the AudioContext schedule.
+  const realLenSec = lenSec / rate;
+  if (loopMode === 'one-shot' && realLenSec > 2 * FADE_SEC) {
+    const endTime = ac.currentTime + realLenSec;
     scheduleFadeOutAt(gain, ac, endTime - FADE_SEC);
   }
 
@@ -251,7 +325,7 @@ export function previewSample(s: Sample): boolean {
   const loopMode = s.mode;
   // Loop relative to slice start = (Start..LoopLength) since the S950
   // anchors loops at the sample's start point.
-  return previewRegion(s, s.start, len, loopMode, 0, s.loopLength);
+  return previewRegion(s, s.start, len, loopMode, 0, s.loopLength, s.reverse);
 }
 
 // previewSlice plays one slice of a sample (which is itself part of

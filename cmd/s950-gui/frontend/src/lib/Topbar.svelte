@@ -3,12 +3,42 @@
   import { route, navigate, type Route } from './route';
   import { sync } from './sync';
   import {
-    inputPorts, outputPorts, selectedIn, selectedOut, channel,
+    inputPorts, outputPorts, serialPortsList,
+    selectedIn, selectedOut, channel,
+    transportKind, baud, SERIAL_BAUDS,
     phase, linkError,
     refreshPorts, refreshStatus, connect, disconnect,
+    pickSerial, pickMidi,
   } from './state/connection';
   import { memoryUsage, totalWords, expansionEnabled } from './state/memory';
   import { theme, toggleTheme } from './state/theme';
+
+  // Picker option values are prefixed so a single <select> can hold
+  // both MIDI and serial entries while still letting the change
+  // handler tell them apart. "midi:<name>" vs "serial:<name>".
+  const MIDI = 'midi:';
+  const SERIAL = 'serial:';
+
+  function pickerValue(kind: 'midi' | 'serial', name: string): string {
+    return name ? `${kind === 'serial' ? SERIAL : MIDI}${name}` : '';
+  }
+  function currentInValue(): string {
+    return $transportKind === 'serial' ? pickerValue('serial', $selectedIn) : pickerValue('midi', $selectedIn);
+  }
+  function currentOutValue(): string {
+    return $transportKind === 'serial' ? pickerValue('serial', $selectedOut) : pickerValue('midi', $selectedOut);
+  }
+
+  function onPickIn(e: Event) {
+    const raw = (e.currentTarget as HTMLSelectElement).value;
+    if (raw.startsWith(SERIAL)) pickSerial(raw.slice(SERIAL.length));
+    else pickMidi('in', raw.startsWith(MIDI) ? raw.slice(MIDI.length) : '');
+  }
+  function onPickOut(e: Event) {
+    const raw = (e.currentTarget as HTMLSelectElement).value;
+    if (raw.startsWith(SERIAL)) pickSerial(raw.slice(SERIAL.length));
+    else pickMidi('out', raw.startsWith(MIDI) ? raw.slice(MIDI.length) : '');
+  }
 
   // Short K/M number formatter for the memory chip. 412000 → "412K",
   // 1536000 → "1.5M". Keeps the chip readable at narrow widths.
@@ -76,44 +106,80 @@
   </nav>
   <div class="spacer"></div>
 
-  <!-- MIDI port pickers. Native <select> styled as a chip so it's
-       accessible and keyboard-friendly without a custom dropdown.
-       The select is positioned absolute + opacity 0 over the chip
-       so any pixel of the chip opens the dropdown — on macOS WebKit
-       clicking a <label> only focuses the wrapped <select>, it
-       doesn't open the picker, so the entire chip area would
-       otherwise be a dead zone outside the select's intrinsic text
-       width. .chip__value renders the selection as plain text behind
-       the transparent select. -->
-  <label class="chip chip--select" title={$linkError || 'MIDI input port'}>
-    <span class="chip__label">MIDI in</span>
+  <!-- Port pickers. Two chips that each list MIDI ports + RS-232
+       serial devices as alternatives. The native <select> is
+       positioned absolute + opacity 0 over the chip so any pixel
+       opens the dropdown; .chip__value renders the current pick
+       as plain text behind it. Picking a serial entry in either
+       chip auto-mirrors to the other (RS-232 is bidirectional on
+       a single cable), and the channel chip flips to a baud chip
+       so the user doesn't have to pretend the MIDI channel
+       matters on a point-to-point serial link. -->
+  <label class="chip chip--select" title={$linkError || ($transportKind === 'serial' ? 'RS-232 port (bidirectional)' : 'MIDI input port')}>
+    <span class="chip__label">{$transportKind === 'serial' ? 'RS-232' : 'MIDI in'}</span>
     <span class="chip__value">{$selectedIn || '— pick —'}</span>
-    <select bind:value={$selectedIn}>
+    <select value={currentInValue()} on:change={onPickIn}>
       <option value="">— pick —</option>
-      {#each $inputPorts as p (p.name)}
-        <option value={p.name}>{p.name}</option>
-      {/each}
+      {#if $inputPorts.length > 0}
+        <optgroup label="MIDI inputs">
+          {#each $inputPorts as p (p.name)}
+            <option value={pickerValue('midi', p.name)}>{p.name}</option>
+          {/each}
+        </optgroup>
+      {/if}
+      {#if $serialPortsList.length > 0}
+        <optgroup label="RS-232 (serial)">
+          {#each $serialPortsList as p (p.name)}
+            <option value={pickerValue('serial', p.name)}>{p.name}</option>
+          {/each}
+        </optgroup>
+      {/if}
     </select>
   </label>
-  <label class="chip chip--select" title={$linkError || 'MIDI output port'}>
-    <span class="chip__label">MIDI out</span>
-    <span class="chip__value">{$selectedOut || '— pick —'}</span>
-    <select bind:value={$selectedOut}>
-      <option value="">— pick —</option>
-      {#each $outputPorts as p (p.name)}
-        <option value={p.name}>{p.name}</option>
-      {/each}
-    </select>
-  </label>
-  <label class="chip chip--select" title="MIDI channel (0..15)">
-    <span class="chip__label">Ch</span>
-    <span class="chip__value">{$channel}</span>
-    <select bind:value={$channel}>
-      {#each Array(16) as _, i}
-        <option value={i}>{i}</option>
-      {/each}
-    </select>
-  </label>
+  {#if $transportKind !== 'serial'}
+    <label class="chip chip--select" title={$linkError || 'MIDI output port'}>
+      <span class="chip__label">MIDI out</span>
+      <span class="chip__value">{$selectedOut || '— pick —'}</span>
+      <select value={currentOutValue()} on:change={onPickOut}>
+        <option value="">— pick —</option>
+        {#if $outputPorts.length > 0}
+          <optgroup label="MIDI outputs">
+            {#each $outputPorts as p (p.name)}
+              <option value={pickerValue('midi', p.name)}>{p.name}</option>
+            {/each}
+          </optgroup>
+        {/if}
+        {#if $serialPortsList.length > 0}
+          <optgroup label="RS-232 (serial)">
+            {#each $serialPortsList as p (p.name)}
+              <option value={pickerValue('serial', p.name)}>{p.name}</option>
+            {/each}
+          </optgroup>
+        {/if}
+      </select>
+    </label>
+  {/if}
+  {#if $transportKind === 'serial'}
+    <label class="chip chip--select" title="RS-232 baud rate (must match S950's overall-settings page)">
+      <span class="chip__label">Baud</span>
+      <span class="chip__value">{$baud}</span>
+      <select bind:value={$baud}>
+        {#each SERIAL_BAUDS as b}
+          <option value={b}>{b}</option>
+        {/each}
+      </select>
+    </label>
+  {:else}
+    <label class="chip chip--select" title="MIDI channel (0..15)">
+      <span class="chip__label">Ch</span>
+      <span class="chip__value">{$channel}</span>
+      <select bind:value={$channel}>
+        {#each Array(16) as _, i}
+          <option value={i}>{i}</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
 
   <!-- One button that flips role: Connect when disconnected, Disconnect
        when connected. Reduces topbar width vs two separate buttons. -->

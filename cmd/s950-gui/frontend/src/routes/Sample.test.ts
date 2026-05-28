@@ -20,18 +20,21 @@ import { get } from 'svelte/store';
 // Hoisted mocks must precede component imports. Tests import the
 // stores/utilities they assert against AFTER these mocks land.
 vi.mock('../../wailsjs/go/main/App', () => ({
-  ApplySlicing:     vi.fn().mockResolvedValue(undefined),
-  Catalog:          vi.fn().mockResolvedValue({ programs: [], samples: [] }),
-  Connect:          vi.fn().mockResolvedValue(undefined),
-  Disconnect:       vi.fn().mockResolvedValue(undefined),
-  GetProgram:       vi.fn().mockResolvedValue({}),
-  GetSampleParams:  vi.fn().mockResolvedValue({}),
-  ImportSample:     vi.fn().mockResolvedValue(null), // user-cancel by default
-  InspectSlicing:   vi.fn().mockResolvedValue({ ok: true }),
-  ListPorts:        vi.fn().mockResolvedValue({ ins: [], outs: [] }),
-  SetProgram:       vi.fn().mockResolvedValue(undefined),
-  SetSampleParams:  vi.fn().mockResolvedValue(undefined),
-  Status:           vi.fn().mockResolvedValue({ connected: false, channel: 0 }),
+  ApplySlicing:        vi.fn().mockResolvedValue(undefined),
+  Catalog:             vi.fn().mockResolvedValue({ programs: [], samples: [] }),
+  Connect:             vi.fn().mockResolvedValue(undefined),
+  CopySampleAudio:     vi.fn().mockResolvedValue([]),
+  Disconnect:          vi.fn().mockResolvedValue(undefined),
+  GetCachedWaveform:   vi.fn().mockResolvedValue(null),
+  GetProgram:          vi.fn().mockResolvedValue({}),
+  GetSampleParams:     vi.fn().mockResolvedValue({}),
+  ImportSample:        vi.fn().mockResolvedValue(null), // user-cancel by default
+  InspectSlicing:      vi.fn().mockResolvedValue({ ok: true }),
+  ListPorts:           vi.fn().mockResolvedValue({ ins: [], outs: [] }),
+  PutCachedWaveform:   vi.fn().mockResolvedValue(undefined),
+  SetProgram:          vi.fn().mockResolvedValue(undefined),
+  SetSampleParams:     vi.fn().mockResolvedValue(undefined),
+  Status:              vi.fn().mockResolvedValue({ connected: false, channel: 0 }),
 }));
 
 vi.mock('../../wailsjs/runtime/runtime', () => ({
@@ -50,11 +53,16 @@ import {
   type Sample as SampleT,
 } from '../lib/state/samples';
 import { slicing, updateSlicing, buildEvenSlices } from '../lib/state/slicing';
+import { transportKind } from '../lib/state/connection';
 
 beforeEach(() => {
   vi.clearAllMocks();
   samples.set([]);
   selectedSampleSlot.set(0);
+  // Most tests assume the topbar is on the MIDI path (the
+  // default). Tests that exercise Copy-from-S950 flip this to
+  // 'serial' explicitly — the button is hidden on MIDI by design.
+  transportKind.set('midi');
   // Reset any slicing state left by a previous test.
   updateSlicing({ active: false, slices: [], selectedIndex: 0 });
 });
@@ -242,6 +250,131 @@ describe('Sample tab — commit + apply lifecycle', () => {
     expect(App.ApplySlicing).toHaveBeenCalled();
     // Children removed — sidebar only carries the source again.
     expect(get(samples).filter((s) => s.parentSlot === 0)).toHaveLength(0);
+    cleanup();
+  });
+});
+
+describe('Sample tab — Copy from S950 (Phase 1C)', () => {
+  // Helper: install a device-sourced sample at slot 5 with no host
+  // audio. Matches the post-refreshCatalog shape for samples we
+  // didn't upload ourselves (factory programs, front-panel-recorded
+  // sounds). The Copy button is the only way to get real audio for
+  // these rows without re-uploading.
+  function withDeviceSample(slot = 5, name = 'TONE', length = 5000): SampleT {
+    const s: SampleT = {
+      ...newLocalSample(slot, name, 26040, length),
+      source: 'device',
+    };
+    samples.set([s]);
+    selectedSampleSlot.set(slot);
+    // Copy-from-S950 is only viable over RS-232 (MIDI's ACK pump
+    // corrupts large samples mid-stream), so the button is hidden
+    // unless we're on serial. Tests in this suite are about the
+    // Copy flow itself — they need the button visible.
+    transportKind.set('serial');
+    return s;
+  }
+
+  it('hides the Copy button when the transport is MIDI', () => {
+    samples.set([
+      { ...newLocalSample(5, 'TONE', 26040, 5000), source: 'device' },
+    ]);
+    selectedSampleSlot.set(5);
+    transportKind.set('midi');
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /copy from s950/i.test(b.textContent ?? ''));
+    expect(btn).toBeFalsy();
+    cleanup();
+  });
+
+  it('renders the button as "Copy from S950" (not "Replace")', () => {
+    withDeviceSample();
+    const { container } = render(Sample);
+    const btns = Array.from(container.querySelectorAll('button.btn'));
+    const copyBtn = btns.find((b) => /copy from s950/i.test(b.textContent ?? ''));
+    expect(copyBtn).toBeTruthy();
+    // Defensive: the old "Replace from S950" wording is gone.
+    expect(btns.find((b) => /replace from s950/i.test(b.textContent ?? ''))).toBeFalsy();
+    cleanup();
+  });
+
+  it('disables the button on LOCAL ONLY samples', () => {
+    // A local sample has no device-side counterpart — copying would
+    // be undefined behaviour at best, accidentally clobber the
+    // user's local work at worst. We're on serial here so the
+    // button is visible (it's hidden on MIDI for a separate reason).
+    samples.set([
+      { ...newLocalSample(0, 'IMPORTED', 26040, 1000), source: 'local' },
+    ]);
+    selectedSampleSlot.set(0);
+    transportKind.set('serial');
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /copy from s950/i.test(b.textContent ?? '')) as HTMLButtonElement;
+    expect(btn?.disabled).toBe(true);
+    expect(btn?.getAttribute('title') ?? '').toMatch(/select an on-device sample/i);
+    cleanup();
+  });
+
+  it('enables the button on device samples', () => {
+    withDeviceSample();
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /copy from s950/i.test(b.textContent ?? '')) as HTMLButtonElement;
+    expect(btn?.disabled).toBe(false);
+    cleanup();
+  });
+
+  it('click calls CopySampleAudio, attaches words+pcm, persists to cache', async () => {
+    withDeviceSample(5, 'TONE', 3);
+    // Return a tiny 3-word buffer so the test asserts the exact
+    // shape post-attach. 0x800 = silence, 0xC00/0x400 are positive/
+    // negative excursions — both should land in pcm with non-zero
+    // values (int16-scaled, matching ImportSample's convention).
+    ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([0x800, 0xC00, 0x400]);
+
+    const { container } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /copy from s950/i.test(b.textContent ?? '')) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    // Wait two ticks: one for the async resolve, one for the
+    // samples.update + render.
+    await tick();
+    await tick();
+
+    expect((App as any).CopySampleAudio).toHaveBeenCalledWith(5);
+    const s = get(samples).find((x) => x.slot === 5);
+    expect(s?.words12).toEqual([0x800, 0xC00, 0x400]);
+    expect(s?.pcm?.length).toBe(3);
+    expect(s?.pcm?.[0]).toBe(0);            // silence
+    expect(s?.pcm?.[1]).toBeGreaterThan(0); // positive
+    expect(s?.pcm?.[2]).toBeLessThan(0);    // negative
+
+    // Persistence path: PutCachedWaveform called with the buffer's
+    // length (not the sample's possibly-stale length field) so the
+    // cache key always matches the file body's word count.
+    expect((App as any).PutCachedWaveform).toHaveBeenCalledWith(5, 'TONE', 3, [0x800, 0xC00, 0x400]);
+    cleanup();
+  });
+
+  it('reports an error and stays idle when CopySampleAudio rejects', async () => {
+    withDeviceSample(7, 'BUSTED');
+    ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('timeout waiting for sample dump'));
+
+    const { container, findByText } = render(Sample);
+    const btn = Array.from(container.querySelectorAll('button.btn'))
+      .find((b) => /copy from s950/i.test(b.textContent ?? '')) as HTMLButtonElement;
+    await fireEvent.click(btn);
+
+    // The error modal should be visible with the failure message.
+    expect(await findByText(/timeout waiting for sample dump/i)).toBeTruthy();
+    // Sample row is untouched — no audio attached.
+    const s = get(samples).find((x) => x.slot === 7);
+    expect(s?.words12).toBeUndefined();
+    expect((App as any).PutCachedWaveform).not.toHaveBeenCalled();
     cleanup();
   });
 });

@@ -30,7 +30,20 @@
   } from '../lib/state/slicing';
   import { ensureSampleLoaded, refreshCatalog } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
-  import { persistSamplesToCache } from '../lib/state/waveformcache';
+  import { transportKind, status as connectionStatus } from '../lib/state/connection';
+
+  // Short connection label for modal subtitles + identity strips.
+  // Lifts the device-side identifier out of the connection store
+  // so we don't have to format it inline at every call site. On
+  // MIDI shows "<port> · Ch <n>"; on serial just the port path
+  // (channel is moot on a point-to-point cable).
+  $: connectionLabel = (() => {
+    const s = $connectionStatus;
+    if (!s.connected) return 'Not connected';
+    if (s.kind === 'serial') return s.in ?? 'serial';
+    return `${s.in ?? '?'} · Ch ${s.channel}`;
+  })();
+  import { persistSamplesToCache, wordsToPcm } from '../lib/state/waveformcache';
   import * as preview from '../lib/preview';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
@@ -207,6 +220,159 @@
     } catch (e: any) {
       setSync('error', 'Fetch failed');
     }
+  }
+
+  // Copy from S950 (Phase 1C): pull SDATA for the currently selected
+  // device sample, attach to the live store, persist to the
+  // waveform cache. User-initiated, never automatic — SDATA dumps
+  // are slow (seconds-to-minutes depending on sample size).
+  //
+  // **Progress UX**: rtmidi only surfaces complete SysEx envelopes,
+  // so we cannot drive a "real" progress bar from received bytes.
+  // Instead we estimate transfer time from sample size + MIDI baud
+  // rate and tick a synthetic progress bar at 100ms. The estimate
+  // is intentionally conservative — accounts for the per-block ACK
+  // pump and modest driver buffering. Caps at 99% until the wire
+  // call returns so the bar doesn't pretend to finish before the
+  // last bytes land; on completion it snaps to 100%.
+  // Disabled on LOCAL ONLY samples — there's nothing to copy from
+  // the device side.
+  type CopyPhase = 'idle' | 'copying' | 'done' | 'error';
+  let copyPhase: CopyPhase = 'idle';
+  let copyError = '';
+  let copyStartMs = 0;
+  let copyElapsedMs = 0; // ticked by setInterval while copying
+  let copyTickHandle: ReturnType<typeof setInterval> | null = null;
+
+  // Reactive % done — driven by elapsed-vs-estimated rather than
+  // wire bytes (which we don't have until the F7 lands). Clamped
+  // to 0..99 while in flight so the bar can't claim to be done
+  // before the call returns; flips to 100 on success.
+  $: copyPercent = (() => {
+    if (copyPhase === 'done')  return 100;
+    if (copyPhase === 'error') return 0;
+    if (copyPhase !== 'copying' || !smp) return 0;
+    const estMs = estimatedCopySeconds(smp.length) * 1000;
+    if (estMs <= 0) return 0;
+    const pct = (copyElapsedMs / estMs) * 100;
+    // Slow asymptote past 95% so it doesn't look stalled if we
+    // overshot the estimate — the device's per-block ACK loop adds
+    // ~10-20ms beyond pure wire time.
+    if (pct >= 95) return Math.min(99, 95 + (pct - 95) / 5);
+    return Math.min(99, Math.max(0, pct));
+  })();
+
+  // Wire byte rate (bytes/sec) of the currently active transport.
+  // MIDI is fixed at 31250 baud with 10-bit framing → 3125 B/s.
+  // RS-232 uses whatever baud the status reports (typically 38400
+  // or 50000 — see `set-baud` CLI + project memory). Falls back to
+  // MIDI's rate when disconnected, so the modal still shows a
+  // sensible figure before the user clicks Connect.
+  $: wireBytesPerSecond = (() => {
+    const s = $connectionStatus;
+    if (s.connected && s.kind === 'serial' && s.baud) return s.baud / 10;
+    return 3125; // MIDI default
+  })();
+
+  // estimatedCopySeconds projects a wall-clock duration for the SDS
+  // dump receive. The number is the modal's progress-bar timeline,
+  // so being accurate matters — the bar otherwise either slams to
+  // 100% early (MIDI underestimate) or crawls past the actual
+  // finish (RS-232 overestimate).
+  //
+  // Empirical overheads above pure wire time:
+  //   • MIDI pump path: ~28% (40601-word sample = 33.8s vs 26.4s
+  //     raw). Per-block ACK-pump latency dominates.
+  //   • RS-232 streaming path: ~18% (164060-word sample = 79s vs
+  //     67s raw at 50000 baud).
+  // 1.2× is a single coefficient that's honest for both within a
+  // few seconds — the per-block sync path on RS-232 wastes less
+  // time but the device's internal processing per ACK is similar.
+  function estimatedCopySeconds(words: number): number {
+    // S950 wire envelope: 19-byte header + ceil(words/60) * 122-byte
+    // blocks + closing F7.
+    const blocks = Math.ceil(words / 60);
+    const bytes = 20 + blocks * 122;
+    const rawSec = bytes / wireBytesPerSecond;
+    return Math.ceil(rawSec * 1.2);
+  }
+
+  // Human-readable line-rate label for the copy modal: "MIDI's
+  // 31250 baud" vs "RS-232 at 50000 baud". Read off the live
+  // connection so it always reflects what's actually about to
+  // transfer.
+  $: lineRateLabel = (() => {
+    const s = $connectionStatus;
+    if (s.connected && s.kind === 'serial' && s.baud) return `RS-232 at ${s.baud} baud`;
+    return `MIDI's 31250 baud`;
+  })();
+
+  function startCopyTicker() {
+    stopCopyTicker(); // safety: cancel any prior interval
+    copyElapsedMs = 0;
+    copyTickHandle = setInterval(() => {
+      copyElapsedMs = Date.now() - copyStartMs;
+    }, 100);
+  }
+
+  function stopCopyTicker() {
+    if (copyTickHandle !== null) {
+      clearInterval(copyTickHandle);
+      copyTickHandle = null;
+    }
+  }
+
+  async function copyFromDevice() {
+    if (!smp || smp.source !== 'device') return; // guard: button is disabled, but be defensive
+    if (copyPhase === 'copying') return;          // ignore double-clicks
+    const slot = smp.slot;
+    const name = smp.name;
+    copyError = '';
+    copyPhase = 'copying';
+    copyStartMs = Date.now();
+    // Refresh SPRM first so smp.length carries the device's real
+    // word count, not the catalog's skinny placeholder (`1`). The
+    // progress bar's time estimate scales linearly with length —
+    // without this, a 164K-word sample would show "est. 1s" and
+    // the bar would slam to 99% inside a tick.
+    try {
+      await ensureSampleLoaded(slot, true);
+    } catch (e: any) {
+      copyError = 'Failed to read sample parameters: ' + String(e?.message ?? e);
+      copyPhase = 'error';
+      return;
+    }
+    startCopyTicker();
+    try {
+      const words = await (App as any).CopySampleAudio(slot);
+      if (!Array.isArray(words) || words.length === 0) {
+        throw new Error('Device returned an empty sample');
+      }
+      // Attach to the live samples store. Re-derives PCM from the
+      // 12-bit words so the waveform display flips from synthetic
+      // to real on the next paint.
+      const audio = { words12: words as number[], pcm: wordsToPcm(words as number[]) };
+      samples.update((xs) =>
+        xs.map((s) => (s.slot === slot ? { ...s, ...audio } : s)),
+      );
+      // Persist to the disk cache so the next session re-attaches
+      // without another round-trip. Uses the same path as Apply
+      // Slicing — keyed by words.length (the cache truth, not the
+      // sample's possibly-stale length field).
+      try { await (App as any).PutCachedWaveform(slot, name, words.length, words); } catch {}
+      copyPhase = 'done';
+    } catch (e: any) {
+      copyError = String(e?.message ?? e);
+      copyPhase = 'error';
+    } finally {
+      stopCopyTicker();
+    }
+  }
+
+  function closeCopyModal() {
+    copyPhase = 'idle';
+    copyError = '';
+    stopCopyTicker();
   }
 
   // ---------- Apply Slicing ----------
@@ -414,6 +580,9 @@
     // Kill any in-flight Web Audio preview when navigating away —
     // otherwise the source keeps playing through the new tab.
     preview.stop();
+    // Stop the Copy-from-S950 progress ticker if it's running so
+    // setInterval doesn't keep firing after the route unmounts.
+    stopCopyTicker();
   });
 
   // EMPTY_SAMPLE is the type-safe fallback used while the sidebar is
@@ -1198,13 +1367,33 @@
         </div>
       </div>
       <div class="waveform__legend">
-        <!-- When PCM is loaded we render a real peak envelope; when
-             only the SPRM metadata is known (catalog entry, not yet
-             host-imported) we fall back to a synthetic squiggle so
-             the canvas isn't empty. The tag tells the user which. -->
-        <span class="waveform__preview-tag">
-          {smp.pcm && smp.pcm.length > 0 ? 'waveform · imported audio' : 'preview · synthetic waveform'}
-        </span>
+        <!-- Three waveform states the user needs to tell apart:
+             1. device sample with host audio (Phase 1A/1B/1C):
+                the waveform is real AND the device has identical
+                bytes — host and S950 are in sync. Tag flips to a
+                green "✓ synced" badge to make this explicit.
+             2. local sample with host audio: real waveform, but
+                only on the host — the S950 doesn't have these
+                bytes yet (Apply Slicing pushes them to the device).
+             3. device sample without host audio: synthetic
+                squiggle, the host doesn't have the bytes (run
+                Copy from S950 to fetch them). -->
+        {#if smp.pcm && smp.pcm.length > 0}
+          {#if smp.source === 'device'}
+            <span class="waveform__preview-tag waveform__preview-tag--synced">
+              <span class="sync-dot" aria-hidden="true"></span>
+              waveform · synced with S950
+            </span>
+          {:else}
+            <span class="waveform__preview-tag">
+              waveform · imported audio (local only)
+            </span>
+          {/if}
+        {:else}
+          <span class="waveform__preview-tag">
+            preview · synthetic waveform
+          </span>
+        {/if}
         {#if $slicing.active}
           <span><span class="legend-swatch" style="--swatch: var(--rb-yellow)"></span>Slice</span>
           <span><span class="legend-swatch" style="--swatch: var(--rb-magenta)"></span>Selected</span>
@@ -1295,9 +1484,15 @@
 
           <div class="row">
             <span class="row__label">Tune</span>
+            <!-- step=1 (semitones) so wheel + drag + +/- buttons all
+                 move in musically-meaningful increments. The S950's
+                 protocol stores tune as int16 1/16-semitone units;
+                 integer semitones round-trip exactly. Click-to-type
+                 still accepts fractional values for sub-semitone
+                 cents tuning when needed. -->
             <NumField
               value={smp.tune}
-              min={-50} max={50} step={0.01}
+              min={-50} max={50} step={1}
               format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`}
               on:change={(e) => selectedSample.update({ tune: e.detail })} />
           </div>
@@ -1305,6 +1500,7 @@
             <span class="row__label">Loudness</span>
             <NumField
               value={smp.loudness}
+              min={-50} max={50} step={1}
               on:change={(e) => selectedSample.update({ loudness: e.detail })} />
           </div>
         </div>
@@ -1433,7 +1629,7 @@
       <div class="card">
         <div class="card__head">
           <div class="card__title">Device &amp; file</div>
-          <div class="card__subtitle">MRCC Port 03 · slot {smp.slot.toString().padStart(2, '0')}</div>
+          <div class="card__subtitle">{connectionLabel} · slot {smp.slot.toString().padStart(2, '0')}</div>
         </div>
         <div class="actions actions--stack">
           {#if $slicing.active || hasCommitted}
@@ -1463,7 +1659,23 @@
             <hr class="panel__divider" />
           {/if}
           <button type="button" class="btn btn--primary" on:click={() => importSample()}>Import .wav / .aiff...</button>
-          <button type="button" class="btn" on:click={openTransfer}>Replace from S950</button>
+          <!-- Copy from S950 (Phase 1C) is only viable over RS-232 —
+               the MIDI path's pre-emptive ACK pump corrupts large
+               samples mid-stream. We hide the button entirely on
+               non-serial sessions so a disabled-with-tooltip state
+               can't confuse users into thinking it's broken; if you
+               want it back, switch the device to RS-232C on the
+               front panel and reconnect over the serial cable. -->
+          {#if $transportKind === 'serial'}
+            <button
+              type="button"
+              class="btn"
+              disabled={smp.source === 'local' || copyPhase === 'copying'}
+              title={smp.source === 'local'
+                ? 'Select an on-device sample to copy its audio from the S950'
+                : 'Pull SDATA for this slot from the S950 and cache it on disk'}
+              on:click={copyFromDevice}>Copy from S950</button>
+          {/if}
           <button type="button" class="btn" on:click={openTransfer}>Download .wav...</button>
           <hr class="panel__divider" />
           <button type="button" class="btn">Send SPRM to S950</button>
@@ -1492,7 +1704,7 @@
     <div class="modal">
       <header class="modal__head">
         <h2 class="modal__title">Uploading <strong>{smp.name}</strong> to S950</h2>
-        <div class="modal__route">MRCC Port 03 · Ch 0 · slot {smp.slot.toString().padStart(2, '0')}</div>
+        <div class="modal__route">{connectionLabel} · slot {smp.slot.toString().padStart(2, '0')}</div>
       </header>
       <div class="modal__body">
         <div class="modal__step">
@@ -1508,7 +1720,7 @@
           <span>~0m 32s remaining</span>
         </div>
         <div class="log">
-          <div class="log__row ok">✓ Connected to S950 on MRCC Port 03</div>
+          <div class="log__row ok">✓ Connected to S950 on {connectionLabel}</div>
           <div class="log__row warn">⚠ Slot {smp.slot.toString().padStart(2, '0')} occupied — overwriting</div>
           <div class="log__row ok">✓ Sample header accepted (ACK)</div>
           <div class="log__row run">▶ Sending blocks 1–207 · ACK 103/207</div>
@@ -1541,7 +1753,7 @@
           {:else}Slicing error
           {/if}
         </h2>
-        <div class="modal__route">{$slicing.slices.length} slices · MRCC Port 03 · Ch 0</div>
+        <div class="modal__route">{$slicing.slices.length} slices · {connectionLabel}</div>
       </header>
 
       <div class="modal__body">
@@ -1635,6 +1847,77 @@
           <span class="modal__waitnote">do not close · upload in progress</span>
         {:else}
           <button type="button" class="btn btn--primary" on:click={cancelApply}>Close</button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}
+
+<!-- Phase 1C "Copy from S950" modal.
+     States:
+       copying  → indeterminate progress with ETA (rtmidi can't surface
+                  mid-stream byte counts, so it's a spinner + a copy of
+                  the host's wire-rate estimate)
+       done     → success terminal, "Close" returns to idle
+       error    → error terminal, "Close" returns to idle -->
+{#if copyPhase !== 'idle'}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">
+          {#if copyPhase === 'copying'}Copying from S950 — <strong>{smp.name}</strong>
+          {:else if copyPhase === 'done'}Copied — <strong>{smp.name}</strong>
+          {:else}Copy error
+          {/if}
+        </h2>
+        <div class="modal__route">slot {smp.slot.toString().padStart(2, '0')} · {connectionLabel}</div>
+      </header>
+      <div class="modal__body">
+        {#if copyPhase === 'copying'}
+          <div class="modal__step">
+            Streaming {smp.length.toLocaleString()} words at {lineRateLabel} line rate
+            (est. {Math.floor(estimatedCopySeconds(smp.length) / 60)}m {estimatedCopySeconds(smp.length) % 60}s).
+          </div>
+          <!-- Synthetic progress bar — ticks against the estimated
+               transfer time, capped at 99% until the call returns.
+               rtmidi only surfaces complete SysEx envelopes so we
+               can't drive this from received-byte counts; the
+               elapsed-vs-estimated heuristic is the best we can do
+               without losing the visual cue that something IS
+               happening on the wire. -->
+          <div class="progress">
+            <div class="progress__bar" style="width: {copyPercent}%;"></div>
+            <div class="progress__label">
+              {Math.floor(copyPercent)}% · {Math.max(0, Math.round(copyElapsedMs / 1000))}s
+              / ~{estimatedCopySeconds(smp.length)}s
+            </div>
+          </div>
+          <div class="modal__hint">
+            Progress is an estimate based on wire-rate + ACK-pump overhead, not actual byte
+            counts. Don't close this window — the transfer is still running.
+          </div>
+        {:else if copyPhase === 'done'}
+          <div class="modal__step">
+            ✓ Copied {smp.length.toLocaleString()} words from slot {smp.slot} in
+            {Math.max(1, Math.round((Date.now() - copyStartMs) / 1000))}s.
+          </div>
+          <div class="progress">
+            <div class="progress__bar" style="width: 100%;"></div>
+            <div class="progress__label">100%</div>
+          </div>
+          <div class="modal__hint">
+            The waveform is now backed by real audio + persisted to the on-disk cache.
+            Future sessions will re-attach without another round-trip.
+          </div>
+        {:else}
+          <div class="modal__step modal__step--error">{copyError}</div>
+        {/if}
+      </div>
+      <footer class="modal__foot">
+        {#if copyPhase === 'copying'}
+          <span class="modal__waitnote">do not close · sample transfer in progress</span>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={closeCopyModal}>Close</button>
         {/if}
       </footer>
     </div>
@@ -1772,6 +2055,24 @@
     color: var(--grey-dark);
     font-style: italic;
     background: var(--white);
+  }
+  /* When the host has audio that came from the device (Apply Slicing
+     write-back OR Copy from S950 download), promote the tag to a
+     green-accented "synced" badge so the user can see at a glance
+     that the displayed waveform is real AND the S950 has identical
+     bytes — distinct from a local-only import. */
+  .waveform__preview-tag--synced {
+    border-color: var(--rb-green);
+    color: var(--ink);
+    font-style: normal;
+    font-weight: 500;
+  }
+  .sync-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--rb-green);
+    border: 1px solid var(--ink);
+    flex-shrink: 0;
   }
   .waveform::before {
     content: "";

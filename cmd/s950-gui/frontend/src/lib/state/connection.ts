@@ -11,7 +11,19 @@ import { selectedSlot as selectedProgramSlot } from './programs';
 import { hydrateAllSamplesFromCache } from './waveformcache';
 
 export type Port = { name: string };
-export type Status = { connected: boolean; in?: string; out?: string; channel: number };
+export type SerialPort = { name: string };
+// 'midi' | 'serial' — drives the dispatch in connect() and gates
+// transport-specific features (Copy-from-S950 needs serial because
+// MIDI's pre-emptive ACK pump can't handle large samples reliably).
+export type TransportKind = 'midi' | 'serial';
+export type Status = {
+  connected: boolean;
+  kind?: string;
+  in?: string;
+  out?: string;
+  channel: number;
+  baud?: number;
+};
 
 // Link phase is *connection* state — separate from the per-tab edit
 // "sync" state (synced / dirty / sending). Both can be live at once:
@@ -29,6 +41,16 @@ export type LinkPhase = 'unknown' | 'disconnected' | 'connecting' | 'connected' 
 const KEY_IN      = 's950-tools.midi-in';
 const KEY_OUT     = 's950-tools.midi-out';
 const KEY_CHANNEL = 's950-tools.midi-channel';
+const KEY_KIND    = 's950-tools.transport-kind';
+const KEY_BAUD    = 's950-tools.serial-baud';
+
+// Practical baud rates the S950's UART can hit cleanly (verified on
+// firmware 1.2a — see project-pending-work memory). 50000 is the
+// effective ceiling: above that the device's clock divider can't
+// generate a matching rate (76800 falls back to ACTUAL 71420, ~7%
+// off, garbage). 38400 is the conservative default.
+export const SERIAL_BAUDS = [9600, 19200, 38400, 50000] as const;
+export type SerialBaud = (typeof SERIAL_BAUDS)[number];
 
 function readString(key: string): string {
   if (typeof localStorage === 'undefined') return '';
@@ -39,6 +61,15 @@ function readChannel(): number {
   const raw = parseInt(localStorage.getItem(KEY_CHANNEL) ?? '', 10);
   return Number.isInteger(raw) && raw >= 0 && raw <= 15 ? raw : 0;
 }
+function readKind(): TransportKind {
+  if (typeof localStorage === 'undefined') return 'midi';
+  return localStorage.getItem(KEY_KIND) === 'serial' ? 'serial' : 'midi';
+}
+function readBaud(): SerialBaud {
+  if (typeof localStorage === 'undefined') return 38400;
+  const raw = parseInt(localStorage.getItem(KEY_BAUD) ?? '', 10);
+  return (SERIAL_BAUDS as readonly number[]).includes(raw) ? (raw as SerialBaud) : 38400;
+}
 function writeKey(key: string, value: string) {
   if (typeof localStorage === 'undefined') return;
   localStorage.setItem(key, value);
@@ -46,45 +77,91 @@ function writeKey(key: string, value: string) {
 
 export const inputPorts  = writable<Port[]>([]);
 export const outputPorts = writable<Port[]>([]);
+export const serialPortsList = writable<SerialPort[]>([]);
 // User's current picks. Empty string until they choose; if empty on
 // Connect, the backend's `transport.Open` substring-matches against
 // the first available port.
 export const selectedIn  = writable<string>(readString(KEY_IN));
 export const selectedOut = writable<string>(readString(KEY_OUT));
 export const channel     = writable<number>(readChannel());
-export const phase       = writable<LinkPhase>('unknown');
-export const status      = writable<Status>({ connected: false, channel: 0 });
-export const linkError   = writable<string>('');
+// transportKind controls which backend method connect() invokes.
+// Flipped automatically when the user picks a serial port in either
+// dropdown (so it stays in sync with what's actually selected),
+// persisted so the next launch defaults to the same transport.
+export const transportKind = writable<TransportKind>(readKind());
+// baud is the RS-232 line rate. Only meaningful when
+// transportKind === 'serial'. Ignored for MIDI sessions.
+export const baud         = writable<SerialBaud>(readBaud());
+export const phase        = writable<LinkPhase>('unknown');
+export const status       = writable<Status>({ connected: false, channel: 0 });
+export const linkError    = writable<string>('');
 
 // Mirror every change back to localStorage. Subscribers run
 // synchronously, including the initial fire on subscribe — that's
 // fine, it just re-writes the value we just read.
-selectedIn.subscribe ((v) => writeKey(KEY_IN,      v));
-selectedOut.subscribe((v) => writeKey(KEY_OUT,     v));
-channel.subscribe    ((v) => writeKey(KEY_CHANNEL, String(v)));
+selectedIn.subscribe   ((v) => writeKey(KEY_IN,      v));
+selectedOut.subscribe  ((v) => writeKey(KEY_OUT,     v));
+channel.subscribe      ((v) => writeKey(KEY_CHANNEL, String(v)));
+transportKind.subscribe((v) => writeKey(KEY_KIND,    v));
+baud.subscribe         ((v) => writeKey(KEY_BAUD,    String(v)));
 
-// refreshPorts enumerates available MIDI in/out ports from the
-// backend (which wraps rtmidi). Called on app mount and after a
-// successful connect so the dropdowns always reflect what's plugged in.
+// refreshPorts enumerates available MIDI in/out ports + RS-232
+// serial devices from the backend. Called on app mount and after a
+// successful connect so the dropdowns always reflect what's
+// plugged in.
 export async function refreshPorts() {
   try {
     const list = await App.ListPorts();
     inputPorts.set(list.ins ?? []);
     outputPorts.set(list.outs ?? []);
+    serialPortsList.set(list.serial ?? []);
     linkError.set('');
   } catch (e: any) {
     linkError.set(String(e?.message ?? e));
   }
 }
 
+// pickSerial sets both MIDI in/out to a serial port name and flips
+// transportKind to 'serial'. RS-232 is bidirectional on one cable,
+// so picking the device for one direction implies the other. Called
+// from the topbar when the user picks anything in the serial
+// optgroup of either dropdown.
+export function pickSerial(portName: string) {
+  selectedIn.set(portName);
+  selectedOut.set(portName);
+  transportKind.set('serial');
+}
+
+// pickMidi sets one direction to a MIDI port name (the other stays
+// untouched). Flips transportKind back to 'midi' if we'd previously
+// been on serial. Called from the topbar when the user picks
+// anything in the MIDI optgroup.
+export function pickMidi(direction: 'in' | 'out', portName: string) {
+  if (direction === 'in')  selectedIn.set(portName);
+  if (direction === 'out') selectedOut.set(portName);
+  // If switching back from serial, clear the mirrored port name on
+  // the other side — it was a serial path, not a MIDI port.
+  if (get(transportKind) === 'serial') {
+    if (direction === 'in')  selectedOut.set('');
+    if (direction === 'out') selectedIn.set('');
+  }
+  transportKind.set('midi');
+}
+
 // connect opens the transport with the currently-selected ports
-// + channel. Empty port strings let the backend pick the first
+// + channel. Dispatches MIDI vs serial based on transportKind so
+// the topbar's chip-picker UI can stay agnostic of the backend
+// method. Empty MIDI port strings let the backend pick the first
 // available port (substring match).
 export async function connect() {
   phase.set('connecting');
   linkError.set('');
   try {
-    await App.Connect(get(selectedIn), get(selectedOut), get(channel));
+    if (get(transportKind) === 'serial') {
+      await App.ConnectSerial(get(selectedIn), get(baud));
+    } else {
+      await App.Connect(get(selectedIn), get(selectedOut), get(channel));
+    }
     await refreshStatus();
     // Pull the device catalog immediately so the sidebars reflect
     // what's actually on the S950, not the dev-time stubs. Failures
@@ -153,6 +230,12 @@ export async function refreshStatus() {
       if (s.in)  selectedIn.set(s.in);
       if (s.out) selectedOut.set(s.out);
       channel.set(s.channel);
+      if (s.kind === 'serial' || s.kind === 'midi') {
+        transportKind.set(s.kind as TransportKind);
+      }
+      if (s.kind === 'serial' && s.baud) {
+        baud.set(s.baud as SerialBaud);
+      }
     }
   } catch (e: any) {
     linkError.set(String(e?.message ?? e));

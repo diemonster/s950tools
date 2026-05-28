@@ -78,9 +78,11 @@ export namespace main {
 	
 	export class ConnectionStatus {
 	    connected: boolean;
+	    kind?: string;
 	    in?: string;
 	    out?: string;
 	    channel: number;
+	    baud?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConnectionStatus(source);
@@ -89,9 +91,11 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.connected = source["connected"];
+	        this.kind = source["kind"];
 	        this.in = source["in"];
 	        this.out = source["out"];
 	        this.channel = source["channel"];
+	        this.baud = source["baud"];
 	    }
 	}
 	export class ImportInfo {
@@ -144,9 +148,22 @@ export namespace main {
 	        this.name = source["name"];
 	    }
 	}
+	export class SerialPort {
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SerialPort(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	    }
+	}
 	export class PortList {
 	    ins: Port[];
 	    outs: Port[];
+	    serial: SerialPort[];
 	
 	    static createFrom(source: any = {}) {
 	        return new PortList(source);
@@ -156,6 +173,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ins = this.convertValues(source["ins"], Port);
 	        this.outs = this.convertValues(source["outs"], Port);
+	        this.serial = this.convertValues(source["serial"], SerialPort);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -176,6 +194,7 @@ export namespace main {
 		    return a;
 		}
 	}
+	
 	export class SlicingPreflight {
 	    ok: boolean;
 	    errors?: string[];

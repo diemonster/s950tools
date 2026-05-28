@@ -26,19 +26,32 @@ type Port struct {
 	Name string `json:"name"`
 }
 
-// PortList is what ListPorts returns — the topbar shows both columns.
-type PortList struct {
-	Ins  []Port `json:"ins"`
-	Outs []Port `json:"outs"`
+// SerialPort is one OS-level RS-232 device (e.g. /dev/cu.usbserial-*
+// on macOS, COM* on Windows). The same path serves as both in and
+// out for the bidirectional cable.
+type SerialPort struct {
+	Name string `json:"name"`
 }
 
-// ConnectionStatus reports whether we currently hold an open MIDI
-// transport, and which ports it's wired to.
+// PortList is what ListPorts returns — the topbar shows MIDI in/out
+// alongside serial as alternative transports.
+type PortList struct {
+	Ins    []Port       `json:"ins"`
+	Outs   []Port       `json:"outs"`
+	Serial []SerialPort `json:"serial"`
+}
+
+// ConnectionStatus reports whether we currently hold an open
+// transport. Kind is "midi" or "serial" — the frontend gates
+// features like Copy-from-S950 on this (the closed-loop SDS path
+// only works over serial).
 type ConnectionStatus struct {
 	Connected bool   `json:"connected"`
+	Kind      string `json:"kind,omitempty"`
 	In        string `json:"in,omitempty"`
 	Out       string `json:"out,omitempty"`
 	Channel   int    `json:"channel"`
+	Baud      int    `json:"baud,omitempty"`
 }
 
 // ---------- Slicing ----------
