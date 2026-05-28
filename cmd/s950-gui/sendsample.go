@@ -60,6 +60,22 @@ func (a *App) SendSample(slot int, words []uint16, sampleRateHz uint32, params p
 	}
 	defer a.mu.Unlock()
 
+	// Pre-flight responsiveness check. PutSampleOpenLoop's failure
+	// mode for a non-listening device is the worst kind of silent —
+	// 25 KB of SDATA goes onto the wire, no NAKs come back (no
+	// listener can NAK), and our code reports success. Catch it
+	// cheaply: send RCAT and require a reply within 2 s. If the
+	// user has the cable plugged but the controller-select on the
+	// wrong mode, or the device is mid-menu / power-cycling, we
+	// fail fast with a clear message instead of letting them sit
+	// through a no-op upload.
+	if err := d.Ping(2 * time.Second); err != nil {
+		msg := "device is not responding — verify the S950's controller-select " +
+			"(MIDI menu) matches the cable in use and that nothing else has hijacked it"
+		a.emitSendProgress(SendSampleProgress{Phase: "error", Slot: slot, Message: msg})
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+
 	a.emitSendProgress(SendSampleProgress{
 		Phase: "uploading", Slot: slot,
 		Message: fmt.Sprintf("Uploading %d words to slot %d…", len(words), slot),
@@ -113,6 +129,13 @@ func (a *App) SendSample(slot int, words []uint16, sampleRateHz uint32, params p
 }
 
 func (a *App) emitSendProgress(p SendSampleProgress) {
+	// Test mode: when constructed without Wails (ctx nil), skip the
+	// event emit rather than log.Fatal-ing in getEvents. The fake-
+	// transport integration tests can then drive SendSample without
+	// spinning up the full runtime.
+	if a.ctx == nil {
+		return
+	}
 	wruntime.EventsEmit(a.ctx, "sendsample:progress", p)
 }
 

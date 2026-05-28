@@ -90,6 +90,35 @@ function tuneToRate(tune: number): number {
   return Math.pow(2, tune / 12);
 }
 
+// effectivePreviewOffset reconstructs the pitch shift the S950's
+// playback engine would apply for a given trigger key, so host
+// preview can match what the device will actually play. Best-of-
+// both-worlds rule:
+//
+//   • Local samples (source === 'local') OR device samples without
+//     a discovered keygroup mapping → offset = 0. The user hears
+//     the sample at its recorded pitch, tweaked only by tune.
+//     "Listen to what you imported."
+//
+//   • Device samples with a mapping → offset = (mapping.note - 60).
+//     The device shifts by (trigger_note - NominalPitch_as_MIDI) =
+//     (trigger_note - (60 - tune)) = (trigger_note - 60) + tune.
+//     Tune is already added inside previewRegion, so we hand back
+//     just the (trigger_note - 60) half here. "Listen to what the
+//     device will play."
+//
+// Exported so Sample.svelte can hand the right value to
+// previewSample without recomputing the rule at every call site,
+// AND so the unit test can lock the contract in.
+export function effectivePreviewOffset(args: {
+  source: 'device' | 'local';
+  mappingNote?: number; // MIDI note, undefined when no mapping found
+}): number {
+  if (args.source !== 'device') return 0;
+  if (args.mappingNote === undefined) return 0;
+  return args.mappingNote - 60;
+}
+
 function makeFadeInGain(ac: AudioContext, target: number): GainNode {
   const gain = ac.createGain();
   const now = ac.currentTime;
@@ -376,6 +405,16 @@ export function previewRegion(
   loopStartWord = 0,
   loopLengthWord = 0,
   reverse = false,
+  // pitchOffsetSemitones is an extra semitone shift the caller adds
+  // on top of the sample's own tune. Used by the Sample tab to mirror
+  // the device's keygroup-mapping pitch math: when a device-loaded
+  // sample is mapped to (say) key 36, triggering at 36 on the device
+  // pitches it (36 - 60) = -24 semitones from its NominalPitch. Host
+  // preview needs the same offset to sound like what the device will
+  // actually play. Defaults to 0 so all existing call sites (slice
+  // preview, spacebar) keep playing at the recorded pitch + the
+  // sample's tune.
+  pitchOffsetSemitones = 0,
 ): boolean {
   stop();
   const ac = audioContext();
@@ -406,7 +445,7 @@ export function previewRegion(
   const loopStartAbs = startSec + effLoopStartWord / s.rate;
   const loopEndAbs   = startSec + (effLoopStartWord + loopLengthWord) / s.rate;
 
-  const rate    = tuneToRate(s.tune ?? 0);
+  const rate    = tuneToRate((s.tune ?? 0) + pitchOffsetSemitones);
   const gainAmt = loudnessToGain(s.loudness ?? 0);
 
   // Build the per-session gain node now so every source we wire
@@ -526,13 +565,18 @@ export function previewRegion(
 // previewSample plays the active region of a sample (Start..End)
 // respecting its replay mode + reverse flag. Returns false when no
 // host-side audio is available.
-export function previewSample(s: Sample): boolean {
+//
+// pitchOffsetSemitones (default 0) is the extra semitone shift the
+// caller wants on top of the sample's own tune. Sample.svelte uses
+// this to mirror the device's keygroup-mapping pitch math — see
+// the doc on previewRegion's same-named parameter for details.
+export function previewSample(s: Sample, pitchOffsetSemitones = 0): boolean {
   if (!s.pcm) return false;
   const len = Math.max(1, s.end - s.start);
   const loopMode = s.mode;
   // Loop relative to slice start = (Start..LoopLength) since the S950
   // anchors loops at the sample's start point.
-  return previewRegion(s, s.start, len, loopMode, 0, s.loopLength, s.reverse);
+  return previewRegion(s, s.start, len, loopMode, 0, s.loopLength, s.reverse, pitchOffsetSemitones);
 }
 
 // previewSlice plays one slice of a sample (which is itself part of

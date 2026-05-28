@@ -580,6 +580,17 @@ body {
   letter-spacing: 0.06em;
   color: var(--grey-dark);
 }
+/* Inline informational note for params rows. Lower-volume than
+   the actual controls — italicises against the regular field font
+   and mutes the colour so it reads as footnote, not action. Used
+   to surface device-side limitations (e.g. Reverse is front-panel-
+   only for synced samples) without crowding the control surface. */
+.row__hint {
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--grey-medium);
+  line-height: 1.4;
+}
 .field {
   display: inline-flex;
   align-items: center;

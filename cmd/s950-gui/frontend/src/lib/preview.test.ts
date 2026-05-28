@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasHostAudio, buildPingPongLoopBuffer, zohRenderPCM } from './preview';
+import { hasHostAudio, buildPingPongLoopBuffer, zohRenderPCM, effectivePreviewOffset } from './preview';
 import { newLocalSample } from './state/samples';
 
 // Most of preview.ts is Web Audio-bound and isn't worth mocking
@@ -171,5 +171,48 @@ describe('zohRenderPCM', () => {
     const out = new Float32Array(3);
     zohRenderPCM(src, 44100, 22050, out);
     expect(Array.from(out)).toEqual([10 / 32768, 20 / 32768, 30 / 32768]);
+  });
+});
+
+// effectivePreviewOffset is the rule Sample.svelte hands to
+// previewSample so host preview pitch-matches what the device
+// will play. Pure function, three input cases, three expected
+// outputs — locked here so a regression in the math wouldn't
+// silently shift everyone's host preview.
+describe('effectivePreviewOffset — best-of-both-worlds pitch math', () => {
+  it('returns 0 for purely-local samples (recorded pitch)', () => {
+    // Imported audio that's never touched the device — the user
+    // wants to hear it as recorded. Even with a wildly different
+    // mapping note hypothetically supplied, source='local' wins.
+    expect(effectivePreviewOffset({ source: 'local', mappingNote: 36 })).toBe(0);
+    expect(effectivePreviewOffset({ source: 'local' })).toBe(0);
+  });
+
+  it('returns 0 for device samples without a discovered mapping', () => {
+    // No program currently maps this sample → no keygroup-induced
+    // pitch shift would occur on a MIDI trigger anyway → host should
+    // play at recorded pitch. The user can switch to device preview
+    // to see "Will be silent — no mapping" instead.
+    expect(effectivePreviewOffset({ source: 'device' })).toBe(0);
+    expect(effectivePreviewOffset({ source: 'device', mappingNote: undefined })).toBe(0);
+  });
+
+  it('returns (note - 60) for device samples with a mapping below C3', () => {
+    // Kick drum convention: mapped to MIDI 36 (C1). Device shifts
+    // playback by (36 - NominalPitchAsMIDI) semitones. For NP=960
+    // (C3=60), that's -24. Host needs to match: offset = 36 - 60.
+    expect(effectivePreviewOffset({ source: 'device', mappingNote: 36 })).toBe(-24);
+  });
+
+  it('returns (note - 60) for device samples with a mapping above C3', () => {
+    // Treble keygroup at MIDI 72 (C4). Device shifts +12; host
+    // matches.
+    expect(effectivePreviewOffset({ source: 'device', mappingNote: 72 })).toBe(12);
+  });
+
+  it('returns 0 for device samples mapped exactly to C3 (60)', () => {
+    // Trivial case but worth pinning — no offset needed, host's
+    // tune-only behaviour is correct.
+    expect(effectivePreviewOffset({ source: 'device', mappingNote: 60 })).toBe(0);
   });
 });

@@ -61,6 +61,29 @@ func New(t transport.Transport, channel byte) *Device {
 	}
 }
 
+// Ping sends a small request (RCAT — catalog) and waits for any
+// reply within timeout. Used as a pre-flight before long-running
+// operations (sample upload) where a silently-unresponsive device
+// would otherwise show false success: bytes go out, no NAKs come
+// back (no NAK = no listener, but our code can't tell the
+// difference from "all good"), the dialog reports success and the
+// upload never landed.
+//
+// We don't validate the reply contents — any inbound SysEx counts
+// as "device is alive on the wire." A response means the bytes
+// can flow both directions; absence means the device isn't seeing
+// our traffic (wrong controller-select mode, cable issue, etc.).
+func (d *Device) Ping(timeout time.Duration) error {
+	d.T.Drain()
+	if err := d.T.Send(protocol.BuildAkaiRequest(d.Channel, protocol.FuncRCAT, 0)); err != nil {
+		return fmt.Errorf("send ping: %w", err)
+	}
+	if _, err := d.T.RecvSysEx(timeout); err != nil {
+		return fmt.Errorf("no reply within %v: %w", timeout, err)
+	}
+	return nil
+}
+
 // Catalog requests the device's program and sample list.
 func (d *Device) Catalog() ([]protocol.CatalogEntry, error) {
 	d.T.Drain()

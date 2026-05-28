@@ -965,7 +965,21 @@
     if ($previewMode === 'device') {
       void previewWholeViaMidi();
     } else {
-      preview.previewSample(smp);
+      // Best-of-both-worlds host preview:
+      //   • Local samples → recorded pitch (offset 0). The user
+      //     hears what they imported.
+      //   • Device samples with a keygroup mapping → mirror the
+      //     device's pitch shift so host preview sounds like what
+      //     the S950 will play when this program is loaded.
+      //   • Device samples without a mapping → recorded pitch
+      //     (offset 0); no program triggers them anyway.
+      // The pure helper in preview.ts owns the rule so this stays
+      // testable + a single-source-of-truth.
+      const offset = preview.effectivePreviewOffset({
+        source: smp.source,
+        mappingNote: deviceMapping?.note,
+      });
+      preview.previewSample(smp, offset);
     }
   }
   // deviceMapping locates a loaded program / keygroup that
@@ -1876,7 +1890,10 @@
             <div class="card__subtitle">SPRM replay flags</div>
           </div>
           <!-- Mode lives in a flex row instead of the 120-px label grid
-               so all three toggles fit at narrow column widths. -->
+               so all three toggles fit at narrow column widths.
+               Unlike Reverse, Mode IS honored by the device's playback
+               engine on SPRM write (checked at end-of-region per
+               trigger), so no front-panel ENT is required. -->
           <div class="row row--inline">
             <span class="row__label">Mode</span>
             <div class="mode-row">
@@ -1885,16 +1902,39 @@
               <button type="button" class="toggle {smp.mode === 'ping-pong' ? 'on' : ''}" on:click={() => selectedSample.update({ mode: 'ping-pong' })}>Ping-pong</button>
             </div>
           </div>
-          <div class="row">
-            <span class="row__label">Reverse</span>
-            <button
-              type="button"
-              class="toggle {smp.reverse ? 'on' : ''}"
-              title="Host preview applies this immediately. Device-side playback caches the active SPRM at program-load time, so newly-toggled Reverse won't take effect on the S950 until you press ENT on the sample's edit page (front panel)."
-              on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
-              {smp.reverse ? 'On' : 'Off'}
-            </button>
-          </div>
+          {#if smp.source === 'local'}
+            <!-- Reverse is hidden for device samples — toggling the
+                 SPRM byte updates stored memory but doesn't refresh
+                 the device's DMA direction cache, so the toggle
+                 would be misleadingly inert. For local samples it
+                 works end-to-end: host preview reverses immediately
+                 and the SPRM is read fresh on the device's first
+                 selection after Send-to-S950. See
+                 project-sprm-cache-limitation memory. -->
+            <div class="row">
+              <span class="row__label">Reverse</span>
+              <button
+                type="button"
+                class="toggle {smp.reverse ? 'on' : ''}"
+                on:click={() => selectedSample.update({ reverse: !smp.reverse })}>
+                {smp.reverse ? 'On' : 'Off'}
+              </button>
+            </div>
+          {:else}
+            <!-- Device-sample-only footnote. Stays low-key (italic,
+                 muted) since it's informational, not actionable.
+                 Names only the operations we genuinely can't do
+                 from the GUI: timestretch (no host equivalent yet),
+                 reverse (device-cache limitation). Resample is
+                 omitted on purpose — the Rate dropdown above already
+                 handles it via re-upload. -->
+            <div class="row__hint">
+              <em>Reverse + timestretch are front-panel-only on the S950
+                for samples currently on the device. Resample is
+                available above — it transforms host audio and re-
+                uploads.</em>
+            </div>
+          {/if}
           <div class="row">
             <span class="row__label">Vel x-fade</span>
             <button type="button" class="toggle {smp.velXfade ? 'on' : ''}" on:click={() => selectedSample.update({ velXfade: !smp.velXfade })}>
