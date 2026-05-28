@@ -7,8 +7,29 @@
 // preview while audio is playing stops the previous source first —
 // matches the typical "audition" pattern.
 
+import { writable } from 'svelte/store';
 import type { Sample } from './state/samples';
 import type { Slice } from './state/slicing';
+
+// playhead is a public store the Sample-tab waveform subscribes to
+// for the in-flight playback cursor. While playback is live it
+// updates ~60Hz with the current source-buffer word index; on stop
+// it flips back to inactive. Components that don't need the cursor
+// can ignore it — store is cheap (single object set per rAF tick).
+export type Playhead = {
+  active: boolean;
+  // Sample slot the cursor belongs to. Lets the Sample tab ignore
+  // playhead updates that aren't for the row currently on screen.
+  sampleSlot: number;
+  // Current word index in the source PCM. NOT in slice-local coords
+  // — the waveform's marker math is also in source-word space.
+  currentWord: number;
+};
+export const playhead = writable<Playhead>({
+  active: false,
+  sampleSlot: -1,
+  currentWord: 0,
+});
 
 // AudioContext is lazily-created — most browsers gate it on user
 // gesture, and we want preview to "just work" when the user clicks ▶
@@ -25,6 +46,25 @@ let currentGain: GainNode | null = null;
 // Tracked separately so stop() can tear all of them down at once
 // without losing the meaning of "is something playing" via `current`.
 const extras: AudioBufferSourceNode[] = [];
+
+// playbackSession is the snapshot previewRegion records when it
+// starts a source. The rAF tracker reads it to map elapsed
+// wall-clock time → current word index, accounting for the loop
+// mode and direction. Cleared in stop().
+type PlaybackSession = {
+  sampleSlot: number;
+  startWord: number;
+  lengthWords: number;
+  loopMode: 'one-shot' | 'loop' | 'ping-pong';
+  loopStartWord: number;
+  loopLengthWord: number;
+  reverse: boolean;
+  rate: number;            // playbackRate (tune-derived)
+  sampleRateHz: number;    // source AudioBuffer sample rate
+  startedAt: number;       // AudioContext.currentTime at source.start
+};
+let session: PlaybackSession | null = null;
+let playheadRaf: number | null = null;
 
 // Sub-millisecond fade applied at play-START and play-STOP only.
 // Suppresses the click you get when jumping from silence to the
@@ -166,6 +206,7 @@ export function stop() {
   current = null;
   currentGain = null;
   extras.length = 0;
+  stopPlayheadTracker();
 }
 
 // isPlaying lets the UI toggle preview on/off with one shortcut:
@@ -173,6 +214,96 @@ export function stop() {
 // stack a second source on top.
 export function isPlaying(): boolean {
   return current !== null;
+}
+
+// currentWordFor maps elapsed wall-clock time to a position in the
+// source PCM, honouring the session's loop mode + direction. The
+// playhead UI cursor reads this every animation frame; accuracy
+// matters most at loop boundaries (a slow tick at the seam looks
+// like the cursor "snags"). Returned word is clamped to the
+// playback range — callers can render it directly.
+function currentWordFor(s: PlaybackSession, elapsedSec: number): number {
+  const wordsAdvanced = elapsedSec * s.rate * s.sampleRateHz;
+
+  if (s.reverse) {
+    // Reverse playback synthesises a reversed buffer of the play
+    // range and plays it forward — so in source-word space, the
+    // position decreases from end as time advances. Loop modes
+    // with reverse are an unusual combo on the device; we just
+    // clamp at startWord rather than try to oscillate.
+    const endWord = s.startWord + s.lengthWords;
+    return Math.max(s.startWord, endWord - wordsAdvanced);
+  }
+
+  switch (s.loopMode) {
+    case 'one-shot': {
+      const pos = s.startWord + wordsAdvanced;
+      return Math.min(s.startWord + s.lengthWords, pos);
+    }
+    case 'loop': {
+      // Native Web Audio loop: source plays from startWord, then
+      // wraps to loopStart when it crosses loopEnd. Mirror that
+      // here so the cursor matches what the user hears.
+      if (s.loopLengthWord <= 0) {
+        return Math.min(s.startWord + s.lengthWords, s.startWord + wordsAdvanced);
+      }
+      const loopStart = s.startWord + s.loopStartWord;
+      const loopEnd = loopStart + s.loopLengthWord;
+      const pos = s.startWord + wordsAdvanced;
+      if (pos <= loopEnd) return pos;
+      const overflow = (pos - loopEnd) % s.loopLengthWord;
+      return loopStart + overflow;
+    }
+    case 'ping-pong': {
+      // previewRegion's ping-pong is pre-roll (startWord → loopEnd)
+      // then a stitched [reverse(loop), forward(loop)] buffer on
+      // loop. The visual position oscillates inside the loop region
+      // after the pre-roll: triangle wave with period 2*loopLength.
+      const loopStart = s.startWord + s.loopStartWord;
+      const loopEnd = loopStart + s.loopLengthWord;
+      const preRollWords = loopEnd - s.startWord;
+      if (s.loopLengthWord <= 0 || wordsAdvanced <= preRollWords) {
+        return Math.min(loopEnd, s.startWord + wordsAdvanced);
+      }
+      const inLoop = wordsAdvanced - preRollWords;
+      const period = 2 * s.loopLengthWord;
+      const phase = inLoop % period;
+      if (phase < s.loopLengthWord) {
+        // Reverse half: loopEnd → loopStart
+        return loopEnd - phase;
+      }
+      // Forward half: loopStart → loopEnd
+      return loopStart + (phase - s.loopLengthWord);
+    }
+  }
+}
+
+// startPlayheadTracker records the new session and kicks off the
+// rAF loop that drives the `playhead` store. Replaces any prior
+// session — only one preview can be in flight at a time so the
+// loop is single-shot.
+function startPlayheadTracker(s: PlaybackSession) {
+  session = s;
+  if (playheadRaf !== null) cancelAnimationFrame(playheadRaf);
+  const tick = () => {
+    if (!session) return;
+    const elapsed = audioContext().currentTime - session.startedAt;
+    const word = currentWordFor(session, Math.max(0, elapsed));
+    playhead.set({
+      active: true,
+      sampleSlot: session.sampleSlot,
+      currentWord: word,
+    });
+    playheadRaf = requestAnimationFrame(tick);
+  };
+  playheadRaf = requestAnimationFrame(tick);
+}
+
+function stopPlayheadTracker() {
+  if (playheadRaf !== null) cancelAnimationFrame(playheadRaf);
+  playheadRaf = null;
+  session = null;
+  playhead.set({ active: false, sampleSlot: -1, currentWord: 0 });
 }
 
 // previewRegion plays [startWord..startWord+lengthWords] of the
@@ -271,6 +402,15 @@ export function previewRegion(
     extras.push(preRoll);
     current = loopSrc;
     currentGain = gain;
+    startPlayheadTracker({
+      sampleSlot: s.slot,
+      startWord, lengthWords, loopMode,
+      loopStartWord, loopLengthWord,
+      reverse,
+      rate,
+      sampleRateHz: s.rate,
+      startedAt: ac.currentTime,
+    });
     return true;
   }
 
@@ -305,12 +445,25 @@ export function previewRegion(
 
   current = src;
   currentGain = gain;
+  startPlayheadTracker({
+    sampleSlot: s.slot,
+    startWord, lengthWords, loopMode,
+    loopStartWord, loopLengthWord,
+    reverse,
+    rate,
+    sampleRateHz: s.rate,
+    startedAt: ac.currentTime,
+  });
   // Auto-clear after the play window so subsequent stop() is a no-op.
   if (loopMode === 'one-shot') {
     src.onended = () => {
       if (current === src) { current = null; currentGain = null; }
       try { src.disconnect(); } catch {}
       try { gain.disconnect(); } catch {}
+      // The rAF loop would otherwise keep ticking until the next
+      // user action; clear the playhead at the natural end of a
+      // one-shot too.
+      stopPlayheadTracker();
     };
   }
   return true;

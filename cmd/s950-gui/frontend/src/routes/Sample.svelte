@@ -45,6 +45,7 @@
   })();
   import { persistSamplesToCache, wordsToPcm } from '../lib/state/waveformcache';
   import * as preview from '../lib/preview';
+  import { playhead } from '../lib/preview';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
@@ -631,6 +632,14 @@
   $: pctEnd      = pct(smp.end);
   $: pctLoopStart = pct(smp.loopStart);
   $: pctLoopWidth = (smp.loopLength / visibleN) * 100;
+
+  // Playhead position (visible-% space). The store carries a slot
+  // id so the cursor stays anchored to its origin sample even if
+  // the user clicks to a different row mid-playback — null when
+  // playback isn't live or the active sample isn't on screen.
+  $: playheadPct = $playhead.active && $playhead.sampleSlot === smp.slot
+    ? pct($playhead.currentWord)
+    : null;
 
   $: durationSec = smp.length / smp.rate;
 
@@ -1347,6 +1356,14 @@
             {/each}
           {/if}
 
+          <!-- Playback playhead. Only renders while the preview
+               source is actually running for THIS sample row (the
+               store tracks slot identity), and clips off-screen
+               via the overlay's overflow:hidden when zoom puts
+               the position outside the visible window. -->
+          {#if playheadPct !== null}
+            <div class="waveform__playhead" style="left: {playheadPct}%;"></div>
+          {/if}
           <!-- Hover cursor. In slicing mode shows where the next
                click would drop a slice; in default mode it's the
                zoom anchor + word-position readout. Hidden when the
@@ -2382,6 +2399,22 @@
 
   /* Cursor hint for Manual mode — click to drop a new slice. */
   .waveform--manual { cursor: crosshair; }
+
+  /* Playback playhead — vertical line driven by the preview rAF
+     tracker; rendered solid (vs the dashed hover cursor) and in the
+     primary accent colour so it reads as "live audio" at a glance.
+     z-index sits above the inactive overlays + markers but below
+     any modal so a Copy-from-S950 prompt still covers it. */
+  .waveform__playhead {
+    position: absolute;
+    top: 0;
+    bottom: 18px;
+    width: 2px;
+    pointer-events: none;
+    z-index: 2;
+    background: var(--rb-yellow);
+    box-shadow: 0 0 6px rgba(255, 222, 0, 0.55);
+  }
 
   /* Hover playhead — tracks the mouse over the waveform when slicing
      is active. Wheel-zoom anchors at this position; the badge shows
