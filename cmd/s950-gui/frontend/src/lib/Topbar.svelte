@@ -11,6 +11,9 @@
     pickSerial, pickMidi,
   } from './state/connection';
   import { memoryUsage, totalWords, expansionEnabled } from './state/memory';
+  import {
+    refreshState, refreshAllFromDevice, cancelRefresh, resetRefresh,
+  } from './state/refresh';
   import { theme, toggleTheme } from './state/theme';
 
   // Picker option values are prefixed so a single <select> can hold
@@ -39,6 +42,29 @@
     if (raw.startsWith(SERIAL)) pickSerial(raw.slice(SERIAL.length));
     else pickMidi('out', raw.startsWith(MIDI) ? raw.slice(MIDI.length) : '');
   }
+
+  // Refresh modal is gated on transport === 'serial' (the chip is
+  // hidden on MIDI for the same reason — full-state pull is
+  // multi-minute on MIDI's line rate and we don't want users to
+  // discover that the hard way). The modal stays open through the
+  // 'done' / 'error' terminals so the user can read the outcome
+  // before dismissing. Cancel is best-effort: the in-flight Wails
+  // call completes before the loop checks the flag.
+  let refreshModalOpen = false;
+  function openRefreshModal() { refreshModalOpen = true; }
+  function closeRefreshModal() {
+    refreshModalOpen = false;
+    resetRefresh();
+  }
+  async function startRefresh() {
+    await refreshAllFromDevice();
+    // Modal stays open on 'done' / 'error' so the user reads the
+    // outcome — closeRefreshModal() resets the store on dismiss.
+  }
+  $: refreshRunning = $refreshState.phase === 'catalog'
+                   || $refreshState.phase === 'samples'
+                   || $refreshState.phase === 'programs'
+                   || $refreshState.phase === 'audio';
 
   // Short K/M number formatter for the memory chip. 412000 → "412K",
   // 1536000 → "1.5M". Keeps the chip readable at narrow widths.
@@ -158,6 +184,19 @@
         {/if}
       </select>
     </label>
+  {:else if $phase === 'connected'}
+    <!-- On serial the MIDI-out chip is gone; reuse that slot for a
+         compact Refresh button. Only enabled when actually connected
+         — refreshing offline would be a no-op + a confusing error
+         modal. Hidden on MIDI because a full pull is multi-minute
+         on MIDI's 3125 B/s line rate. -->
+    <button
+      type="button"
+      class="chip chip--btn"
+      on:click={openRefreshModal}
+      title="Re-pull catalog, sample params, and all programs from the S950">
+      ↻ Refresh
+    </button>
   {/if}
   {#if $transportKind === 'serial'}
     <label class="chip chip--select" title="RS-232 baud rate (must match S950's overall-settings page)">
@@ -235,6 +274,75 @@
     <span class="chip accent chip--slot">{slotChip}</span>
   {/if}
 </header>
+
+<!-- Refresh modal. Four phases: idle (start CTA), running (progress
+     bar + cancel), done (✓ summary + close), error (message + close).
+     Lives in the Topbar component so it's available on every page,
+     since the trigger chip is in the topbar too. -->
+{#if refreshModalOpen}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">
+          {#if $refreshState.phase === 'done'}Refresh complete
+          {:else if $refreshState.phase === 'error'}Refresh failed
+          {:else if refreshRunning}Refreshing from S950
+          {:else}Refresh from S950
+          {/if}
+        </h2>
+        <div class="modal__route">full system state · all programs + sample params</div>
+      </header>
+      <div class="modal__body">
+        {#if $refreshState.phase === 'idle'}
+          <div class="modal__step">
+            Pulls the device catalog, every program, every sample's SPRM
+            <strong>and</strong> any sample audio that's not already cached
+            on disk. Worst case ~10 min for a fully-loaded EXM005; subsequent
+            refreshes skip cached audio and finish in seconds.
+          </div>
+          <div class="modal__hint">
+            Use this when the on-device state has drifted from what the app
+            shows (e.g. you edited programs or recorded samples on the front
+            panel).
+          </div>
+        {:else if refreshRunning}
+          <div class="modal__step">{$refreshState.message}</div>
+          <div class="progress">
+            <div class="progress__bar" style="width: {$refreshState.progress}%;"></div>
+            <div class="progress__label">
+              {Math.floor($refreshState.progress)}%{#if $refreshState.subTotal > 0} · {$refreshState.subCurrent}/{$refreshState.subTotal}{/if}
+            </div>
+          </div>
+          <div class="modal__hint">
+            Don't close this window. Cancel stops at the next program boundary —
+            in-flight requests always complete.
+          </div>
+        {:else if $refreshState.phase === 'done'}
+          <div class="modal__step">✓ {$refreshState.message}</div>
+          <div class="progress">
+            <div class="progress__bar" style="width: 100%;"></div>
+            <div class="progress__label">100%</div>
+          </div>
+        {:else if $refreshState.phase === 'error'}
+          <div class="modal__step modal__step--error">
+            {$refreshState.error ?? 'Unknown error'}
+          </div>
+        {/if}
+      </div>
+      <footer class="modal__foot">
+        {#if $refreshState.phase === 'idle'}
+          <button type="button" class="btn" on:click={closeRefreshModal}>Cancel</button>
+          <button type="button" class="btn btn--primary" on:click={startRefresh}>Start refresh</button>
+        {:else if refreshRunning}
+          <span class="modal__waitnote">do not close · refresh in progress</span>
+          <button type="button" class="btn" on:click={cancelRefresh}>Cancel</button>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={closeRefreshModal}>Close</button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}
 
 <style>
   /* Native <select> wrapped in a chip — keeps the topbar visually
