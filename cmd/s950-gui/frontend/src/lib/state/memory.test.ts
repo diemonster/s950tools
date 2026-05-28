@@ -121,6 +121,23 @@ describe('scanMemory', () => {
     await promise;
     expect(get(memoryUsage).scanning).toBe(false);
   });
+
+  it('preserves host audio (pcm/words12) when refreshing SPRM', async () => {
+    // Regression: Phase 1A attaches per-slice audio to the device
+    // rows after Apply succeeds. scanMemory used to overwrite the
+    // entire sample with a fresh converter result, blowing the
+    // attached audio away and forcing the waveform back to the
+    // synthetic squiggle. The merge fix keeps host-side fields
+    // intact while still refreshing SPRM metadata.
+    const pcm     = [0.1, 0.2, 0.3];
+    const words12 = [100, 200, 300];
+    samples.set([{ ...deviceSample(0, 10_000), pcm, words12 }]);
+    sprmResponses.set(0, { TotalWords: 10_000 });
+    await scanMemory();
+    const after = get(samples)[0];
+    expect(after.pcm).toEqual(pcm);
+    expect(after.words12).toEqual(words12);
+  });
 });
 
 describe('clearMemory', () => {

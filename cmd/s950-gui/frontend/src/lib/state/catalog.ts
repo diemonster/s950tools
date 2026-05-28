@@ -151,7 +151,12 @@ export async function ensureSampleLoaded(slot: number, force = false): Promise<v
   try {
     const params = await App.GetSampleParams(slot);
     const full = sampleParamsToSample(params, slot);
-    samples.update((list) => list.map((s) => (s.slot === slot ? full : s)));
+    // Merge rather than replace so host-side audio attached via
+    // import / post-Apply capture survives a lazy SPRM fetch. See
+    // memory.ts scanMemory for the same pattern + rationale.
+    samples.update((list) => list.map((s) =>
+      s.slot === slot ? { ...full, pcm: s.pcm, words12: s.words12 } : s,
+    ));
     loadedSamples.add(slot);
     // Same logic as ensureProgramLoaded: a forced Get is the moment
     // to re-scan, in case the user changed device state outside the

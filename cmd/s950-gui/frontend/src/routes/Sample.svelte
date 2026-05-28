@@ -21,9 +21,12 @@
     MAX_SLICES,
     commitSlices,
     clearSlicingForSlots,
+    captureSliceAudio,
+    attachAudioToSamples,
     type SliceMode,
     type SliceLoopMode,
     type Division,
+    type CapturedAudio,
   } from '../lib/state/slicing';
   import { ensureSampleLoaded, refreshCatalog } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
@@ -314,6 +317,37 @@
       if (p.phase === 'error') { slicePhase = 'error'; sliceError = p.message; }
     });
 
+    // Capture host audio per destination slot BEFORE the wire round
+    // trip. refreshCatalog will replace the local rows with fresh
+    // device-sourced ones that have no PCM/words12 — we re-attach
+    // the captured audio after the refresh so the waveform display
+    // can render the real signal instead of the synthetic squiggle.
+    // See slicing.ts captureSliceAudio docstring for details.
+    const sourceSlot = get(selectedSampleSlot);
+    const destSlots: number[] = Array.isArray(slicePreflight?.sampleSlots)
+      ? slicePreflight.sampleSlots
+      : [];
+    let capturedAudio: Map<number, CapturedAudio> = new Map();
+    if (hasCommitted) {
+      // Committed children already hold per-slice audio (commitSlices
+      // extracted it earlier); zip directly with destSlots rather
+      // than re-slicing a concat'd buffer.
+      committedChildren.forEach((c, i) => {
+        if (i < destSlots.length) {
+          capturedAudio.set(destSlots[i], {
+            pcm: c.pcm,
+            words12: c.words12 ?? [],
+          });
+        }
+      });
+    } else {
+      capturedAudio = captureSliceAudio(
+        { words12: smp.words12, pcm: smp.pcm },
+        $slicing.slices.map((sl) => ({ start: sl.start, length: sl.length })),
+        destSlots,
+      );
+    }
+
     try {
       await (App as any).ApplySlicing(buildSlicingRequest());
       // On success, any committed children that fed this upload are
@@ -332,10 +366,6 @@
       // child's waveform, complete with start/length values that
       // overflow the child's tiny length. The destination slots
       // come from preflight's projected allocation.
-      const sourceSlot = get(selectedSampleSlot);
-      const destSlots: number[] = Array.isArray(slicePreflight.sampleSlots)
-        ? slicePreflight.sampleSlots
-        : [];
       clearSlicingForSlots([sourceSlot, ...destSlots]);
       // Refresh the catalog so the newly-uploaded slice samples +
       // their auto-generated program appear in the sidebars/lists
@@ -348,7 +378,13 @@
       // doesn't block on either.
       void (async () => {
         try { await refreshCatalog(); } catch {}
-        try { await scanMemory();    } catch {}
+        // Restore host audio on the freshly-loaded device rows so
+        // waveform display + future slice-loop placement gets the
+        // real signal instead of a synthetic envelope.
+        if (capturedAudio.size > 0) {
+          samples.update((xs) => attachAudioToSamples(xs, capturedAudio));
+        }
+        try { await scanMemory(); } catch {}
       })();
     } catch (e: any) {
       sliceError = String(e?.message ?? e);

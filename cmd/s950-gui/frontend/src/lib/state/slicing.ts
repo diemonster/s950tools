@@ -303,3 +303,61 @@ export function removeSliceAt(idx: number) {
     selectedIndex: Math.min(idx, next.length - 1),
   });
 }
+
+// ---------- Host audio capture across Apply ----------
+//
+// After ApplySlicing succeeds, refreshCatalog repopulates the
+// samples store with fresh device-sourced rows that have no host
+// PCM/words12 — so the waveform display falls back to the synthetic
+// squiggle even though the host held the real audio milliseconds
+// earlier. Phase 1A keeps that audio alive in memory across the
+// Apply → refreshCatalog transition: capture per-slice subarrays
+// BEFORE the wire round trip, then re-attach to the matching device
+// slots AFTER refreshCatalog lands. Pure functions so the round-trip
+// is testable without mocking the Wails bridge.
+
+export type CapturedAudio = { pcm?: number[]; words12: number[] };
+
+// Slice the parent's host audio into per-destination-slot chunks.
+// Each slice spec contributes one entry, keyed by the slot it will
+// land on (the device picks slots; we pass through what
+// InspectSlicing reported in `sampleSlots`). Slices past the source's
+// tail are clamped — we'd rather return a short capture than throw
+// during a successful upload.
+export function captureSliceAudio(
+  source: { words12?: number[]; pcm?: number[] },
+  slices: ReadonlyArray<{ start: number; length: number }>,
+  destSlots: ReadonlyArray<number>,
+): Map<number, CapturedAudio> {
+  const out = new Map<number, CapturedAudio>();
+  const w = source.words12 ?? [];
+  const p = source.pcm;
+  const n = Math.min(slices.length, destSlots.length);
+  for (let i = 0; i < n; i++) {
+    const sl = slices[i];
+    const start = Math.max(0, sl.start);
+    const end = Math.min(w.length, start + Math.max(0, sl.length));
+    out.set(destSlots[i], {
+      words12: w.slice(start, end),
+      pcm: p ? p.slice(start, end) : undefined,
+    });
+  }
+  return out;
+}
+
+// Walk a samples array and overlay any captured audio whose slot
+// matches. Returns a new array (does not mutate); rows without a
+// match in the capture map are passed through untouched. Used after
+// refreshCatalog to restore host audio to the freshly-loaded device
+// rows.
+export function attachAudioToSamples(
+  list: ReadonlyArray<Sample>,
+  audioBySlot: ReadonlyMap<number, CapturedAudio>,
+): Sample[] {
+  if (audioBySlot.size === 0) return list.slice();
+  return list.map((s) => {
+    const cap = audioBySlot.get(s.slot);
+    if (!cap) return s;
+    return { ...s, pcm: cap.pcm, words12: cap.words12 };
+  });
+}

@@ -9,6 +9,8 @@ import {
   hasCommittedChildren,
   updateSlicing,
   slicing,
+  captureSliceAudio,
+  attachAudioToSamples,
 } from './slicing';
 import { samples, selectedSampleSlot, newLocalSample, type Sample } from './samples';
 
@@ -231,5 +233,151 @@ describe('hasCommittedChildren', () => {
     expect(get(hasCommittedChildren)).toBe(false);
     selectedSampleSlot.set(0); // back to 'A' — locked again
     expect(get(hasCommittedChildren)).toBe(true);
+  });
+});
+
+describe('captureSliceAudio', () => {
+  // Synthetic parent: 100 words of monotonically increasing values so
+  // every slice's subarray is trivially verifiable (start..end maps
+  // directly to value range).
+  const SOURCE = {
+    words12: Array.from({ length: 100 }, (_, i) => i),
+    pcm: Array.from({ length: 100 }, (_, i) => i / 100),
+  };
+
+  it('returns a slot-keyed map of word + pcm subarrays', () => {
+    const map = captureSliceAudio(
+      SOURCE,
+      [{ start: 0, length: 40 }, { start: 40, length: 60 }],
+      [5, 7],
+    );
+    expect(map.size).toBe(2);
+    expect(map.get(5)?.words12).toEqual(SOURCE.words12.slice(0, 40));
+    expect(map.get(5)?.pcm).toEqual(SOURCE.pcm.slice(0, 40));
+    expect(map.get(7)?.words12).toEqual(SOURCE.words12.slice(40, 100));
+    expect(map.get(7)?.pcm).toEqual(SOURCE.pcm.slice(40, 100));
+  });
+
+  it('omits pcm when the source has only words12', () => {
+    const map = captureSliceAudio(
+      { words12: SOURCE.words12 },
+      [{ start: 0, length: 20 }],
+      [0],
+    );
+    expect(map.get(0)?.pcm).toBeUndefined();
+    expect(map.get(0)?.words12).toEqual(SOURCE.words12.slice(0, 20));
+  });
+
+  it('clamps slice ranges that overshoot the source length', () => {
+    const map = captureSliceAudio(
+      SOURCE,
+      [{ start: 90, length: 50 }], // 90..140 — past the 100-word tail
+      [3],
+    );
+    expect(map.get(3)?.words12).toHaveLength(10); // 90..100
+    expect(map.get(3)?.words12).toEqual(SOURCE.words12.slice(90, 100));
+  });
+
+  it('truncates to the shorter of slices vs destSlots', () => {
+    const map = captureSliceAudio(
+      SOURCE,
+      [
+        { start: 0,  length: 25 },
+        { start: 25, length: 25 },
+        { start: 50, length: 50 },
+      ],
+      [1, 2], // only two slots for three slices
+    );
+    expect(map.size).toBe(2);
+    expect(map.has(1)).toBe(true);
+    expect(map.has(2)).toBe(true);
+  });
+
+  it('returns an empty map when source is empty', () => {
+    const map = captureSliceAudio(
+      { words12: [] },
+      [{ start: 0, length: 100 }],
+      [0],
+    );
+    expect(map.get(0)?.words12).toEqual([]);
+  });
+
+  it('handles negative start/length by clamping (defensive, not a use case)', () => {
+    const map = captureSliceAudio(
+      SOURCE,
+      [{ start: -10, length: -5 }],
+      [0],
+    );
+    expect(map.get(0)?.words12).toEqual([]);
+  });
+});
+
+describe('attachAudioToSamples', () => {
+  it('overlays audio onto matching slots and leaves others untouched', () => {
+    const list: Sample[] = [
+      newLocalSample(0, 'A', 26040, 100),
+      newLocalSample(1, 'B', 26040, 50),
+      newLocalSample(2, 'C', 26040, 75),
+    ];
+    const map = new Map([
+      [0, { pcm: [0.1, 0.2], words12: [1, 2] }],
+      [2, { pcm: [0.3, 0.4], words12: [3, 4] }],
+    ]);
+    const next = attachAudioToSamples(list, map);
+
+    expect(next[0].words12).toEqual([1, 2]);
+    expect(next[0].pcm).toEqual([0.1, 0.2]);
+    expect(next[1].words12).toBeUndefined();   // unchanged
+    expect(next[2].words12).toEqual([3, 4]);
+  });
+
+  it('does not mutate the input list', () => {
+    const list: Sample[] = [newLocalSample(0, 'A', 26040, 100)];
+    const map = new Map([[0, { pcm: [0.5], words12: [42] }]]);
+    const next = attachAudioToSamples(list, map);
+    expect(next).not.toBe(list);
+    expect(list[0].pcm).toBeUndefined(); // original untouched
+  });
+
+  it('returns a shallow copy when the audio map is empty', () => {
+    const list: Sample[] = [newLocalSample(0, 'A', 26040, 100)];
+    const next = attachAudioToSamples(list, new Map());
+    expect(next).toEqual(list);
+    expect(next).not.toBe(list);
+  });
+
+  it('round-trips captureSliceAudio → attachAudioToSamples', () => {
+    // The end-to-end Phase 1A invariant: capture a parent's audio,
+    // apply (simulated), refreshCatalog drops in device rows at the
+    // same slots, attach restores the audio.
+    const parentPcm     = Array.from({ length: 200 }, (_, i) => i * 0.01);
+    const parentWords12 = Array.from({ length: 200 }, (_, i) => i);
+    const slices = [
+      { start: 0,  length: 100 },
+      { start: 100, length: 100 },
+    ];
+    const destSlots = [0, 1];
+
+    const captured = captureSliceAudio(
+      { pcm: parentPcm, words12: parentWords12 },
+      slices,
+      destSlots,
+    );
+
+    // Simulated post-refreshCatalog state: fresh device rows, no audio.
+    const fresh: Sample[] = destSlots.map((slot, i) => ({
+      ...newLocalSample(slot, `CHILD_${i}`, 26040, slices[i].length),
+      source: 'device',
+    }));
+    const reattached = attachAudioToSamples(fresh, captured);
+
+    // Both children carry the right subarrays of the parent.
+    expect(reattached[0].words12).toEqual(parentWords12.slice(0, 100));
+    expect(reattached[0].pcm).toEqual(parentPcm.slice(0, 100));
+    expect(reattached[1].words12).toEqual(parentWords12.slice(100, 200));
+    expect(reattached[1].pcm).toEqual(parentPcm.slice(100, 200));
+    // source flag is preserved (we only patch audio fields).
+    expect(reattached[0].source).toBe('device');
+    expect(reattached[1].source).toBe('device');
   });
 });

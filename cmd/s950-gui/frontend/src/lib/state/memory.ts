@@ -84,7 +84,15 @@ export async function scanMemory(): Promise<void> {
       try {
         const params = await App.GetSampleParams(s.slot);
         const full = sampleParamsToSample(params, s.slot);
-        samples.update((xs) => xs.map((x) => (x.slot === s.slot ? full : x)));
+        // Merge instead of replace: scanMemory only refreshes SPRM
+        // metadata (name, rate, length, loop, …) — it has no reason
+        // to invalidate host-side audio (pcm/words12) that another
+        // path attached, e.g. the post-Apply capture in
+        // continueApplySlicing. Replacing would force the waveform
+        // back to the synthetic squiggle the moment scanMemory ran.
+        samples.update((xs) => xs.map((x) =>
+          x.slot === s.slot ? { ...full, pcm: x.pcm, words12: x.words12 } : x,
+        ));
       } catch {
         // Skip individual failures — one bad slot shouldn't abort
         // the whole scan. The corresponding sample stays at whatever
