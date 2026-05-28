@@ -5,7 +5,9 @@
 
 import { writable, get } from 'svelte/store';
 import * as App from '../../../wailsjs/go/main/App';
-import { refreshCatalog } from './catalog';
+import { refreshCatalog, ensureProgramLoaded } from './catalog';
+import { scanMemory, clearMemory } from './memory';
+import { selectedSlot as selectedProgramSlot } from './programs';
 
 export type Port = { name: string };
 export type Status = { connected: boolean; in?: string; out?: string; channel: number };
@@ -93,6 +95,20 @@ export async function connect() {
       } catch (e: any) {
         linkError.set('Catalog fetch failed: ' + String(e?.message ?? e));
       }
+      // Memory scan kicks off in the background — Connect returns
+      // as soon as the catalog lands so the user can start clicking
+      // around; the topbar memory chip flips to "Scanning…" until
+      // the per-sample SPRM fetches complete.
+      void scanMemory();
+      // Eagerly load the currently-selected program's full PRGM
+      // payload too. Samples are covered by scanMemory above; the
+      // program-tab auto-loader (selectedSlot.subscribe in
+      // catalog.ts) only fires on store *changes*, so a fresh
+      // Connect where the slot was already 0 wouldn't otherwise
+      // pull the keygroups until the user manually clicked Get.
+      // Other programs stay lazy — loaded when the user navigates
+      // to them (cheap on selection change).
+      void ensureProgramLoaded(get(selectedProgramSlot));
     }
   } catch (e: any) {
     phase.set('error');
@@ -109,6 +125,10 @@ export async function disconnect() {
   }
   phase.set('disconnected');
   status.set({ connected: false, channel: 0 });
+  // Clear the memory chip so it doesn't show stale numbers from the
+  // previous session after the user disconnects + reconnects to a
+  // different device.
+  clearMemory();
 }
 
 // refreshStatus asks the backend whether the transport is still

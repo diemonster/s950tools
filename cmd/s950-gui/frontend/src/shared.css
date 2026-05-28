@@ -207,17 +207,39 @@ body {
    the tight media query so the chip stays a fixed count and never
    gets clipped. The count itself (the bold number) always renders. */
 .chip__noun { opacity: 0.85; }
+/* EXM005 expansion toggle — sits next to the memory chip when
+   connected. Outlined by default (off); filled cyan when on so the
+   "memory ceiling is the bigger one" cue is visually distinct from
+   the rb-yellow .on styling of other toggle chips. */
+.chip--exm {
+  cursor: pointer;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 4px 7px;
+  color: var(--grey-dark);
+}
+.chip--exm:hover { background: var(--grey-light); }
+.chip--exm-on {
+  background: var(--rb-cyan);
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.chip--exm-on:hover { background: var(--rb-cyan); opacity: 0.85; }
 
-/* Tighter modes layered in two steps. The default Wails window is
+/* Tighter modes layered in three steps. The default Wails window is
    1440px wide, which is already cramped once port names are picked
-   and the status + slot chips are visible — so we hide the chip
-   labels + nouns first at 1440. Below 1280, fall through to the
-   compact font + padding mode.
-   Splitting these means at the default width the chips stay legible
-   and the slot count never clips off the right edge. */
+   and the status + slot chips are visible. The two chip __noun
+   suffixes (memory's "/ 1.5M words" and the slot chip's "samples")
+   are the first to drop — at <=1700 — because that's where the
+   topbar starts clipping the trailing slot chip on a default-sized
+   Wails window with both MIDI ports picked. Below 1440 the
+   chip__label prefixes ("MIDI in", "Ch", …) drop too; below 1280
+   the chips compact their font + padding entirely. */
+@media (max-width: 1700px) {
+  .chip__noun { display: none; }
+}
 @media (max-width: 1440px) {
   .chip__label { display: none; }
-  .chip__noun { display: none; }
 }
 @media (max-width: 1280px) {
   .topbar { gap: 8px; padding: 0 10px; }
@@ -558,6 +580,50 @@ body {
   color: inherit;
   width: 100%;
   outline: none;
+}
+
+/* Native <select> wrapped inside .field so it picks up the same chip
+   border/padding as the rest of the row, while staying accessible
+   (keyboard + screen reader) and matching the OS dropdown affordance.
+   The select is stretched over the whole field with opacity:0 so
+   every pixel of the chip opens the picker — on macOS WebKit a click
+   on a wrapping <span>/<label> only focuses the select, it doesn't
+   trigger the dropdown. .field__value carries the visible label
+   behind the transparent select. ▾ chevron drawn via ::after. */
+.field--select {
+  position: relative;
+  padding-right: 22px;
+  cursor: pointer;
+}
+.field--select select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font: inherit;
+  color: inherit;
+  margin: 0;
+  padding: 0;
+}
+.field--select .field__value {
+  pointer-events: none;
+}
+.field--select::after {
+  content: "▾";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--grey-dark);
+  font-size: 10px;
 }
 .stepper {
   cursor: pointer;

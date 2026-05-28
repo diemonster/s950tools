@@ -7,7 +7,17 @@
     phase, linkError,
     refreshPorts, refreshStatus, connect, disconnect,
   } from './state/connection';
+  import { memoryUsage, totalWords, expansionEnabled } from './state/memory';
   import { theme, toggleTheme } from './state/theme';
+
+  // Short K/M number formatter for the memory chip. 412000 → "412K",
+  // 1536000 → "1.5M". Keeps the chip readable at narrow widths.
+  function fmtWords(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000)     return `${Math.round(n / 1_000)}K`;
+    return String(n);
+  }
+  $: memPct = $totalWords > 0 ? Math.round(($memoryUsage.usedWords / $totalWords) * 100) : 0;
 
   // Page-specific slot count. `slotCount` is the loud part (e.g.
   // "3 / 100") and `slotNoun` is the descriptor ("programs", "samples")
@@ -67,9 +77,17 @@
   <div class="spacer"></div>
 
   <!-- MIDI port pickers. Native <select> styled as a chip so it's
-       accessible and keyboard-friendly without a custom dropdown. -->
+       accessible and keyboard-friendly without a custom dropdown.
+       The select is positioned absolute + opacity 0 over the chip
+       so any pixel of the chip opens the dropdown — on macOS WebKit
+       clicking a <label> only focuses the wrapped <select>, it
+       doesn't open the picker, so the entire chip area would
+       otherwise be a dead zone outside the select's intrinsic text
+       width. .chip__value renders the selection as plain text behind
+       the transparent select. -->
   <label class="chip chip--select" title={$linkError || 'MIDI input port'}>
     <span class="chip__label">MIDI in</span>
+    <span class="chip__value">{$selectedIn || '— pick —'}</span>
     <select bind:value={$selectedIn}>
       <option value="">— pick —</option>
       {#each $inputPorts as p (p.name)}
@@ -79,6 +97,7 @@
   </label>
   <label class="chip chip--select" title={$linkError || 'MIDI output port'}>
     <span class="chip__label">MIDI out</span>
+    <span class="chip__value">{$selectedOut || '— pick —'}</span>
     <select bind:value={$selectedOut}>
       <option value="">— pick —</option>
       {#each $outputPorts as p (p.name)}
@@ -88,6 +107,7 @@
   </label>
   <label class="chip chip--select" title="MIDI channel (0..15)">
     <span class="chip__label">Ch</span>
+    <span class="chip__value">{$channel}</span>
     <select bind:value={$channel}>
       {#each Array(16) as _, i}
         <option value={i}>{i}</option>
@@ -112,6 +132,34 @@
   <span class={statusChipClass}>
     <span class="status-dot"></span>{statusChipLabel}
   </span>
+  {#if $phase === 'connected'}
+    <!-- Memory chip — visible only while connected; auto-populated
+         by scanMemory() which runs after Connect / Get / Apply. The
+         S950 has no SysEx surface for free memory, so the value
+         comes from summing TotalWords across every SPRM. -->
+    <span class="chip chip--mem" title={$memoryUsage.scanning ? 'Scanning device memory…' : `${memPct}% used · scan re-runs after Get / Apply`}>
+      {#if $memoryUsage.scanning && $memoryUsage.scannedAt === null}
+        <strong>Scanning…</strong>
+      {:else}
+        <strong>{fmtWords($memoryUsage.usedWords)}</strong>
+        <span class="chip__noun"> / {fmtWords($totalWords)} words</span>
+      {/if}
+    </span>
+    <!-- EXM005 expansion toggle. S950 has no way to query the
+         expansion presence over SysEx, so the user flips this once
+         and it persists via localStorage. When on, the memory chip
+         uses the 1.57M-word ceiling; when off, the 512K base. -->
+    <button
+      type="button"
+      class="chip chip--exm"
+      class:chip--exm-on={$expansionEnabled}
+      title={$expansionEnabled
+        ? 'EXM005 memory expansion ON · click to switch to base S950 (512K words)'
+        : 'Base S950 (512K words) · click if you have the EXM005 expansion (2.25 MB)'}
+      on:click={() => expansionEnabled.update((v) => !v)}>
+      EXM{$expansionEnabled ? ' ✓' : ''}
+    </button>
+  {/if}
   {#if slotCount}
     <span class="chip accent chip--slot">
       <strong>{slotCount}</strong>
@@ -124,27 +172,45 @@
 
 <style>
   /* Native <select> wrapped in a chip — keeps the topbar visually
-     consistent but stays accessible (keyboard, screen reader). */
+     consistent but stays accessible (keyboard, screen reader).
+     Layout is inline-flex so the label + value spans sit on a row
+     and the absolutely-positioned select can size to the full chip
+     box, capturing clicks anywhere inside (not just on its
+     intrinsic text width). */
   :global(.chip--select) {
     cursor: pointer;
     /* Extra right padding leaves room for the custom ▾ chevron. */
     padding-right: 22px;
     position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  :global(.chip--select .chip__value) {
+    /* Visible rendering of the current selection. Clicks must fall
+       through to the transparent select underneath, so this span is
+       inert. */
+    pointer-events: none;
   }
   :global(.chip--select select) {
-    /* Strip the OS-native dropdown rendering (gradient + native
-       chevron) so the chip looks like the rest of the topbar. */
-    appearance: none;
+    /* Strip the OS-native dropdown rendering and stretch the
+       select over the entire chip with opacity:0, so every pixel
+       inside the chip border opens the picker on click. */
     -webkit-appearance: none;
     -moz-appearance: none;
-    background: transparent;
+    appearance: none;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
     border: none;
+    outline: none;
     font: inherit;
     color: inherit;
-    cursor: pointer;
-    outline: none;
-    padding: 0 2px;
     margin: 0;
+    padding: 0;
   }
   /* Custom chevron — matches the inline ▾ the static mockup uses on
      other chip-style triggers. */

@@ -11,6 +11,7 @@
     selectedKeygroupN,
     newLocalProgram,
     pickFreeProgramSlot,
+    isAssignedSample,
     type Program,
   } from '../lib/state/programs';
   import { ensureProgramLoaded } from '../lib/state/catalog';
@@ -259,8 +260,8 @@
                 <span class="kg-swatch" style="background: var({kg.color})"></span>{rangeLabel(kg.lowKey, kg.highKey)}
               </td>
               <td class="mono">{kg.vel}</td>
-              <td>{kg.soft.sample}</td>
-              <td class:none={!kg.loud.sample}>{kg.loud.sample || '(none)'}</td>
+              <td class:none={!isAssignedSample(kg.soft.sample)}>{isAssignedSample(kg.soft.sample) ? kg.soft.sample : '(none)'}</td>
+              <td class:none={!isAssignedSample(kg.loud.sample)}>{isAssignedSample(kg.loud.sample) ? kg.loud.sample : '(none)'}</td>
               <td>
                 <button type="button" class="kg-link" on:click={() => editKeygroup(kg.n)}>Edit ↗</button>
               </td>

@@ -110,3 +110,20 @@ type ImportInfo struct {
 	PCM    []int16  `json:"pcm"`
 	Words  []uint16 `json:"words"`
 }
+
+// ---------- Wire log ----------
+
+// WireMessage is the payload of the "wire:traffic" Wails event,
+// emitted once per inbound/outbound SysEx envelope while connected.
+// The wire-log panel in the GUI consumes these and renders a
+// scrollable hex dump for hardware-test debugging.
+//
+// HexBytes is pre-formatted by hexBytes() so the frontend can render
+// without re-encoding; messages longer than the formatter's cap (512
+// bytes) end with " ..." literally.
+type WireMessage struct {
+	Direction string `json:"direction"` // "tx" or "rx"
+	Length    int    `json:"length"`    // pre-truncation envelope length in bytes
+	HexBytes  string `json:"hexBytes"`
+	StampMs   int64  `json:"stampMs"`   // wall-clock ms since epoch
+}

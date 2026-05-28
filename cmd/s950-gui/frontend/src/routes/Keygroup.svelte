@@ -10,6 +10,7 @@
     selectedKeygroupN,
     selectedKeygroup,
     newKeygroup,
+    isAssignedSample,
     type Keygroup,
     type Program,
   } from '../lib/state/programs';
@@ -18,7 +19,7 @@
     samples,
     selectedSampleSlot,
   } from '../lib/state/samples';
-  import { rangeLabel, noteName, midiX, midiW } from '../lib/midi';
+  import { rangeLabel, noteName, midiX, midiW, midiBandClipped } from '../lib/midi';
   import { onMount } from 'svelte';
 
   // Keygroup tab live-syncs (~400ms debounce in real impl). Stub
@@ -30,7 +31,10 @@
   // ---------- Splitter drag ----------
   // Same behavior as the mockup: drag the 6px bar to shrink/grow the
   // properties row. Reads/writes --props-h on the .app element.
-  let propsH = 400;
+  // Match the CSS default in shared.css (.app--canvas grid row). Was
+  // 400px; bumped so the LFO / Filter routing / Velocity routing
+  // panel fits without scrolling on a standard window height.
+  let propsH = 480;
   let dragging = false;
   let startY = 0;
   let startH = 0;
@@ -198,11 +202,16 @@
   function onRowSplitUp() { rowDrag = null; }
 
   // Zone style — absolute % position on the canvas grid for one keygroup.
-  function zoneStyle(k: Keygroup): string {
+  // Clipped to the visible A0..C8 strip: a keygroup whose range
+  // extends past the rendered keyboard (e.g. factory TONE spans
+  // F#-1..D#8 = MIDI 18..123) would otherwise spill the band across
+  // the y-axis label columns. Returns null when the keygroup's range
+  // sits entirely outside the strip — caller should skip rendering.
+  function zoneStyle(k: Keygroup): string | null {
+    const band = midiBandClipped(k.lowKey, k.highKey);
+    if (!band) return null;
     const yTop = 100 - (k.vel * 100) / 128;
-    const x = midiX(k.lowKey);
-    const w = midiW(k.lowKey, k.highKey);
-    return `--x: ${x.toFixed(2)}%; --w: ${w.toFixed(2)}%; --y-top: ${yTop.toFixed(1)}%; --y-bottom: 0%; --zone-bg: var(${k.color});`;
+    return `--x: ${band.left.toFixed(2)}%; --w: ${band.width.toFixed(2)}%; --y-top: ${yTop.toFixed(1)}%; --y-bottom: 0%; --zone-bg: var(${k.color});`;
   }
 
   // Octave markers under the grid.
@@ -311,24 +320,27 @@
 
     <div class="grid" bind:this={gridEl}>
       {#each prog.keygroups as k (k.n)}
-        <div
-          class="zone {k.n === $selectedKeygroupN ? 'selected' : ''}"
-          style={zoneStyle(k)}
-          on:mousedown={(e) => beginZoneDrag(e, k, 'move')}
-          on:dragover={onZoneDragOver}
-          on:drop={(e) => onZoneDrop(e, k.n)}
-          on:keydown={(e) => e.key === 'Enter' && selectedKeygroupN.set(k.n)}
-          role="button"
-          tabindex="0">
-          <!-- Edge handles: left/right resize the key range, top
-               adjusts the velocity switch. stopPropagation in the
-               handler keeps the body's move-drag from also firing. -->
-          <span class="zone__handle zone__handle--lo" on:mousedown={(e) => beginZoneDrag(e, k, 'lo')}></span>
-          <span class="zone__handle zone__handle--hi" on:mousedown={(e) => beginZoneDrag(e, k, 'hi')}></span>
-          <span class="zone__handle zone__handle--vel" on:mousedown={(e) => beginZoneDrag(e, k, 'vel')}></span>
-          <span class="zone__label">{k.soft.sample}</span>
-          <span class="zone__meta">{rangeLabel(k.lowKey, k.highKey)}</span>
-        </div>
+        {@const style = zoneStyle(k)}
+        {#if style}
+          <div
+            class="zone {k.n === $selectedKeygroupN ? 'selected' : ''}"
+            style={style}
+            on:mousedown={(e) => beginZoneDrag(e, k, 'move')}
+            on:dragover={onZoneDragOver}
+            on:drop={(e) => onZoneDrop(e, k.n)}
+            on:keydown={(e) => e.key === 'Enter' && selectedKeygroupN.set(k.n)}
+            role="button"
+            tabindex="0">
+            <!-- Edge handles: left/right resize the key range, top
+                 adjusts the velocity switch. stopPropagation in the
+                 handler keeps the body's move-drag from also firing. -->
+            <span class="zone__handle zone__handle--lo" on:mousedown={(e) => beginZoneDrag(e, k, 'lo')}></span>
+            <span class="zone__handle zone__handle--hi" on:mousedown={(e) => beginZoneDrag(e, k, 'hi')}></span>
+            <span class="zone__handle zone__handle--vel" on:mousedown={(e) => beginZoneDrag(e, k, 'vel')}></span>
+            <span class="zone__label">{k.soft.sample}</span>
+            <span class="zone__meta">{rangeLabel(k.lowKey, k.highKey)}</span>
+          </div>
+        {/if}
       {/each}
     </div>
 
@@ -346,9 +358,17 @@
           <span style="left: {left.toFixed(2)}%"></span>
         {/each}
       </div>
+      <!-- Clip the band to A0..C8 (the rendered strip). A keygroup
+           whose upper key is past C8 (e.g. the factory TONE program
+           ranges to D#8 = MIDI 123) would otherwise project the band
+           past the last visible key, since the band's % width is
+           computed relative to the 88-key strip. -->
       <div class="keyboard__assigned">
         {#each prog.keygroups as k (k.n)}
-          <span style="left: {midiX(k.lowKey).toFixed(2)}%; width: {midiW(k.lowKey, k.highKey).toFixed(2)}%; --zone-bg: var({k.color});"></span>
+          {@const band = midiBandClipped(k.lowKey, k.highKey)}
+          {#if band}
+            <span style="left: {band.left.toFixed(2)}%; width: {band.width.toFixed(2)}%; --zone-bg: var({k.color});"></span>
+          {/if}
         {/each}
       </div>
     </div>
@@ -403,9 +423,32 @@
           format={(v) => v === 16 ? 'OMNI' : String(v)}
           on:change={(e) => selectedKeygroup.update({ midiChannel: e.detail })} />
       </div>
+      <!-- Voice out assigns the keygroup to a physical/individual
+           output. The S950 supports 'ALL' (mixed L+R), individual
+           outputs 1–8, plus 'L' / 'R' for the master stereo bus.
+           Backed by a native <select> wrapped in .field so it picks
+           up the same chip styling + ▾ chevron as the rest of the
+           panel. -->
       <div class="row">
         <span class="row__label">Voice out</span>
-        <span class="field">{kg.voiceOut} ▾</span>
+        <span class="field field--wide field--select voice-out">
+          <span class="field__value">{kg.voiceOut}</span>
+          <select
+            value={kg.voiceOut}
+            on:change={(e) => selectedKeygroup.update({ voiceOut: e.currentTarget.value })}>
+            <option value="ALL">ALL</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+            <option value="L">L</option>
+            <option value="R">R</option>
+          </select>
+        </span>
       </div>
     </div>
 
@@ -446,16 +489,21 @@
       </div>
     </div>
 
-    <!-- Loud layer -->
+    <!-- Loud layer.
+         Akai's firmware initializes the loud sample slot with the
+         literal placeholder "2 SAMPLE" on factory programs. We treat
+         placeholders as unassigned for display + disabled-state
+         purposes, but keep the raw value in kg.loud.sample so we
+         re-emit identical bytes if the user doesn't touch the row. -->
     <div class="panel panel--last-col">
       <div class="panel__title">
         Loud layer <span class="panel__tag panel__tag--muted">vel ≥ {kg.vel}</span>
       </div>
-      <div class="layer-hint">{kg.loud.sample ? 'plays at velocities at or above the switch' : 'assign a sample to enable this layer'}</div>
+      <div class="layer-hint">{isAssignedSample(kg.loud.sample) ? 'plays at velocities at or above the switch' : 'assign a sample to enable this layer'}</div>
       <div class="row">
         <span class="row__label">Sample</span>
         <Combobox
-          value={kg.loud.sample}
+          value={isAssignedSample(kg.loud.sample) ? kg.loud.sample : ''}
           options={sampleOptions}
           on:change={(e) => selectedKeygroup.updateLoud({ sample: e.detail })} />
       </div>
@@ -465,7 +513,7 @@
           value={kg.loud.transpose}
           min={-50} max={50} step={0.01}
           format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} st`}
-          disabled={!kg.loud.sample}
+          disabled={!isAssignedSample(kg.loud.sample)}
           on:change={(e) => selectedKeygroup.updateLoud({ transpose: e.detail })} />
       </div>
       <div class="row">
@@ -473,14 +521,14 @@
         <NumField
           value={kg.loud.filter}
           min={0} max={99}
-          disabled={!kg.loud.sample}
+          disabled={!isAssignedSample(kg.loud.sample)}
           on:change={(e) => selectedKeygroup.updateLoud({ filter: e.detail })} />
       </div>
       <div class="row">
         <span class="row__label">Loudness</span>
         <NumField
           value={kg.loud.loudness}
-          disabled={!kg.loud.sample}
+          disabled={!isAssignedSample(kg.loud.sample)}
           on:change={(e) => selectedKeygroup.updateLoud({ loudness: e.detail })} />
       </div>
     </div>
@@ -527,8 +575,11 @@
         on:change={(e) => selectedKeygroup.updateMod({ filterEnv: { ...kg.mod.filterEnv, ...e.detail } })} />
     </div>
 
-    <!-- LFO & dynamics -->
-    <div class="panel panel--last-col">
+    <!-- LFO & dynamics — packs LFO + filter routing + velocity
+         routing + pitch warp into a single cell. Uses .panel--mod
+         to claw back top/bottom padding + title margin so all four
+         subsections fit without scrolling. -->
+    <div class="panel panel--last-col panel--mod">
       <div class="panel__title">LFO &amp; dynamics</div>
 
       <div class="panel__subtitle">LFO</div>
@@ -577,31 +628,46 @@
         </div>
       </div>
 
+      <!-- Velocity routing uses the same .grid-2 → .row--compact
+           layout as LFO + Filter routing above so every value box in
+           the panel sits in the same column rather than fanning to
+           the flex-end edges (which made the rows look misaligned
+           when label widths varied). -->
       <div class="panel__subtitle">Velocity routing</div>
-      <div class="vel-grid">
-        <div class="vel-row">→ filter
+      <div class="grid-2">
+        <div class="row row--compact">
+          <span class="row__label">→ filter</span>
           <NumField value={kg.mod.vel.toFilter} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ vel: { ...kg.mod.vel, toFilter: e.detail } })} />
         </div>
-        <div class="vel-row">→ loudness
+        <div class="row row--compact">
+          <span class="row__label">→ loudness</span>
           <NumField value={kg.mod.vel.toLoud} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ vel: { ...kg.mod.vel, toLoud: e.detail } })} />
         </div>
-        <div class="vel-row">→ attack
+        <div class="row row--compact">
+          <span class="row__label">→ attack</span>
           <NumField value={kg.mod.vel.toAttack} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ vel: { ...kg.mod.vel, toAttack: e.detail } })} />
         </div>
-        <div class="vel-row">→ release
+        <div class="row row--compact">
+          <span class="row__label">→ release</span>
           <NumField value={kg.mod.vel.toRelease} min={0} max={99} extra="field--xs"
             on:change={(e) => selectedKeygroup.updateMod({ vel: { ...kg.mod.vel, toRelease: e.detail } })} />
         </div>
       </div>
 
+      <!-- Pitch warp is a single knob — wrap it in .grid-2 with an
+           empty right cell so its value box still aligns under the
+           left-column value boxes above. -->
       <div class="panel__subtitle">Pitch warp</div>
-      <div class="row row--compact">
-        <span class="row__label">Amount</span>
-        <NumField value={kg.mod.warpAmount} min={0} max={99} extra="field--xs"
-          on:change={(e) => selectedKeygroup.updateMod({ warpAmount: e.detail })} />
+      <div class="grid-2">
+        <div class="row row--compact">
+          <span class="row__label">Amount</span>
+          <NumField value={kg.mod.warpAmount} min={0} max={99} extra="field--xs"
+            on:change={(e) => selectedKeygroup.updateMod({ warpAmount: e.detail })} />
+        </div>
+        <div></div>
       </div>
     </div>
   </section>
@@ -885,7 +951,22 @@
        intrinsic min-content can leak past row boundaries. */
     height: 100%;
     max-height: 100%;
+    /* macOS hides overlay scrollbars by default; force a visible
+       track + thumb so users can tell when content extends past the
+       panel bottom (LFO / Filter routing / Velocity routing in the
+       modulation column, behavior toggles + numeric rows in the
+       Keygroup · selected column). */
+    scrollbar-width: thin;
+    scrollbar-color: var(--grey-medium) transparent;
   }
+  .panel::-webkit-scrollbar { width: 8px; }
+  .panel::-webkit-scrollbar-track { background: transparent; }
+  .panel::-webkit-scrollbar-thumb {
+    background: var(--grey-medium);
+    border-radius: 4px;
+    border: 2px solid var(--white);
+  }
+  .panel::-webkit-scrollbar-thumb:hover { background: var(--grey-dark); }
 
   /* Progressive density — when the window is short, every panel
      shrinks its paddings, fonts, and form-row gaps in step so the
@@ -908,7 +989,6 @@
     .panel__subtitle { font-size: 8px; margin: 6px 0 1px; }
     .adsr-strip { gap: 3px; margin: 1px 0 4px; }
     .row--compact { padding: 1px 0; }
-    .vel-grid { gap: 2px 8px; }
     .panel__divider { margin: 6px 0 4px; }
     .toggle-row :global(.toggle) { font-size: 8px; padding: 2px 6px; }
   }
@@ -916,6 +996,12 @@
      because the row-splitter is a sibling and offsets the count;
      panels in col 3 carry an explicit class. */
   .panel--last-col { border-right: none; }
+  /* Tight modulation panel — same tokens as .panel but with reduced
+     top/bottom padding and a smaller title margin so the four
+     stacked subsections (LFO · Filter routing · Velocity routing ·
+     Pitch warp) fit in row 2 without forcing the user to scroll. */
+  .panel--mod { padding: 6px 14px 8px; }
+  .panel--mod .panel__title { margin-bottom: 2px; }
 
   /* Row splitter — same look as the canvas/properties splitter
      above. Spans all 3 columns explicitly. */
@@ -984,11 +1070,16 @@
     letter-spacing: 0.04em;
   }
   .panel__divider {
-    margin: 14px 0 8px 0;
+    margin: 10px 0 6px 0;
     border: none;
     border-top: 1px solid var(--grey-light);
   }
-  .properties :global(.row) { grid-template-columns: 110px 1fr; }
+  .properties :global(.row) { grid-template-columns: 110px 1fr; padding: 3px 0; }
+  /* The Keygroup · selected column has 3 toggles + divider + 5 rows,
+     more vertical content than the Soft/Loud layer panels next to it
+     — without this tightening the bottom row (Voice out) clips into
+     the row splitter at the default --props-h. */
+  .properties .panel:first-of-type :global(.row) { padding: 2px 0; }
 
   .toggle-row {
     display: flex;
@@ -998,7 +1089,8 @@
   }
 
   /* Compact strip — see mockups/keygroup.html. */
-  .row--compact { grid-template-columns: 84px 1fr; padding: 2px 0; gap: 6px; }
+  .row--compact { grid-template-columns: 84px 1fr; padding: 1px 0; gap: 6px; font-size: 11px; }
+  .row--compact :global(.row__label) { font-size: 10px; }
   .adsr-strip {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr 1fr;
@@ -1026,13 +1118,17 @@
     text-align: center;
     min-width: 0;
   }
+  /* Subsection labels inside LFO & dynamics. Tight margins because
+     the panel packs LFO + filter routing + velocity routing + pitch
+     warp into one row-2 cell — every saved pixel keeps the bottom
+     row (Pitch warp · Amount) visible without scrolling. */
   .panel__subtitle {
     font-family: var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-size: 9px;
     color: var(--grey-dark);
-    margin: 10px 0 2px;
+    margin: 6px 0 1px;
   }
   .panel__subtitle:first-of-type { margin-top: 0; }
   /* Compact field variant for the tightly-packed modulation panels.
@@ -1040,28 +1136,10 @@
      internal .field via the extra prop, so the selector must be
      :global() — the class never lands on a DOM node this stylesheet
      directly owns. */
-  :global(.field--xs) { padding: 0 4px; font-size: 11px; min-width: 0; }
+  :global(.field--xs) { padding: 0 4px; font-size: 10px; min-width: 0; line-height: 1.25; }
 
-  .vel-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px 10px;
-    margin-top: 2px;
-  }
-  .vel-grid .vel-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--grey-dark);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .vel-grid .vel-row :global(.field) { padding: 1px 6px; font-size: 11px; }
-
-  /* 2-column grid for paired compact rows (LFO, Filter routing).
+  /* 2-column grid for paired compact rows (LFO, Filter routing,
+     Velocity routing, Pitch warp).
      The inner .row already lays out label + field; here we override
      the label width to ~68px so the field has room in the narrow
      half-column. */

@@ -20,6 +20,7 @@ export function rangeLabel(lo: number, hi: number): string {
 // MIDI 21 (A0) is at 0%, MIDI 108 (C8) is at 100%.
 const STRIP_LO = 21;
 const STRIP_KEYS = 88;
+const STRIP_HI = STRIP_LO + STRIP_KEYS - 1; // MIDI 108
 const STRIP_STEP = 100 / STRIP_KEYS;
 
 export function midiX(midi: number): number {
@@ -29,4 +30,17 @@ export function midiX(midi: number): number {
 // Width across [lo..hi] (inclusive) in strip percent.
 export function midiW(lo: number, hi: number): number {
   return (hi - lo + 1) * STRIP_STEP;
+}
+
+// Clamp a keygroup range to the visible 88-key strip and return the
+// {left, width} as strip-relative percentages. Returns null when the
+// range falls entirely outside the strip (don't render). Used by the
+// keyboard-row overlay so a keygroup whose upper key is past C8 (or
+// lower key below A0) draws only the portion that sits over real
+// piano keys, instead of extending into empty padding to the right.
+export function midiBandClipped(lo: number, hi: number): { left: number; width: number } | null {
+  const cLo = Math.max(STRIP_LO, lo);
+  const cHi = Math.min(STRIP_HI, hi);
+  if (cHi < cLo) return null;
+  return { left: midiX(cLo), width: midiW(cLo, cHi) };
 }

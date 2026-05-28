@@ -17,6 +17,22 @@ export type Layer = {
   loudness: number;     // 0..99, signed-ish
 };
 
+// Akai's S950 firmware initializes unused sample slots in newly
+// created keygroups (and the factory TONE program) with these literal
+// placeholder names — they are NOT actual samples on the device.
+// Treat them as "unassigned" at the display layer, but keep them in
+// `Layer.sample` so round-trip encoding back to the device is exact:
+// if the user doesn't change the layer, we re-emit the same bytes.
+const PLACEHOLDER_SAMPLE_NAMES = new Set<string>(['2 SAMPLE']);
+export function isPlaceholderSample(name: string): boolean {
+  return PLACEHOLDER_SAMPLE_NAMES.has(name);
+}
+// True when the layer references a real sample (user-assigned or
+// catalog-matched). Use this to drive UI presence/empty states.
+export function isAssignedSample(name: string): boolean {
+  return !!name && !isPlaceholderSample(name);
+}
+
 // Per-keygroup modulation values. Envelopes are ADSR (0..99 each),
 // LFO and velocity routing are 0..99 knobs. Filter routing collapses
 // the S950's env→VCF + key-tracking knobs.

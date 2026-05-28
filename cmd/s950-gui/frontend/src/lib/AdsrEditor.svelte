@@ -70,12 +70,17 @@
       const newA = clamp(0, 99, Math.round((px / A_MAX) * 99));
       dispatch('change', { a: newA });
     } else if (dragNode === 'd') {
-      // D measured from the attack peak — keeps the node trackable
-      // even when A changes underneath.
+      // D corner is 2D: x = decay time (measured from the attack
+      // peak so the node stays trackable when A shifts), y =
+      // sustain level. Matches the convention in most DAW envelope
+      // editors — one handle for the "decay reaches sustain" point.
       const newD = clamp(0, 99, Math.round(((px - ax) / D_MAX) * 99));
-      dispatch('change', { d: newD });
+      const newS = clamp(0, 99, Math.round(((H - py) / (H - TOP)) * 99));
+      dispatch('change', { d: newD, s: newS });
     } else if (dragNode === 's') {
-      // Sustain is a level (y only); x is fixed at sustainEnd.
+      // Sustain is a level (y only); x is fixed at sustainEnd — the
+      // held segment has no time parameter in ADSR. Redundant with
+      // the y-axis of the D corner so you can grab either side.
       const newS = clamp(0, 99, Math.round(((H - py) / (H - TOP)) * 99));
       dispatch('change', { s: newS });
     } else if (dragNode === 'r') {

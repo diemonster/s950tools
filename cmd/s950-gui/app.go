@@ -2,15 +2,41 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/bivers/s950/internal/device"
 	"github.com/bivers/s950/internal/protocol"
 	"github.com/bivers/s950/internal/transport"
+	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// hexBytes formats `b` as space-separated uppercase hex pairs — the
+// shape the wire-log panel renders ("F0 47 40 ..."). Cap defends
+// against giant sample-dump envelopes blowing up the event payload;
+// truncated messages get an `…` suffix that the frontend treats
+// verbatim.
+func hexBytes(b []byte) string {
+	const cap = 512
+	truncated := false
+	if len(b) > cap {
+		b = b[:cap]
+		truncated = true
+	}
+	parts := make([]string, len(b))
+	for i, x := range b {
+		parts[i] = strings.ToUpper(hex.EncodeToString([]byte{x}))
+	}
+	out := strings.Join(parts, " ")
+	if truncated {
+		out += " ..."
+	}
+	return out
+}
 
 // App owns the MIDI transport + device for the lifetime of the
 // running Wails app. Frontend calls every exported method through
@@ -77,6 +103,18 @@ func (a *App) Connect(in, out string, channel int) error {
 	t, err := transport.Open(transport.Options{
 		In:  in,
 		Out: out,
+		// Pump every SysEx envelope through to the frontend wire-log
+		// panel via Wails events. Cheap — `wruntime.EventsEmit` is a
+		// JSON-marshal + write to the WebView2 channel, and we only
+		// publish completed messages (no per-byte traffic).
+		OnWire: func(direction string, msg []byte) {
+			wruntime.EventsEmit(a.ctx, "wire:traffic", WireMessage{
+				Direction: direction,
+				Length:    len(msg),
+				HexBytes:  hexBytes(msg),
+				StampMs:   time.Now().UnixMilli(),
+			})
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("open MIDI transport: %w", err)

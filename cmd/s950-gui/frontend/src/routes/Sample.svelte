@@ -25,6 +25,7 @@
     type Division,
   } from '../lib/state/slicing';
   import { ensureSampleLoaded } from '../lib/state/catalog';
+  import { scanMemory } from '../lib/state/memory';
   import * as preview from '../lib/preview';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
@@ -306,6 +307,11 @@
         const childSlots = new Set(committedChildren.map((c) => c.slot));
         samples.update((xs) => xs.filter((s) => !childSlots.has(s.slot)));
       }
+      // We just wrote N samples to the device — refresh the memory
+      // chip so the user can see how much free space they have for
+      // the next slice run. Fire-and-forget: the modal completion
+      // doesn't need to wait for it.
+      void scanMemory();
     } catch (e: any) {
       sliceError = String(e?.message ?? e);
       slicePhase = 'error';
@@ -1198,7 +1204,7 @@
             <NumField
               value={smp.tune}
               min={-50} max={50} step={0.01}
-              format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} st`}
+              format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`}
               on:change={(e) => selectedSample.update({ tune: e.detail })} />
           </div>
           <div class="row">

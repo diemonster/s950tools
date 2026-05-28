@@ -12,6 +12,8 @@ import {
   programs, selectedSlot,
   type Program, type Keygroup, type Layer, type Modulation,
 } from './programs';
+import { scanMemory } from './memory';
+import { sampleParamsToSample } from './converters';
 
 // Set of slots whose full data has been fetched from the device. We
 // don't refetch on re-selection unless the user explicitly forces it
@@ -127,6 +129,11 @@ export async function ensureProgramLoaded(slot: number, force = false): Promise<
     const full = programJSONToProgram(json, slot);
     programs.update((list) => list.map((p) => (p.slot === slot ? full : p)));
     loadedPrograms.add(slot);
+    // A user-initiated Get is the right moment to refresh the
+    // memory chip: the user may have manually edited the device
+    // since Connect (deleted samples on the front panel, etc.),
+    // and the chip should reflect that without forcing a reconnect.
+    if (force) void scanMemory();
   } catch (e) {
     console.error(`GetProgram(${slot}) failed:`, e);
     throw e;
@@ -146,6 +153,10 @@ export async function ensureSampleLoaded(slot: number, force = false): Promise<v
     const full = sampleParamsToSample(params, slot);
     samples.update((list) => list.map((s) => (s.slot === slot ? full : s)));
     loadedSamples.add(slot);
+    // Same logic as ensureProgramLoaded: a forced Get is the moment
+    // to re-scan, in case the user changed device state outside the
+    // app between connect and now.
+    if (force) void scanMemory();
   } catch (e) {
     console.error(`GetSampleParams(${slot}) failed:`, e);
     throw e;
@@ -236,49 +247,5 @@ function voiceOutLabel(n: number): string {
   return 'ALL';
 }
 
-// sampleParamsToSample maps protocol.SampleParams (high-level decode
-// of the 120-byte SPRM block) into the frontend's Sample type. The
-// frontend uses string literals for the replay mode while the wire
-// format uses ASCII bytes ('O' / 'L' / 'A').
-function sampleParamsToSample(p: any, slot: number): Sample {
-  const total = p.TotalWords ?? 0;
-  const start = p.Start ?? 0;
-  const end   = p.End ?? total;
-  return {
-    slot,
-    name: (p.Name ?? '').trim(),
-    rate: p.SampleRateHz ?? 26040,
-    length: total || 1,
-    start,
-    end,
-    // S950 stores LoopLength (not loop end); LoopStart isn't a
-    // separate field — the device's SPRM uses Start as the loop
-    // origin. The frontend renders the loop region as
-    // [loopStart..loopStart+loopLength], so we read LoopLength
-    // directly and anchor loopStart to Start when present.
-    loopStart: start,
-    loopLength: p.LoopLength ?? 0,
-    mode: replayModeFrom(p.ReplayMode),
-    reverse: (p.Reversed ?? 0x4E) === 0x52, // 'R' = reverse
-    velXfade: (p.VelXFade ?? 0) === 255,
-    tune: ((p.NominalPitch ?? 960) - 960) / 16, // semitones from C3
-    loudness: p.LoudOffset ?? 0,
-    // Stash the 120-byte SPRM block for round-trip on Send.
-    // Wails sends [120]byte as a number array; we mirror that.
-    raw: Array.from(p.Raw ?? []),
-    // Definitionally 'device' — this converter only runs after a
-    // successful GetSampleParams round trip.
-    source: 'device',
-  } as Sample;
-}
-
-function replayModeFrom(b: number | undefined): Sample['mode'] {
-  // 'O' = 79 = one-shot, 'L' = 76 = loop, 'A' = 65 = alternating
-  // ('alternating loop' in the S950 manual; surfaced as ping-pong
-  // throughout the UI so sample-level + slice-level terminology lines up).
-  switch (b) {
-    case 76: return 'loop';
-    case 65: return 'ping-pong';
-    default: return 'one-shot';
-  }
-}
+// sampleParamsToSample now lives in ./converters so memory.ts can
+// share the SPRM → Sample mapping without forming an import cycle.

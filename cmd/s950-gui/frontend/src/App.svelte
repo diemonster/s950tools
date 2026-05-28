@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Top-level component — just picks the right route. Each route
-  // renders its own .app shell (because the Keygroup tab uses the
-  // 5-row .app--canvas variant while Program/Sample use .app--3row).
+  // Top-level component — picks the right route. The SysEx wire-log
+  // is hosted inside Statusbar.svelte so its toggle sits in the
+  // statusbar rather than floating over page content.
   import { route } from './lib/route';
   import Program from './routes/Program.svelte';
   import Keygroup from './routes/Keygroup.svelte';
