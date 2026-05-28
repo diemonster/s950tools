@@ -30,6 +30,7 @@
   } from '../lib/state/slicing';
   import { ensureSampleLoaded, refreshCatalog } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
+  import { persistSamplesToCache } from '../lib/state/waveformcache';
   import * as preview from '../lib/preview';
   import { buildWaveformPaths, buildSyntheticPaths } from '../lib/waveform';
   import { get } from 'svelte/store';
@@ -383,6 +384,12 @@
         // real signal instead of a synthetic envelope.
         if (capturedAudio.size > 0) {
           samples.update((xs) => attachAudioToSamples(xs, capturedAudio));
+          // Phase 1B: also persist to the on-disk cache so the next
+          // session can re-attach without a re-upload. Fire-and-
+          // forget — a cache write failure degrades to the
+          // pre-1B world (synthetic waveform on relaunch), not a
+          // crash or partial state.
+          void persistSamplesToCache(Array.from(capturedAudio.keys()));
         }
         try { await scanMemory(); } catch {}
       })();

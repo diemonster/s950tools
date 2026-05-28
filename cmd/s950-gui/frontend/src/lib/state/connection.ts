@@ -8,6 +8,7 @@ import * as App from '../../../wailsjs/go/main/App';
 import { refreshCatalog, ensureProgramLoaded } from './catalog';
 import { scanMemory, clearMemory } from './memory';
 import { selectedSlot as selectedProgramSlot } from './programs';
+import { hydrateAllSamplesFromCache } from './waveformcache';
 
 export type Port = { name: string };
 export type Status = { connected: boolean; in?: string; out?: string; channel: number };
@@ -95,11 +96,20 @@ export async function connect() {
       } catch (e: any) {
         linkError.set('Catalog fetch failed: ' + String(e?.message ?? e));
       }
-      // Memory scan kicks off in the background — Connect returns
-      // as soon as the catalog lands so the user can start clicking
-      // around; the topbar memory chip flips to "Scanning…" until
-      // the per-sample SPRM fetches complete.
-      void scanMemory();
+      // scanMemory + Phase 1B hydration run as a background chain.
+      // Order matters: scanMemory refreshes each device sample's
+      // SPRM-reported `length` field (replacing the skinny default
+      // of 1 from refreshCatalog), and hydration's cache key
+      // includes that length. Running them in parallel would have
+      // hydrate looking up `(slot, name, 1)` and missing every
+      // entry. Awaiting scanMemory first means hydrate sees the
+      // real lengths and matches what persistSampleToCache wrote.
+      // The chain is still fire-and-forget from connect() so the
+      // UI can paint while the chip says "Scanning…".
+      void (async () => {
+        try { await scanMemory(); } catch {}
+        try { await hydrateAllSamplesFromCache(); } catch {}
+      })();
       // Eagerly load the currently-selected program's full PRGM
       // payload too. Samples are covered by scanMemory above; the
       // program-tab auto-loader (selectedSlot.subscribe in

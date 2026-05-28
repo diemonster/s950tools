@@ -12,6 +12,7 @@ import (
 	"github.com/bivers/s950/internal/device"
 	"github.com/bivers/s950/internal/protocol"
 	"github.com/bivers/s950/internal/transport"
+	"github.com/bivers/s950/internal/waveformcache"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -52,6 +53,13 @@ type App struct {
 	tport   *transport.Transport // nil until Connect succeeds
 	dev     *device.Device
 	channel byte
+	// cache is the lazily-initialised cross-session waveform store
+	// (Phase 1B). Behind the same mutex as the transport because
+	// wavecache() can be called from multiple Wails-pool goroutines
+	// concurrently with Connect/Disconnect — they don't actually
+	// share state but pooling the lock keeps the App struct's
+	// invariant ("everything mutable goes through mu") simple.
+	cache *waveformcache.Cache
 }
 
 func NewApp() *App {

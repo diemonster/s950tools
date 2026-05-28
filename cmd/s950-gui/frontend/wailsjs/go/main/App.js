@@ -10,12 +10,20 @@ export function Catalog() {
   return window['go']['main']['App']['Catalog']();
 }
 
+export function ClearWaveformCache() {
+  return window['go']['main']['App']['ClearWaveformCache']();
+}
+
 export function Connect(arg1, arg2, arg3) {
   return window['go']['main']['App']['Connect'](arg1, arg2, arg3);
 }
 
 export function Disconnect() {
   return window['go']['main']['App']['Disconnect']();
+}
+
+export function GetCachedWaveform(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetCachedWaveform'](arg1, arg2, arg3);
 }
 
 export function GetProgram(arg1) {
@@ -36,6 +44,10 @@ export function InspectSlicing(arg1) {
 
 export function ListPorts() {
   return window['go']['main']['App']['ListPorts']();
+}
+
+export function PutCachedWaveform(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['PutCachedWaveform'](arg1, arg2, arg3, arg4);
 }
 
 export function SetProgram(arg1, arg2) {

@@ -7,9 +7,13 @@ export function ApplySlicing(arg1:main.SlicingRequest):Promise<void>;
 
 export function Catalog():Promise<main.Catalog>;
 
+export function ClearWaveformCache():Promise<void>;
+
 export function Connect(arg1:string,arg2:string,arg3:number):Promise<void>;
 
 export function Disconnect():Promise<void>;
+
+export function GetCachedWaveform(arg1:number,arg2:string,arg3:number):Promise<Array<number>>;
 
 export function GetProgram(arg1:number):Promise<protocol.ProgramJSON>;
 
@@ -20,6 +24,8 @@ export function ImportSample(arg1:string):Promise<main.ImportInfo>;
 export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPreflight>;
 
 export function ListPorts():Promise<main.PortList>;
+
+export function PutCachedWaveform(arg1:number,arg2:string,arg3:number,arg4:Array<number>):Promise<void>;
 
 export function SetProgram(arg1:number,arg2:protocol.ProgramJSON):Promise<void>;
 
