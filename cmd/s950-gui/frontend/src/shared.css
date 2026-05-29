@@ -259,6 +259,22 @@ body {
     text-overflow: ellipsis;
     vertical-align: bottom;
   }
+  /* Port chip values (full /dev/tty.usbserial-… paths) get the same
+     ellipsis treatment. The bold-only rule above misses them because
+     the value lives in .chip__value, not <strong>. */
+  .topbar .chip__value {
+    display: inline-block;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+  }
+  /* Hide low-priority chips so the slot counter (the rightmost,
+     navigation-critical chip) doesn't get clipped by the topbar's
+     overflow:hidden. Memory + EXM are diagnostic / power-user info
+     and they get a dedicated surface elsewhere on smaller windows. */
+  .chip--mem,
+  .chip--exm { display: none; }
 }
 .chip--status { display: inline-flex; align-items: center; gap: 6px; }
 .status-dot {
@@ -286,8 +302,19 @@ body {
   color: var(--grey-dark);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  /* Hard no-wrap so a long status string can't push the bar to a
+     second row. The status span ellipsises instead. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
 }
-.statusbar__hint { display: inline-flex; gap: 6px; align-items: center; }
+.statusbar__hint { display: inline-flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.statusbar__status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .statusbar__hint kbd {
   background: var(--grey-light);
   border: 1px solid var(--grey-medium);
@@ -548,6 +575,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+  min-width: 0;
 }
 .card__title {
   font-family: var(--font-mono);
@@ -555,12 +583,21 @@ body {
   letter-spacing: 0.1em;
   font-size: 11px;
   font-weight: 700;
+  flex-shrink: 0;
 }
 .card__subtitle {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--grey-dark);
   text-transform: uppercase;
+  /* Long values (serial port paths, "synced 2 min ago") get
+     ellipsised rather than wrapping into the title above — the
+     baseline-aligned flex parent doesn't lay out wrapped subtitle
+     text cleanly. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   letter-spacing: 0.06em;
 }
 

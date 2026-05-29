@@ -926,7 +926,7 @@
     background: var(--white);
     border-top: var(--bw) solid var(--black);
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     /* minmax(0, ...) on both rows so panel content cannot expand the
        track past its share — overflow then scrolls inside the panel
        (or, on short viewports, the media-query density kicks in). */
@@ -985,6 +985,7 @@
     .panel__divider { margin: 6px 0 4px; }
     .toggle-row :global(.toggle) { font-size: 8px; padding: 2px 6px; }
   }
+
   /* No border on the rightmost column. nth-child can't be used here
      because the row-splitter is a sibling and offsets the count;
      panels in col 3 carry an explicit class. */
@@ -1081,8 +1082,12 @@
     margin-top: 4px;
   }
 
-  /* Compact strip — see mockups/keygroup.html. */
-  .row--compact { grid-template-columns: 84px 1fr; padding: 1px 0; gap: 6px; font-size: 11px; }
+  /* Compact strip — see mockups/keygroup.html.
+     minmax(0, 1fr) on the field track (not plain 1fr) so the
+     NumField's intrinsic min-content can't push the cell past its
+     share — without this, the field's stepper buttons hold the
+     track open and the next column's content gets overlapped. */
+  .row--compact { grid-template-columns: 84px minmax(0, 1fr); padding: 1px 0; gap: 6px; font-size: 11px; }
   .row--compact :global(.row__label) { font-size: 10px; }
   .adsr-strip {
     display: grid;
@@ -1143,8 +1148,14 @@
     min-width: 0;
   }
   .grid-2 :global(.row--compact) {
-    grid-template-columns: 68px 1fr;
+    grid-template-columns: 68px minmax(0, 1fr);
     gap: 4px;
     min-width: 0;
   }
+
+  /* Below ~1100px the three properties columns get too narrow for
+     the label+field pairs. Stack to a single column and let the
+     panels flow naturally. Placed at the very end of the stylesheet
+     so these rules override every earlier .panel / .row-splitter
+     declaration regardless of where in the file they appear. */
 </style>

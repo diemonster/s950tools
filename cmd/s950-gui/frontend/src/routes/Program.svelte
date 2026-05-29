@@ -501,7 +501,12 @@
   .main > .empty-state { grid-column: 1 / -1; grid-row: 1 / -1; }
   .top-form     { grid-column: 1; grid-row: 1; }
   .preview      { grid-column: 2; grid-row: 1; }
-  .kg-card      { grid-column: 1 / -1; grid-row: 2; min-height: 0; }
+  /* min-height keeps the keygroups card from collapsing below ~4
+     rows when the viewport is short — without it, the 1fr grid
+     track can shrink to 0 and the card's overflow:hidden then
+     clips the entire table body. .main has overflow:auto so the
+     page scrolls vertically when the viewport can't fit it all. */
+  .kg-card      { grid-column: 1 / -1; grid-row: 2; min-height: 220px; }
   .device-card  { grid-column: 1 / -1; grid-row: 3; }
   .card--form { max-width: 560px; }
 
@@ -512,6 +517,21 @@
     overflow-y: auto;
     max-height: 360px;
     margin: 0 -2px;
+  }
+
+  /* Below ~1100px the 420px first column dominates and the second
+     (Layout) column gets squeezed off-screen. Stack to a single
+     column and re-flow the grid areas. */
+  @media (max-width: 1100px) {
+    .main {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto 1fr auto;
+    }
+    .top-form     { grid-column: 1; grid-row: 1; }
+    .preview      { grid-column: 1; grid-row: 2; }
+    .kg-card      { grid-column: 1; grid-row: 3; }
+    .device-card  { grid-column: 1; grid-row: 4; }
+    .card--form { max-width: none; }
   }
 
   /* ---------- Mini piano roll (read-only preview) ---------- */

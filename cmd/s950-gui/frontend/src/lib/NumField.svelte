@@ -171,7 +171,7 @@
        columns. */
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: clip;
+    text-overflow: ellipsis;
   }
   .numfield__input {
     flex: 1;

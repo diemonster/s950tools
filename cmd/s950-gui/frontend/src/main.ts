@@ -29,4 +29,21 @@ const app = new App({
   target: document.getElementById('app')!,
 });
 
+// Dev-mock harness — when the page is opened with `?mock=1` (which
+// the headless-Chrome screenshot driver always sets), drive the
+// catalog + sample-load sequence that connect() normally triggers, so
+// views render with realistic populated content. No effect in
+// production (Wails strips query string).
+if (new URLSearchParams(location.search).get('mock') === '1') {
+  Promise.all([
+    import('./lib/state/catalog'),
+  ]).then(([catalog]) => {
+    setTimeout(async () => {
+      await catalog.refreshCatalog();
+      await catalog.ensureProgramLoaded(0, true);
+      await catalog.ensureSampleLoaded(0, true);
+    }, 80);
+  });
+}
+
 export default app;

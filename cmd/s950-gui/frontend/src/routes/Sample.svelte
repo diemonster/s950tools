@@ -2488,6 +2488,17 @@
     gap: 14px;
     align-items: center;
   }
+  /* Below ~1100px the 6-column identity strip squeezes every cell
+     to ~80px, which is narrower than the formatted values inside
+     (e.g. "26.04 kHz", "C3 (960)"). Stack to a 3-column / 2-row
+     grid so values stay on one line. */
+  @media (max-width: 1100px) {
+    .identity {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px 14px;
+    }
+    .identity__cell--preview { grid-column: 3; }
+  }
   .identity__cell--preview { align-items: stretch; }
   .identity__play {
     width: 30px;
