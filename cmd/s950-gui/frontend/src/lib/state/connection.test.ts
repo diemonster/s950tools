@@ -15,6 +15,10 @@ vi.mock('../../../wailsjs/go/main/App', () => ({
   Disconnect:    vi.fn().mockResolvedValue(undefined),
   ListPorts:     vi.fn().mockResolvedValue({ ins: [], outs: [], serial: [] }),
   Status:        vi.fn().mockResolvedValue({ connected: false, channel: 0 }),
+  // Default to a successful ping so the post-connect verification
+  // doesn't tear down the transport in tests that only care about
+  // dispatch. The "verify-failure" tests below override this.
+  VerifyDevice:  vi.fn().mockResolvedValue(undefined),
 }));
 // Avoid the cascading catalog import — refreshCatalog isn't called
 // in any of these tests, so a stub keeps the dep graph small.
@@ -224,6 +228,50 @@ describe('connect() — dispatches based on transportKind', () => {
     await connect();
     expect(App.ConnectSerial).toHaveBeenCalledWith('/dev/cu.usbserial-X', 50000);
     expect(App.Connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('connect() — post-open verification', () => {
+  // The serial port can open OS-cleanly even when the S950 is in MIDI
+  // mode / off / on a wrong baud. The verify-ping after open is the
+  // only thing that distinguishes "actually talking" from "silently
+  // connected to nothing." These tests pin the two failure paths so
+  // the topbar's "S950 not responding" modal can't lose its trigger.
+  it('flips serialUnresponsive + disconnects when the ping times out on serial', async () => {
+    const App = await import('../../../wailsjs/go/main/App');
+    (App.VerifyDevice as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('no reply within 2s')
+    );
+    const { connect, pickSerial, baud, serialUnresponsive, phase, linkError } =
+      await import('./connection');
+    pickSerial('/dev/cu.usbserial-X');
+    baud.set(38400);
+    await connect();
+    expect(App.ConnectSerial).toHaveBeenCalled();
+    expect(App.VerifyDevice).toHaveBeenCalled();
+    expect(App.Disconnect).toHaveBeenCalled(); // tear down the half-open transport
+    expect(get(serialUnresponsive)).toBe(true);
+    expect(get(phase)).toBe('disconnected');
+    expect(get(linkError)).toBe(''); // serial uses the modal, not the inline error
+  });
+
+  it('sets linkError + phase=error when the ping times out on MIDI', async () => {
+    const App = await import('../../../wailsjs/go/main/App');
+    (App.VerifyDevice as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('no reply within 2s')
+    );
+    const { connect, transportKind, selectedIn, selectedOut, channel,
+            serialUnresponsive, phase, linkError } = await import('./connection');
+    transportKind.set('midi');
+    selectedIn.set('P1');
+    selectedOut.set('P2');
+    channel.set(0);
+    await connect();
+    expect(App.VerifyDevice).toHaveBeenCalled();
+    expect(App.Disconnect).toHaveBeenCalled();
+    expect(get(serialUnresponsive)).toBe(false); // MIDI never trips the serial modal
+    expect(get(phase)).toBe('error');
+    expect(get(linkError)).toContain('not responding');
   });
 });
 

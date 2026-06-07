@@ -95,6 +95,16 @@ export const baud         = writable<SerialBaud>(readBaud());
 export const phase        = writable<LinkPhase>('unknown');
 export const status       = writable<Status>({ connected: false, channel: 0 });
 export const linkError    = writable<string>('');
+// serialUnresponsive flips true when connect() opens the serial port
+// successfully but the post-connect ping times out — the silent
+// failure mode where the cable is fine but the S950 still has
+// controller-select on MIDI (or is off, or on a different baud).
+// The topbar subscribes and renders an explanatory modal; the modal's
+// Close button calls dismissSerialUnresponsive() to flip this back.
+export const serialUnresponsive = writable<boolean>(false);
+export function dismissSerialUnresponsive() {
+  serialUnresponsive.set(false);
+}
 
 // Mirror every change back to localStorage. Subscribers run
 // synchronously, including the initial fire on subscribe — that's
@@ -156,11 +166,34 @@ export function pickMidi(direction: 'in' | 'out', portName: string) {
 export async function connect() {
   phase.set('connecting');
   linkError.set('');
+  serialUnresponsive.set(false);
+  const wasSerial = get(transportKind) === 'serial';
   try {
-    if (get(transportKind) === 'serial') {
+    if (wasSerial) {
       await App.ConnectSerial(get(selectedIn), get(baud));
     } else {
       await App.Connect(get(selectedIn), get(selectedOut), get(channel));
+    }
+    // Verify the sampler actually responds before declaring success.
+    // The OS-level port open succeeds even if the S950 is still in
+    // MIDI controller-select mode, off, or on a mismatched baud —
+    // without this round-trip the chip would say "Connected" while
+    // every subsequent operation timed out silently. On miss, tear
+    // down the half-open transport so Status reflects reality and
+    // pop an RS-232-specific modal (serial path only).
+    try {
+      await App.VerifyDevice();
+    } catch (e: any) {
+      try { await App.Disconnect(); } catch {}
+      status.set({ connected: false, channel: 0 });
+      if (wasSerial) {
+        phase.set('disconnected');
+        serialUnresponsive.set(true);
+      } else {
+        phase.set('error');
+        linkError.set('Device is not responding: ' + String(e?.message ?? e));
+      }
+      return;
     }
     await refreshStatus();
     // Pull the device catalog immediately so the sidebars reflect

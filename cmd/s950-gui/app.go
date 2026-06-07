@@ -232,6 +232,27 @@ func (a *App) Status() *ConnectionStatus {
 	}
 }
 
+// VerifyDevice pings the connected sampler and reports whether it
+// replies. Frontend calls this immediately after Connect/ConnectSerial
+// to distinguish "port opened" (the OS-level success the connect
+// methods return) from "sampler is actually listening on the wire"
+// — the failure mode that prompted the check is RS-232 where the
+// serial cable opens fine even if the S950 is still in MIDI
+// controller-select mode, leaving the user with a green "connected"
+// chip and nothing functional.
+//
+// Does NOT close the transport on failure — that's the caller's job
+// so the UI can drive a clean Disconnect + explanatory modal in one
+// place. 2 s matches the SendSample pre-flight ping budget.
+func (a *App) VerifyDevice() error {
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
+	return d.Ping(2 * time.Second)
+}
+
 // ---------- Device operations ----------
 
 // Catalog returns programs + samples on the connected device.

@@ -113,3 +113,7 @@ export function SetSampleParams(arg1, arg2) {
 export function Status() {
   return window['go']['main']['App']['Status']();
 }
+
+export function VerifyDevice() {
+  return window['go']['main']['App']['VerifyDevice']();
+}

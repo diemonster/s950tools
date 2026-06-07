@@ -6,7 +6,7 @@
     inputPorts, outputPorts, serialPortsList,
     selectedIn, selectedOut, channel,
     transportKind, baud, SERIAL_BAUDS,
-    phase, linkError,
+    phase, linkError, serialUnresponsive, dismissSerialUnresponsive,
     refreshPorts, refreshStatus, connect, disconnect,
     pickSerial, pickMidi,
   } from './state/connection';
@@ -412,6 +412,55 @@
   </div>
 {/if}
 
+<!-- RS-232 "sampler not responding" modal. Pops when connect() opened
+     the serial port fine but the post-connect ping timed out. The
+     OS-level open succeeds even when the S950 is in MIDI mode / off /
+     on a wrong baud; this modal is the one place we explain the
+     front-panel steps to recover. Close → stays disconnected so the
+     user can fix the device and click Connect again. Try again →
+     dismiss + re-run connect(); if it still fails the modal pops
+     right back. -->
+{#if $serialUnresponsive}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">S950 not responding over RS-232</h2>
+        <div class="modal__route">serial port opened · no reply from sampler</div>
+      </header>
+      <div class="modal__body">
+        <p class="modal__prose">
+          The cable opened at {$baud} baud, but the S950 didn't reply to
+          our test request within 2 seconds. Usually this means the
+          sampler is still in MIDI mode, powered off, or set to a
+          different baud rate.
+        </p>
+        <p class="modal__prose">On the S950's front panel:</p>
+        <ol class="modal__list">
+          <li>Press the MIDI button.</li>
+          <li>Set CONTROLLER SELECT to RS-232C.</li>
+          <li>Set the RS-232 baud to one of: 9600, 19200, 38400, or 50000.</li>
+          <li>Confirm the cable is in the sampler's RS-232 port (not MIDI IN/OUT).</li>
+        </ol>
+        <p class="modal__prose modal__prose--hint">
+          Make sure the Baud chip up top matches the baud on the sampler,
+          then click Try again. Controller-select can only be changed
+          from the front panel — the S950 silently ignores SysEx writes
+          to that field, so we can't flip it for you.
+        </p>
+      </div>
+      <footer class="modal__foot">
+        <button type="button" class="btn" on:click={dismissSerialUnresponsive}>Close</button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          on:click={() => { dismissSerialUnresponsive(); void connect(); }}>
+          Try again
+        </button>
+      </footer>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* Native <select> wrapped in a chip — keeps the topbar visually
      consistent but stays accessible (keyboard, screen reader).
@@ -506,5 +555,34 @@
     color: var(--grey-medium);
     font-size: 11px;
     margin-left: auto;
+  }
+
+  /* "S950 not responding" modal body — prose + ordered list. The
+     existing .modal__step rules turn <strong> into a block-level
+     section label, which doesn't fit instructional copy; these
+     classes are a plain mono paragraph + numbered list at the
+     same visual altitude as .modal__step text. */
+  :global(.modal__prose) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--grey-dark);
+    margin: 0 0 10px;
+  }
+  :global(.modal__prose--hint) {
+    color: var(--grey-medium);
+    font-size: 11px;
+    margin-top: 10px;
+  }
+  :global(.modal__list) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--black);
+    margin: 0 0 10px;
+    padding-left: 22px;
+  }
+  :global(.modal__list li) {
+    margin: 4px 0;
   }
 </style>

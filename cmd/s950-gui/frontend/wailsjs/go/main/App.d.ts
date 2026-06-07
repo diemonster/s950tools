@@ -58,3 +58,5 @@ export function SetProgram(arg1:number,arg2:protocol.ProgramJSON):Promise<void>;
 export function SetSampleParams(arg1:number,arg2:protocol.SampleParams):Promise<void>;
 
 export function Status():Promise<main.ConnectionStatus>;
+
+export function VerifyDevice():Promise<void>;

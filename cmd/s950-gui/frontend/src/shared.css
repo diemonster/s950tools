@@ -3,6 +3,34 @@
    the Sample waveform) stay in each page's <style>. The :root vars
    defined here are available everywhere that links this stylesheet. */
 
+/* ---------- Bundled fonts ----------
+ * Local-only — the app must work offline on machines with no
+ * Google Fonts access. Space Grotesk ships as a single variable
+ * woff2 that covers 300/400/500/700 (font-weight range); Space
+ * Mono is two static cuts. Latin subset only — sample names and
+ * UI strings are ASCII. Vite rewrites these url()s at build time. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: block;
+  src: url("./assets/fonts/space-grotesk-v22-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/space-mono-v17-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("./assets/fonts/space-mono-v17-latin-700.woff2") format("woff2");
+}
+
 :root {
   --black: #212121;
   --grey-dark: #555555;
