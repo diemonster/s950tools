@@ -10,6 +10,37 @@
 
 import { vi } from 'vitest';
 
+// localStorage polyfill — works around a vitest 2.1 ✕ Node 26
+// interaction. Node 26 added an experimental `globalThis.localStorage`
+// getter (gated on --localstorage-file); without the flag it's a
+// no-op that returns undefined. Vitest's `populateGlobal` filters out
+// any window key that already exists on `globalThis` unless the key
+// is in its hardcoded KEYS allowlist — and `localStorage` isn't on
+// that list, so jsdom's window.localStorage never gets copied into
+// the test environment. Net effect: `localStorage.clear()` throws on
+// Node 26+, breaking every persistence test. Remove this shim once
+// we move to a vitest that includes localStorage in its allowlist
+// (tracked: vitest-dev/vitest populateGlobal allowlist).
+class MemoryStorage implements Storage {
+  private store = new Map<string, string>();
+  get length() { return this.store.size; }
+  clear() { this.store.clear(); }
+  getItem(key: string) { return this.store.get(key) ?? null; }
+  key(i: number) { return Array.from(this.store.keys())[i] ?? null; }
+  removeItem(key: string) { this.store.delete(key); }
+  setItem(key: string, value: string) { this.store.set(key, String(value)); }
+}
+Object.defineProperty(globalThis, 'localStorage', {
+  value: new MemoryStorage(),
+  writable: true,
+  configurable: true,
+});
+Object.defineProperty(globalThis, 'sessionStorage', {
+  value: new MemoryStorage(),
+  writable: true,
+  configurable: true,
+});
+
 // jsdom doesn't provide AudioContext; the preview module imports
 // it lazily, but if any component test transitively constructs one
 // we want a no-op stub rather than ReferenceError.
