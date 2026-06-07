@@ -18,6 +18,8 @@
     addSliceAt,
     removeSliceAt,
     slicesFor,
+    expectedSeconds,
+    findZeroCrossing,
     MAX_SLICES,
     commitSlices,
     clearSlicingForSlots,
@@ -76,9 +78,12 @@
       // can collapse to 0 (one-shot) at extreme downsampling —
       // that's fine, the device treats <5 as one-shot anyway.
       const ratio = newLen / Math.max(1, oldLen);
-      const scaledStart      = Math.min(newLen, Math.floor(smp.start      * ratio));
-      const scaledEnd        = Math.min(newLen, Math.floor(smp.end        * ratio));
-      const scaledLoopStart  = Math.min(newLen, Math.floor(smp.loopStart  * ratio));
+      const scaledStart      = Math.min(newLen, Math.floor(smp.start * ratio));
+      const scaledEnd        = Math.min(newLen, Math.floor(smp.end   * ratio));
+      // SPRM anchors the loop at Start; mirror that here so the
+      // sample-type invariant (loopStart === start) holds after a
+      // resample. Length scales independently.
+      const scaledLoopStart  = scaledStart;
       const scaledLoopLength = Math.max(0, Math.floor(smp.loopLength * ratio));
       // Resampling diverges host audio from the device's stored
       // copy. Flip source to 'local' so the Sample-tab actions
@@ -851,8 +856,13 @@
     if (s + visibleN > smp.length) s = smp.length - visibleN;
     return s;
   })();
-  $: viewBoxX  = (viewStart / smp.length) * 1000;
-  $: viewBoxW  = (visibleN / smp.length) * 1000;
+  // buildWaveformPaths already produces a path spanning x=0..1000 for
+  // the visible window only — so the SVG viewBox is a fixed 0 0 1000 200.
+  // Earlier code also cropped the viewBox to (viewStart, visibleN) of
+  // the full sample, which double-zoomed the waveform relative to the
+  // marker overlay (markers use pct() in visible-% space; the waveform
+  // ended up in a different word→pixel mapping) and made markers drift
+  // off their target words as zoom changed.
 
   // Word → visible-% mapping. Off-screen markers return out-of-range
   // values; CSS overflow: hidden on the waveform clips them so we
@@ -862,10 +872,11 @@
     return ((word - viewStart) / visibleN) * 100;
   }
 
-  // Marker / region positions in visible-% space.
-  $: pctStart    = pct(smp.start);
-  $: pctEnd      = pct(smp.end);
-  $: pctLoopStart = pct(smp.loopStart);
+  // Marker / region positions in visible-% space. The loop region
+  // is anchored at Start (SPRM has no separate LoopStart) and runs
+  // for LoopLength words.
+  $: pctStart     = pct(smp.start);
+  $: pctEnd       = pct(smp.end);
   $: pctLoopWidth = (smp.loopLength / visibleN) * 100;
 
   // Playhead position (visible-% space). The store carries a slot
@@ -886,7 +897,10 @@
   // Each marker grabs onto a CSS variable on .waveform. Drag converts
   // pixel x within the strip to a word index (length-relative), then
   // writes to the store with appropriate clamping.
-  type MarkerKind = 'start' | 'end' | 'loopStart' | 'loopEnd';
+  // No loopStart marker — the SPRM block has no LoopStart field, so
+  // the loop is always anchored at Start. Dragging the Start handle
+  // moves the loop's origin; the loopEnd handle adjusts LoopLength.
+  type MarkerKind = 'start' | 'end' | 'loopEnd';
   let waveformEl: HTMLDivElement | undefined;
   let activeMarker: MarkerKind | null = null;
 
@@ -907,16 +921,8 @@
       selectedSample.update({ start: Math.min(word, smp.end) });
     } else if (activeMarker === 'end') {
       selectedSample.update({ end: Math.max(word, smp.start) });
-    } else if (activeMarker === 'loopStart') {
-      // Move loopStart but keep loop end where it was if possible.
-      const oldEnd = smp.loopStart + smp.loopLength;
-      const newStart = Math.max(0, Math.min(word, smp.length));
-      selectedSample.update({
-        loopStart: newStart,
-        loopLength: Math.max(0, oldEnd - newStart),
-      });
     } else if (activeMarker === 'loopEnd') {
-      const newLength = Math.max(0, Math.min(word, smp.length) - smp.loopStart);
+      const newLength = Math.max(0, Math.min(word, smp.length) - smp.start);
       selectedSample.update({ loopLength: newLength });
     }
   }
@@ -1076,8 +1082,27 @@
     const r = waveformEl.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
     const word = Math.round(viewStart + ratio * visibleN);
-    // TODO: when snapToZero is on, snap `word` to nearest zero crossing.
-    addSliceAt(word);
+    addSliceAt(maybeSnapToZero(word));
+  }
+
+  // Snap a word index to the nearest zero crossing when the slicing
+  // panel's "snap to zero" toggle is on. Prefers the higher-resolution
+  // int16 PCM when present (imported samples); falls back to the
+  // 12-bit S950 word buffer (audio captured from the device). Both
+  // are optional: when neither is loaded (device sample without a
+  // pulled audio buffer), the snap is a no-op. Radius capped at
+  // ~38ms of audio (1000 words @ 26 kHz) so a click in a silent
+  // run doesn't snap halfway across the sample.
+  function maybeSnapToZero(word: number): number {
+    if (!$slicing.snapToZero) return word;
+    const radius = Math.min(1000, Math.floor(smp.length * 0.05));
+    if (smp.pcm && smp.pcm.length > 1) {
+      return findZeroCrossing(smp.pcm, word, radius, 0);
+    }
+    if (smp.words12 && smp.words12.length > 1) {
+      return findZeroCrossing(smp.words12, word, radius, 2048);
+    }
+    return word;
   }
 
   // ---------- Slice marker drag ----------
@@ -1114,6 +1139,10 @@
     if (Math.abs(dx) > 1) sliceDrag.moved = true;
     let next = Math.round(sliceDrag.startWord + dx * wordsPerPx);
     next = Math.max(0, Math.min(smp.length, next));
+    // Snap the drop position when the toggle is on. Snapping
+    // mid-drag means the slice tracks the mouse but jumps to the
+    // nearest crossing — same UX as DAWs that snap-while-dragging.
+    next = maybeSnapToZero(next);
 
     // Update the dragged slice's start, then re-sort the array so
     // numbering follows position. The dragged slice tracks to its new
@@ -1144,6 +1173,48 @@
     const wasMoved = sliceDrag.moved;
     sliceDrag = null;
     if (wasMoved) lastDragEnd = performance.now();
+  }
+
+  // ---------- Horizontal scrollbar (zoomed-in pan) ----------
+  // Shown when zoom > 1 (visible window is narrower than the sample).
+  // Track spans the full sample [0..1]; thumb spans the visible window
+  // [viewStart/length .. (viewStart+visibleN)/length]. Drag the thumb
+  // to pan; clicking the empty track centers the view on that point.
+  // Mirrors the pattern used in the related PB950 Waveform component.
+  let sbTrackEl: HTMLDivElement | undefined;
+  let sbDragging = false;
+  let sbStartX = 0;
+  let sbStartCenter = 0;
+  function onScrollThumbDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation(); // thumb grab must not double-fire the track-click
+    sbDragging = true;
+    sbStartX = e.clientX;
+    sbStartCenter = $slicing.zoomCenter;
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  }
+  function onScrollThumbMove(e: PointerEvent) {
+    if (!sbDragging || !sbTrackEl) return;
+    const trackW = sbTrackEl.getBoundingClientRect().width || 1;
+    // dx/trackW is a delta in the same normalized [0..1] space the
+    // zoomCenter lives in (track == full sample). viewStart's clamp
+    // in the reactive derivation handles edge cases where the new
+    // center would push the visible window off either end.
+    const dxNorm = (e.clientX - sbStartX) / trackW;
+    updateSlicing({
+      zoomCenter: Math.max(0, Math.min(1, sbStartCenter + dxNorm)),
+    });
+  }
+  function onScrollThumbUp() { sbDragging = false; }
+  function onScrollTrackDown(e: PointerEvent) {
+    if (e.button !== 0 || !sbTrackEl) return;
+    // Click the empty track → center the view on that point.
+    const r = sbTrackEl.getBoundingClientRect();
+    const clickNorm = (e.clientX - r.left) / (r.width || 1);
+    updateSlicing({
+      zoomCenter: Math.max(0, Math.min(1, clickNorm)),
+    });
   }
 
   // ---------- Per-slice loop edge drag ----------
@@ -1655,7 +1726,7 @@
               value={$slicing.tempo}
               min={20} max={300}
               format={(v) => `${v} BPM`}
-              on:change={(e) => updateSlicing({ tempo: e.detail })} />
+              on:change={(e) => setBeats({ tempo: e.detail })} />
           </div>
           <div class="slice-tools__group">
             <span class="slice-beats__label">bars</span>
@@ -1672,7 +1743,13 @@
               {/each}
             </span>
           </div>
-          <span class="slice-beats__count">→ {slicesFor($slicing.bars, $slicing.division)} slices</span>
+          <span class="slice-beats__count">
+            → {slicesFor($slicing.bars, $slicing.division)} slices
+            {#if smp.rate > 0}
+              · expected {expectedSeconds($slicing.bars, $slicing.division, $slicing.tempo).toFixed(2)}s
+              · actual {(smp.length / smp.rate).toFixed(2)}s
+            {/if}
+          </span>
         </div>
       {/if}
       <!-- The waveform's click affordances (drop slice in manual mode,
@@ -1689,14 +1766,14 @@
         on:mousemove={onWaveformMouseMove}
         on:mouseleave={onWaveformMouseLeave}
         on:wheel|preventDefault|nonpassive={onWaveformWheel}
-        style="--start: {pctStart}%; --end: {pctEnd}%; --loop-start: {pctLoopStart}%; --loop-width: {pctLoopWidth}%;">
+        style="--start: {pctStart}%; --end: {pctEnd}%; --loop-start: {pctStart}%; --loop-width: {pctLoopWidth}%;">
         <!-- Mirror horizontally when the sample's Reversed SPRM flag
              is on — the squiggle's shape is still synthetic, but the
              direction it plays back IS real. -->
         <svg
           class="waveform__svg"
           class:waveform__svg--reversed={smp.reverse}
-          viewBox="{viewBoxX} 0 {viewBoxW} 200"
+          viewBox="0 0 1000 200"
           preserveAspectRatio="none" aria-hidden="true">
           <path d={wfTop} fill="#FDF000" />
           <path d={wfBot} fill="#FDF000" />
@@ -1715,11 +1792,12 @@
           <div class="marker marker--end" on:mousedown={(e) => beginMarkerDrag(e, 'end')}>
             <span class="marker__handle marker__handle--right" on:mousedown={(e) => beginMarkerDrag(e, 'end')}>End · {smp.end.toLocaleString()}</span>
           </div>
-          <div class="marker marker--loop-start" on:mousedown={(e) => beginMarkerDrag(e, 'loopStart')}>
-            <span class="marker__handle" on:mousedown={(e) => beginMarkerDrag(e, 'loopStart')}>Loop · {smp.loopStart.toLocaleString()}</span>
-          </div>
+          <!-- No separate loop-start marker — SPRM has only Start +
+               LoopLength (no LoopStart field). The loop region begins
+               at the sample's Start handle; the loop-end handle below
+               adjusts LoopLength. -->
           <div class="marker marker--loop-end" on:mousedown={(e) => beginMarkerDrag(e, 'loopEnd')}>
-            <span class="marker__handle marker__handle--right" on:mousedown={(e) => beginMarkerDrag(e, 'loopEnd')}>{(smp.loopStart + smp.loopLength).toLocaleString()}</span>
+            <span class="marker__handle marker__handle--right" on:mousedown={(e) => beginMarkerDrag(e, 'loopEnd')}>Loop · {(smp.start + smp.loopLength).toLocaleString()}</span>
           </div>
 
           {#if $slicing.active}
@@ -1797,6 +1875,27 @@
             {/each}
           </div>
         </div>
+        <!-- Horizontal scrollbar — only when zoomed in. Track spans
+             the whole sample [0..1]; thumb spans the visible window.
+             Click the empty track to centre the view on that point;
+             drag the thumb to pan. Sits above the ruler. -->
+        {#if $slicing.zoom > 1 && smp.length > 0}
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div
+            class="waveform__scroll"
+            bind:this={sbTrackEl}
+            on:pointerdown={onScrollTrackDown}>
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div
+              class="waveform__scroll-thumb"
+              style="left: {(viewStart / smp.length) * 100}%; width: {(visibleN / smp.length) * 100}%;"
+              on:pointerdown={onScrollThumbDown}
+              on:pointermove={onScrollThumbMove}
+              on:pointerup={onScrollThumbUp}
+              on:pointercancel={onScrollThumbUp}
+              title="drag to scroll · click track to recentre"></div>
+          </div>
+        {/if}
       </div>
       <div class="waveform__legend">
         <!-- Three waveform states the user needs to tell apart:
@@ -1866,15 +1965,7 @@
               format={(v) => v.toLocaleString()}
               on:change={(e) => selectedSample.update({ end: e.detail })} />
           </div>
-          <div class="row">
-            <span class="row__label">Loop start</span>
-            <NumField
-              value={smp.loopStart}
-              min={0} max={smp.length}
-              format={(v) => v.toLocaleString()}
-              on:change={(e) => selectedSample.update({ loopStart: e.detail })} />
-          </div>
-          <div class="row">
+          <div class="row" title="Loop length in words. The loop runs from Start for this many words; SPRM has no separate loop-start field.">
             <span class="row__label">Loop length</span>
             <NumField
               value={smp.loopLength}
@@ -2727,6 +2818,30 @@
     top: 4px;
     transform: translateX(-50%);
   }
+
+  /* Horizontal scrollbar for the zoomed-in waveform. Sits just above
+     the ruler. The track covers the full sample's normalized [0..1]
+     range; the yellow thumb shows the visible window and is dragged
+     to pan. Pattern lifted from PB950's Waveform component. */
+  .waveform__scroll {
+    position: absolute;
+    left: 0; right: 0;
+    bottom: 18px;
+    height: 10px;
+    z-index: 6;
+    background: rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+  }
+  .waveform__scroll-thumb {
+    position: absolute;
+    top: 1px; bottom: 1px;
+    min-width: 16px;
+    background: color-mix(in srgb, var(--rb-yellow) 45%, transparent);
+    border-radius: 3px;
+    cursor: grab;
+  }
+  .waveform__scroll-thumb:hover  { background: color-mix(in srgb, var(--rb-yellow) 60%, transparent); }
+  .waveform__scroll-thumb:active { background: color-mix(in srgb, var(--rb-yellow) 80%, transparent); cursor: grabbing; }
   .waveform__legend {
     display: flex;
     flex-wrap: wrap;

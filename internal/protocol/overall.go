@@ -77,9 +77,17 @@ type OverallSettings struct {
 	// MIDI menu to flip controller mode. See
 	// project-ovs-write-restriction for the discovery context.
 	ControllerSelect uint8
-	// MPEEnabled toggles MIDI Polyphonic Expression mode. Stored as
-	// 0 = disable, non-zero = enable on the wire.
-	MPEEnabled bool
+	// MPEN is a boolean byte (0 = off, non-zero = on) at OVS offset 60.
+	// The mnemonic comes from dxzl/akai-s950's OverallSettingsForm.h
+	// but the field's *purpose* is not documented in any published
+	// Akai S950 SysEx reference — early speculation that it was MIDI
+	// Polyphonic Expression is wrong (MPE was formalised in 2018; the
+	// S950 shipped in 1988). Decoded + encoded for completeness, but
+	// the GUI deliberately does NOT expose it: until someone confirms
+	// what the byte actually toggles, flipping it from a user-facing
+	// UI risks changing unknown device behaviour. Round-trips
+	// unchanged via Raw when neither side touches it.
+	MPEN bool
 	// PitchWheelRange is the bender's ± range in semitones (0..12).
 	PitchWheelRange uint8
 	// BaudRate is the RS-232 line rate (300..115200, in plain Hz).
@@ -134,7 +142,7 @@ func ParseOverallSettings(payload []byte) (*OverallSettings, error) {
 
 	o.LoudnessOnCC7 = sysex.DecodeDB(payload[ovsOffMLEN], payload[ovsOffMLEN+1]) != 0
 	o.ControllerSelect = sysex.DecodeDB(payload[ovsOffM1RS2], payload[ovsOffM1RS2+1])
-	o.MPEEnabled = sysex.DecodeDB(payload[ovsOffMPEN], payload[ovsOffMPEN+1]) != 0
+	o.MPEN = sysex.DecodeDB(payload[ovsOffMPEN], payload[ovsOffMPEN+1]) != 0
 	o.PitchWheelRange = sysex.DecodeDB(payload[ovsOffPWRANGE], payload[ovsOffPWRANGE+1])
 
 	baudDiv10 := sysex.DecodeDW([4]byte{
@@ -195,7 +203,7 @@ func (o *OverallSettings) EncodePayload() ([]byte, error) {
 	writeDB(out[:], ovsOffBASMCH, basmch)
 	writeDB(out[:], ovsOffMLEN, boolByte(o.LoudnessOnCC7))
 	writeDB(out[:], ovsOffM1RS2, o.ControllerSelect)
-	writeDB(out[:], ovsOffMPEN, boolByte(o.MPEEnabled))
+	writeDB(out[:], ovsOffMPEN, boolByte(o.MPEN))
 	writeDB(out[:], ovsOffPWRANGE, o.PitchWheelRange)
 	writeDW(out[:], ovsOffRSBAUD, uint16(o.BaudRate/10))
 

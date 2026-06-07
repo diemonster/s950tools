@@ -118,6 +118,66 @@
                    || $refreshState.phase === 'programs'
                    || $refreshState.phase === 'audio';
 
+  // ---------- System (Overall) settings modal ----------
+  // Backed by App.GetOverall / App.SetOverall — the 80-byte OVS block
+  // (basic channel, omni, transmit channel, pitch-wheel range, etc).
+  // Three fields are deliberately NOT exposed:
+  //   - ControllerSelect (MIDI vs RS-232C) is silently dropped by
+  //     firmware — only the front-panel MIDI menu can change it.
+  //   - BaudRate similarly belongs on the front panel; the topbar's
+  //     Baud chip already negotiates the HOST side.
+  //   - MPEN (OVS byte 60) — purpose unconfirmed; the dxzl mnemonic
+  //     was originally mis-expanded to "MPE" (MIDI Polyphonic
+  //     Expression, a 2018 spec that postdates the S950 by 30 years).
+  //     Don't toggle a byte whose semantics nobody has verified.
+  // All three round-trip via OverallSettings.Raw (the backend's
+  // SetOverall encode-from-Raw + overwrite-modelled-fields pattern
+  // preserves bytes we don't touch).
+  let overallModalOpen = false;
+  let overallPhase: 'idle' | 'loading' | 'editing' | 'saving' | 'done' | 'error' = 'idle';
+  let overallError = '';
+  // The currently-edited OverallSettings, with Raw preserved from the
+  // initial fetch. null until the first successful GetOverall.
+  let overallEdit: any = null;
+  async function openOverallModal() {
+    overallModalOpen = true;
+    overallPhase = 'loading';
+    overallError = '';
+    try {
+      overallEdit = await App.GetOverall();
+      overallPhase = 'editing';
+    } catch (e: any) {
+      overallPhase = 'error';
+      overallError = String(e?.message ?? e);
+    }
+  }
+  function closeOverallModal() {
+    overallModalOpen = false;
+    overallPhase = 'idle';
+    overallEdit = null;
+    overallError = '';
+  }
+  async function saveOverall() {
+    if (!overallEdit) return;
+    overallPhase = 'saving';
+    overallError = '';
+    try {
+      await App.SetOverall(overallEdit);
+      overallPhase = 'done';
+    } catch (e: any) {
+      overallPhase = 'error';
+      overallError = String(e?.message ?? e);
+    }
+  }
+  // ProgName is a 10-char ASCII field on the wire (space-padded);
+  // extracted here so the markup stays template-clean — Svelte 3
+  // can't always parse a TS cast + assignment inside an attribute.
+  function onProgNameInput(e: Event) {
+    if (!overallEdit) return;
+    const raw = (e.target as HTMLInputElement).value;
+    overallEdit.ProgName = raw.padEnd(10).slice(0, 10);
+  }
+
   // Short K/M number formatter for the memory chip. 412000 → "412K",
   // 1536000 → "1.5M". Keeps the chip readable at narrow widths.
   function fmtWords(n: number): string {
@@ -323,6 +383,16 @@
       on:click={() => expansionEnabled.update((v) => !v)}>
       EXM{$expansionEnabled ? ' ✓' : ''}
     </button>
+    <!-- System (Overall) settings — basic channel, omni, transmit
+         channel, pitch-wheel range, etc. Gated on connected because
+         the modal fetches OVS from the device on open. -->
+    <button
+      type="button"
+      class="chip chip--btn"
+      title="System settings (basic channel, omni, pitch-wheel range...)"
+      on:click={openOverallModal}>
+      ⚙ System
+    </button>
   {/if}
   {#if slotCount}
     <span class="chip accent chip--slot">
@@ -461,6 +531,86 @@
   </div>
 {/if}
 
+<!-- System (Overall) settings modal. Loads OVS on open, edits via
+     bound form controls, writes back via SetOverall on Save. The
+     OverallSettings.Raw bytes round-trip unchanged so fields we
+     deliberately don't expose (ControllerSelect, BaudRate, RxSim*)
+     keep their device-side values. -->
+{#if overallModalOpen}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">
+          {#if overallPhase === 'done'}Saved
+          {:else if overallPhase === 'error'}Error
+          {:else if overallPhase === 'saving'}Saving…
+          {:else if overallPhase === 'loading'}Loading…
+          {:else}System settings
+          {/if}
+        </h2>
+        <div class="modal__route">overall settings · OVS block</div>
+      </header>
+      <div class="modal__body">
+        {#if overallPhase === 'loading'}
+          <p class="modal__prose">Fetching current settings from the S950…</p>
+        {:else if overallPhase === 'error'}
+          <div class="modal__step modal__step--error">{overallError || 'Unknown error'}</div>
+        {:else if overallPhase === 'done'}
+          <p class="modal__prose">Settings written to the S950.</p>
+        {:else if overallEdit}
+          <div class="ovs-grid">
+            <label class="ovs-row">
+              <span>Default program name</span>
+              <input
+                type="text"
+                maxlength="10"
+                value={(overallEdit.ProgName ?? '').trimEnd()}
+                on:input={onProgNameInput} />
+            </label>
+            <label class="ovs-row">
+              <span>Basic (receive) channel</span>
+              <input type="number" min="0" max="15" bind:value={overallEdit.BasicChannel} />
+            </label>
+            <label class="ovs-row">
+              <input type="checkbox" bind:checked={overallEdit.OmniOn} />
+              <span>Omni on (receive on all channels — overrides basic channel)</span>
+            </label>
+            <label class="ovs-row">
+              <span>Transmit channel (replies)</span>
+              <input type="number" min="0" max="15" bind:value={overallEdit.MidiTxChannel} />
+            </label>
+            <label class="ovs-row">
+              <span>Pitch wheel range (semitones)</span>
+              <input type="number" min="0" max="12" bind:value={overallEdit.PitchWheelRange} />
+            </label>
+            <label class="ovs-row">
+              <input type="checkbox" bind:checked={overallEdit.LoudnessOnCC7} />
+              <span>Loudness on MIDI CC7</span>
+            </label>
+          </div>
+          <p class="modal__prose modal__prose--hint">
+            Controller-select (MIDI vs RS-232C) and the device's
+            RS-232 baud are set on the S950's front panel — firmware
+            silently ignores SysEx writes to those fields, so they
+            aren't exposed here. Their current device values are
+            preserved unchanged when you save.
+          </p>
+        {/if}
+      </div>
+      <footer class="modal__foot">
+        {#if overallPhase === 'editing'}
+          <button type="button" class="btn" on:click={closeOverallModal}>Cancel</button>
+          <button type="button" class="btn btn--primary" on:click={saveOverall}>Save to S950</button>
+        {:else if overallPhase === 'saving' || overallPhase === 'loading'}
+          <span class="modal__waitnote">do not close · in progress</span>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={closeOverallModal}>Close</button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* Native <select> wrapped in a chip — keeps the topbar visually
      consistent but stays accessible (keyboard, screen reader).
@@ -584,5 +734,45 @@
   }
   :global(.modal__list li) {
     margin: 4px 0;
+  }
+
+  /* OVS form grid — one row per field, label on the left and input
+     on the right. Inputs are minimal native controls; sized small
+     enough that 7+ rows fit in the 540px modal without scroll. */
+  :global(.ovs-grid) {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 4px 0 12px;
+  }
+  :global(.ovs-row) {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--black);
+    cursor: pointer;
+  }
+  :global(.ovs-row > span:first-child),
+  :global(.ovs-row > span:nth-child(2)) {
+    flex: 1;
+  }
+  :global(.ovs-row input[type="number"]),
+  :global(.ovs-row input[type="text"]) {
+    font: inherit;
+    width: 9ch;
+    padding: 2px 6px;
+    border: 1px solid var(--grey-medium);
+    border-radius: 3px;
+    background: var(--white);
+    color: var(--black);
+  }
+  :global(.ovs-row input[type="text"]) {
+    width: 14ch;
+  }
+  :global(.ovs-row input[type="checkbox"]) {
+    margin: 0;
+    cursor: pointer;
   }
 </style>

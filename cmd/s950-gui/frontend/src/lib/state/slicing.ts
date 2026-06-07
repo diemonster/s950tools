@@ -44,10 +44,51 @@ export function slicesFor(bars: number, division: Division): number {
   return Math.min(MAX_SLICES, Math.max(1, bars * division));
 }
 
+// Expected duration (seconds) of the user's declared loop at this
+// tempo. Mirrors slicesFor's 4/4 assumption: bars × beats-per-bar ×
+// seconds-per-beat. Used by the UI to surface "expected X.Xs vs
+// actual Y.Ys" so the user can tell if their tempo guess is right.
+export function expectedSeconds(bars: number, division: Division, bpm: number): number {
+  if (bpm <= 0) return 0;
+  return bars * 4 * (60 / bpm);
+}
+
+// Find the index of the nearest zero crossing to `targetIdx` within
+// `maxRadius` samples. A zero crossing here is any pair of adjacent
+// samples whose centered values straddle the silence midpoint —
+// `zeroLevel` is 0 for signed PCM and 2048 for S950 12-bit
+// offset-binary words. Returns `targetIdx` unchanged when no
+// crossing is found in range. Used by the slicing UI's "snap to
+// zero" affordance so slice boundaries land where the waveform
+// passes through silence, avoiding audible clicks on playback.
+export function findZeroCrossing(
+  samples: ArrayLike<number> | undefined,
+  targetIdx: number,
+  maxRadius: number,
+  zeroLevel = 0,
+): number {
+  if (!samples || samples.length < 2) return targetIdx;
+  const len = samples.length;
+  const sign = (i: number) => (samples[i] - zeroLevel) >= 0 ? 1 : -1;
+  const isCross = (i: number) =>
+    i >= 0 && i < len - 1 && sign(i) !== sign(i + 1);
+  if (isCross(targetIdx)) return targetIdx;
+  for (let r = 1; r <= maxRadius; r++) {
+    if (isCross(targetIdx - r)) return targetIdx - r;
+    if (isCross(targetIdx + r)) return targetIdx + r;
+  }
+  return targetIdx;
+}
+
 function defaultState(): SlicingState {
   return {
     active: false,
-    mode: 'beats',
+    // Manual is the discoverable default — toggling Slice on lets the
+    // user start dropping markers on the waveform immediately. Beats
+    // is the power-user mode (needs a known tempo + bar count); auto
+    // mode runs a transient stub. Users who want either still get a
+    // sticky preference per-slot once they pick it.
+    mode: 'manual',
     tempo: 120,
     bars: 1,
     division: 8,
@@ -76,6 +117,46 @@ export function buildEvenSlices(n: number, sampleLength: number): Slice[] {
       loopLength: 0,
     });
     cursor += each;
+  }
+  return out;
+}
+
+// Build slices spaced by tempo rather than by even division of the
+// sample length. Each slice spans (60/BPM) * (4/division) seconds at
+// the sample's rate, so slice boundaries always land on the beat
+// regardless of trim drift. Differs from buildEvenSlices in the
+// trim-mismatch case: if the sample is longer than `bars × beats`
+// would predict, the trailing audio falls outside any slice; if
+// shorter, slices stop at the actual end and the returned array is
+// shorter than `bars × division`.
+export function buildBeatSlices(
+  bars: number,
+  division: Division,
+  bpm: number,
+  sampleRateHz: number,
+  sampleLength: number,
+): Slice[] {
+  const n = Math.min(MAX_SLICES, Math.max(1, bars * division));
+  // Fall back to even-division when we lack the inputs to do the
+  // beat math (no tempo, no sample rate, empty sample). Same result
+  // shape so callers don't need to special-case.
+  if (n <= 0 || sampleLength <= 0 || bpm <= 0 || sampleRateHz <= 0) {
+    return buildEvenSlices(n, sampleLength);
+  }
+  const samplesPerSlice = (sampleRateHz * 60 / bpm) * (4 / division);
+  const out: Slice[] = [];
+  for (let i = 0; i < n; i++) {
+    const start = Math.round(i * samplesPerSlice);
+    if (start >= sampleLength) break;
+    const nextRaw = Math.round((i + 1) * samplesPerSlice);
+    const next = Math.min(sampleLength, nextRaw);
+    out.push({
+      start,
+      length: Math.max(1, next - start),
+      loopMode: 'one-shot',
+      loopStart: 0,
+      loopLength: 0,
+    });
   }
   return out;
 }
@@ -141,10 +222,11 @@ export function clearSlicingForSlots(slots: number[]) {
 // Convenience helpers for nested updates.
 export function setSliceMode(mode: SliceMode) {
   const cur = get(slicing);
-  const length = get(selectedSample).length;
+  const sample = get(selectedSample);
+  const length = sample.length;
   const next: Partial<SlicingState> = { mode };
   if (mode === 'beats') {
-    next.slices = buildEvenSlices(slicesFor(cur.bars, cur.division), length);
+    next.slices = buildBeatSlices(cur.bars, cur.division, cur.tempo, sample.rate, length);
   } else if (mode === 'auto') {
     // Real impl runs transient detection. For now, placeholder evens
     // with jitter — same surface area as future call site.
@@ -164,11 +246,12 @@ export function setSliceMode(mode: SliceMode) {
 
 export function setBeats(patch: Partial<Pick<SlicingState, 'tempo' | 'bars' | 'division'>>) {
   const cur = get(slicing);
-  const length = get(selectedSample).length;
+  const sample = get(selectedSample);
+  const length = sample.length;
   const merged = { ...cur, ...patch };
   updateSlicing({
     ...patch,
-    slices: buildEvenSlices(slicesFor(merged.bars, merged.division), length),
+    slices: buildBeatSlices(merged.bars, merged.division, merged.tempo, sample.rate, length),
     selectedIndex: 0,
   });
 }

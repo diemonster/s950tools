@@ -426,7 +426,7 @@ export namespace protocol {
 	    OmniOn: boolean;
 	    LoudnessOnCC7: boolean;
 	    ControllerSelect: number;
-	    MPEEnabled: boolean;
+	    MPEN: boolean;
 	    PitchWheelRange: number;
 	    BaudRate: number;
 	    Raw: number[];
@@ -446,7 +446,7 @@ export namespace protocol {
 	        this.OmniOn = source["OmniOn"];
 	        this.LoudnessOnCC7 = source["LoudnessOnCC7"];
 	        this.ControllerSelect = source["ControllerSelect"];
-	        this.MPEEnabled = source["MPEEnabled"];
+	        this.MPEN = source["MPEN"];
 	        this.PitchWheelRange = source["PitchWheelRange"];
 	        this.BaudRate = source["BaudRate"];
 	        this.Raw = source["Raw"];

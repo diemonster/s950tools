@@ -3,7 +3,10 @@ import { get } from 'svelte/store';
 import {
   buildEvenSlices,
   buildAutoSlices,
+  buildBeatSlices,
   slicesFor,
+  expectedSeconds,
+  findZeroCrossing,
   MAX_SLICES,
   commitSlices,
   hasCommittedChildren,
@@ -379,5 +382,115 @@ describe('attachAudioToSamples', () => {
     // source flag is preserved (we only patch audio fields).
     expect(reattached[0].source).toBe('device');
     expect(reattached[1].source).toBe('device');
+  });
+});
+
+describe('expectedSeconds', () => {
+  it('returns one bar of 4/4 at 120 BPM as 2 seconds', () => {
+    // 4 beats × 0.5 s/beat = 2 s. The division parameter is unused
+    // by the formula (subdivisions of a beat don't change the bar's
+    // length) — pinned here so a refactor doesn't sneak division in.
+    expect(expectedSeconds(1, 4, 120)).toBe(2);
+    expect(expectedSeconds(1, 8, 120)).toBe(2);
+    expect(expectedSeconds(1, 16, 120)).toBe(2);
+  });
+  it('scales linearly with bars and inversely with BPM', () => {
+    expect(expectedSeconds(4, 4, 120)).toBe(8);
+    expect(expectedSeconds(1, 4, 60)).toBe(4);
+  });
+  it('returns 0 when bpm is non-positive (avoids div-by-zero in UI)', () => {
+    expect(expectedSeconds(1, 4, 0)).toBe(0);
+    expect(expectedSeconds(1, 4, -1)).toBe(0);
+  });
+});
+
+describe('buildBeatSlices', () => {
+  // 1 bar of 1/8 at 120 BPM @ 26040 Hz → each slice spans
+  //   (60/120) * (4/8) = 0.25s = 6510 samples.
+  // 8 slices total = 52,080 samples in the "expected" length.
+  const BPM = 120, RATE = 26040;
+
+  it('places slices at fixed beat-intervals when sample matches expected length', () => {
+    const slices = buildBeatSlices(1, 8, BPM, RATE, 52080);
+    expect(slices).toHaveLength(8);
+    // First slice starts at 0; subsequent at multiples of samplesPerSlice.
+    expect(slices[0].start).toBe(0);
+    expect(slices[1].start).toBe(6510);
+    expect(slices[2].start).toBe(13020);
+    expect(slices[7].start).toBe(45570);
+    // Each slice is samplesPerSlice long except the last, which
+    // closes to the sample's actual end (here, identical to expected).
+    expect(slices[0].length).toBe(6510);
+    expect(slices[7].length).toBe(52080 - 45570);
+  });
+
+  it('truncates when the sample is shorter than bars × division', () => {
+    // Sample is only ~5 slices' worth of audio. We get 5 slices,
+    // not 8 — the trailing 3 expected slices would start past
+    // sampleLength so they're dropped.
+    const slices = buildBeatSlices(1, 8, BPM, RATE, 6510 * 5);
+    expect(slices).toHaveLength(5);
+    expect(slices[4].length).toBe(6510);
+  });
+
+  it('does not extend the last slice past sampleLength when sample is longer', () => {
+    // Sample is 1.5x expected. We still get 8 slices @ 6510 each;
+    // the trailing audio falls outside any slice (user can extend
+    // bars to capture it).
+    const slices = buildBeatSlices(1, 8, BPM, RATE, Math.floor(52080 * 1.5));
+    expect(slices).toHaveLength(8);
+    expect(slices[7].start + slices[7].length).toBeLessThanOrEqual(52080 + 1);
+  });
+
+  it('falls back to even-division when bpm or rate is zero', () => {
+    // Mirrors buildEvenSlices when we lack the inputs for beat math
+    // — same n, same total length coverage.
+    const beats = buildBeatSlices(1, 8, 0, RATE, 1000);
+    const even  = buildEvenSlices(slicesFor(1, 8), 1000);
+    expect(beats).toEqual(even);
+  });
+
+  it('caps slice count at MAX_SLICES', () => {
+    // bars × division would be 64 (== MAX_SLICES); push it past.
+    const slices = buildBeatSlices(8, 32, BPM, RATE, 1_000_000);
+    expect(slices.length).toBeLessThanOrEqual(MAX_SLICES);
+  });
+});
+
+describe('findZeroCrossing', () => {
+  it('returns the target index when it already sits on a crossing', () => {
+    // Adjacent samples [1, -1] cross at index 0 (sign change between 0 and 1).
+    expect(findZeroCrossing([1, -1, -1, -1], 0, 10)).toBe(0);
+  });
+
+  it('searches outward from the target index', () => {
+    //                     idx: 0  1  2  3  4  5
+    const samples         =   [  1, 1, 1, 1, -1, 1];
+    // Crossings sit at index 3 (sign change between samples[3]=1 and
+    // samples[4]=-1) and index 4 (samples[4]=-1 → samples[5]=1).
+    // Targeting index 2 with r=1 checks index 1 (no) then index 3
+    // (yes) — returns 3 because the left-neighbour check happens
+    // first within a given radius.
+    expect(findZeroCrossing(samples, 2, 5)).toBe(3);
+  });
+
+  it('respects the zeroLevel for S950 offset-binary words', () => {
+    // S950 words: silence = 2048. Sign change is around 2048, not 0.
+    //                      idx: 0     1     2     3     4
+    const words            =   [3000, 3000, 2000, 2000, 3000];
+    // Targeting index 0 with zeroLevel=2048: crossing between (1,2) since
+    // 3000-2048=+952 and 2000-2048=-48 → sign change.
+    expect(findZeroCrossing(words, 0, 10, 2048)).toBe(1);
+  });
+
+  it('returns the target unchanged when no crossing is in range', () => {
+    // All-positive run with a tiny search radius — no crossing visible.
+    expect(findZeroCrossing([1, 1, 1, 1, 1], 2, 1)).toBe(2);
+  });
+
+  it('returns the target when the audio buffer is missing or too short', () => {
+    expect(findZeroCrossing(undefined, 5, 10)).toBe(5);
+    expect(findZeroCrossing([], 5, 10)).toBe(5);
+    expect(findZeroCrossing([42], 5, 10)).toBe(5);
   });
 });

@@ -11,6 +11,7 @@
     selectedKeygroup,
     newKeygroup,
     isAssignedSample,
+    MAX_KEYGROUPS,
     type Keygroup,
     type Program,
   } from '../lib/state/programs';
@@ -299,9 +300,17 @@
   <section class="canvas">
     <div class="canvas__head">
       <div class="group">
-        <button class="head-chip">Distribute</button>
-        <button class="head-chip">Add Zone</button>
-        <button class="head-chip">Clear</button>
+        <button
+          class="head-chip"
+          type="button"
+          disabled={prog.keygroups.length >= MAX_KEYGROUPS}
+          title={prog.keygroups.length >= MAX_KEYGROUPS
+            ? `Program is at the S950's ${MAX_KEYGROUPS}-keygroup cap`
+            : 'Append a new keygroup spanning the full keyboard'}
+          on:click={() => {
+            const n = selectedProgram.addKeygroup();
+            if (n !== null) selectedKeygroupN.set(n);
+          }}>+ Add Zone</button>
       </div>
     </div>
 
@@ -381,7 +390,6 @@
       <div class="toggle-row">
         <button type="button" class="toggle {kg.oneShot ? 'on' : ''}" on:click={() => selectedKeygroup.update({ oneShot: !kg.oneShot })}>One-shot</button>
         <button type="button" class="toggle {kg.constPitch ? 'on' : ''}" on:click={() => selectedKeygroup.update({ constPitch: !kg.constPitch })}>Const-pitch</button>
-        <button type="button" class="toggle {kg.keyFilter ? 'on' : ''}" on:click={() => selectedKeygroup.update({ keyFilter: !kg.keyFilter })}>Key-filter</button>
       </div>
 
       <hr class="panel__divider" />
@@ -409,12 +417,11 @@
           min={1} max={128}
           on:change={(e) => selectedKeygroup.update({ vel: e.detail })} />
       </div>
-      <div class="row">
-        <span class="row__label">MIDI channel</span>
+      <div class="row" title="Per-keygroup MIDI channel offset (added to the program's basic channel). 0..15.">
+        <span class="row__label">MIDI ch. offset</span>
         <NumField
           value={kg.midiChannel}
-          min={0} max={16}
-          format={(v) => v === 16 ? 'OMNI' : String(v)}
+          min={0} max={15}
           on:change={(e) => selectedKeygroup.update({ midiChannel: e.detail })} />
       </div>
       <!-- Voice out assigns the keygroup to a physical/individual

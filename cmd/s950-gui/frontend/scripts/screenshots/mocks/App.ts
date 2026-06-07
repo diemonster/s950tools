@@ -238,7 +238,7 @@ export async function GetOverall() {
     OmniOn: false,
     LoudnessOnCC7: false,
     ControllerSelect: 0,
-    MPEEnabled: false,
+    MPEN: false,
     PitchWheelRange: 2,
     BaudRate: 38400,
     Raw: [],

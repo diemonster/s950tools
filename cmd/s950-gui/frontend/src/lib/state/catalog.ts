@@ -9,7 +9,7 @@ import { get } from 'svelte/store';
 import * as App from '../../../wailsjs/go/main/App';
 import { samples, selectedSampleSlot, type Sample } from './samples';
 import {
-  programs, selectedSlot,
+  programs, selectedSlot, ZONE_COLORS,
   type Program, type Keygroup, type Layer, type Modulation,
 } from './programs';
 import { scanMemory } from './memory';
@@ -36,13 +36,6 @@ selectedSlot.subscribe((slot) => {
 selectedSampleSlot.subscribe((slot) => {
   void ensureSampleLoaded(slot);
 });
-
-// Palette used to colour keygroup zones when we have no other signal.
-// Same nine colours used in the static mockups; cycles by index.
-const ZONE_COLORS = [
-  '--rb-yellow', '--rb-magenta', '--rb-cyan', '--rb-green',
-  '--rb-orange', '--rb-red', '--rb-purple', '--rb-blue', '--rb-pink',
-];
 
 // Default sample shape used until SPRM is fetched. `length` is 1
 // instead of 0 so the waveform's percentage math doesn't divide by
@@ -238,9 +231,8 @@ export async function revertSampleToDevice(slot: number): Promise<void> {
 
 // programJSONToProgram maps the wire-format JSON from
 // protocol.ProgramJSON into the frontend's Program type, with its
-// nested layers + modulation block. Fields that have no protocol
-// counterpart (constPitch, keyFilter, voiceOut labels) default to
-// safe values — they'll write back as no-ops until we model them.
+// nested layers + modulation block. voiceOut labels default to 'ALL'
+// when the byte doesn't match a known assignment.
 // Exported so the Program tab's Open .json flow can convert a
 // loaded JSON without re-implementing the field mapping.
 export function programJSONToProgram(j: any, slot: number): Program {
@@ -252,11 +244,10 @@ export function programJSONToProgram(j: any, slot: number): Program {
     soft: layerFrom(k.soft_sample, k.soft_tune, k.soft_filter, k.soft_loudness),
     loud: layerFrom(k.loud_sample, k.loud_tune, k.loud_filter, k.loud_loudness),
     color: ZONE_COLORS[i % ZONE_COLORS.length],
-    midiChannel: k.midi_offset ?? 16,
+    midiChannel: Math.min(15, k.midi_offset ?? 0),
     voiceOut: voiceOutLabel(k.voice_out_assign ?? 255),
     oneShot:    Boolean((k.control_bits ?? 4) & 0x08),
-    constPitch: false, // no documented protocol field
-    keyFilter:  false, // no documented protocol field
+    constPitch: Boolean((k.control_bits ?? 4) & 0x01),
     mod: modulationFrom(k),
     // Stash the 140-byte wire payload for round-trip preservation
     // when we Send back to the device.

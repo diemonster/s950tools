@@ -22,7 +22,7 @@ func buildOVSPayload() [OVSPayloadSize]byte {
 		OmniOn:           true,
 		LoudnessOnCC7:    false,
 		ControllerSelect: 2, // RS-232C
-		MPEEnabled:       false,
+		MPEN:       false,
 		PitchWheelRange:  7,
 		BaudRate:         9600,
 	}
@@ -92,7 +92,7 @@ func TestOverallSettings_EditedFieldsRoundTrip(t *testing.T) {
 	o.BasicChannel = 5
 	o.OmniOn = false
 	o.LoudnessOnCC7 = true
-	o.MPEEnabled = true
+	o.MPEN = true
 	o.PitchWheelRange = 12
 	o.BaudRate = 38400
 	o.RxSimChannel = 10
@@ -117,8 +117,8 @@ func TestOverallSettings_EditedFieldsRoundTrip(t *testing.T) {
 	if !back.LoudnessOnCC7 {
 		t.Error("LoudnessOnCC7 should round-trip true")
 	}
-	if !back.MPEEnabled {
-		t.Error("MPEEnabled should round-trip true")
+	if !back.MPEN {
+		t.Error("MPEN should round-trip true")
 	}
 	if back.PitchWheelRange != 12 {
 		t.Errorf("PitchWheelRange = %d, want 12", back.PitchWheelRange)

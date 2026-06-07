@@ -61,17 +61,30 @@ export type Keygroup = {
   loud: Layer;
   // CSS custom property reference for the swatch + canvas zone tint.
   color: string;
-  midiChannel: number; // 0..15, or 16 for OMNI
+  midiChannel: number; // per-keygroup MIDI channel offset, 0..15
   voiceOut: string;    // 'ALL' | '1'..'8'
   oneShot: boolean;
   constPitch: boolean;
-  keyFilter: boolean;
   mod: Modulation;
   // Round-trip cache: the 140-byte keygroup wire payload as hex.
   // Populated when we load from the device; passed back on SetProgram
   // so undocumented/reserved bytes the S950 still uses survive.
   rawBytesHex?: string;
 };
+
+// Matches internal/protocol/program.go MaxKeygroups. The S950 firmware
+// rejects programs with more than 31 keygroups, so the UI hard-caps
+// "Add Zone" at this count.
+export const MAX_KEYGROUPS = 31;
+
+// Palette used to colour keygroup zones in the canvas. Same nine
+// colours used in the static mockups; cycles by index. Lives here
+// (not catalog.ts) so the "Add Zone" action and the device-load path
+// share one source of truth.
+export const ZONE_COLORS = [
+  '--rb-yellow', '--rb-magenta', '--rb-cyan', '--rb-green',
+  '--rb-orange', '--rb-red', '--rb-purple', '--rb-blue', '--rb-pink',
+];
 
 export type Program = {
   slot: number;
@@ -110,11 +123,10 @@ export function newKeygroup(n: number, color = '--rb-yellow'): Keygroup {
     lowKey: 0, highKey: 127, vel: 128,
     soft: { sample: '', transpose: 0, filter: 99, loudness: 0 },
     loud: { sample: '', transpose: 0, filter: 99, loudness: 0 },
-    midiChannel: 16, // OMNI
+    midiChannel: 0,
     voiceOut: 'ALL',
     oneShot: true,
     constPitch: false,
-    keyFilter: false,
     mod: defaultMod(),
   };
 }
@@ -178,6 +190,28 @@ function makeSelectedProgram() {
       // Schedule a live-sync write-back. Lazy-imported to avoid a
       // circular dependency (livesync imports programs).
       void import('./livesync').then((m) => m.scheduleProgramWriteback(targetSlot));
+    },
+    // addKeygroup appends a new keygroup to the selected program and
+    // returns its `n` index (1-based), or null when MAX_KEYGROUPS is
+    // already reached. Picks the next color from ZONE_COLORS by
+    // current keygroup count so a freshly-added zone visually mirrors
+    // a device-loaded one.
+    addKeygroup(): number | null {
+      const slot = get(selectedSlot);
+      const list = get(programs);
+      const prog = list.find((p) => p.slot === slot);
+      if (!prog) return null;
+      if (prog.keygroups.length >= MAX_KEYGROUPS) return null;
+      const nextN = (prog.keygroups[prog.keygroups.length - 1]?.n ?? 0) + 1;
+      const color = ZONE_COLORS[prog.keygroups.length % ZONE_COLORS.length];
+      const fresh = newKeygroup(nextN, color);
+      programs.update((curr) =>
+        curr.map((p) =>
+          p.slot === slot ? { ...p, keygroups: [...p.keygroups, fresh] } : p
+        )
+      );
+      void import('./livesync').then((m) => m.scheduleProgramWriteback(slot));
+      return nextN;
     },
   };
 }

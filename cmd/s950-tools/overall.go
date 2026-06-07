@@ -149,7 +149,7 @@ func printOverall(o *protocol.OverallSettings) {
 	fmt.Printf("  rs-232 baud   : %d\n", o.BaudRate)
 	fmt.Printf("  pitch wheel   : ±%d semitones\n", o.PitchWheelRange)
 	fmt.Printf("  loudness CC7  : %s\n", onOff(o.LoudnessOnCC7))
-	fmt.Printf("  MPE           : %s\n", onOff(o.MPEEnabled))
+	fmt.Printf("  MPEN (?)      : %s (purpose unconfirmed — see protocol/overall.go)\n", onOff(o.MPEN))
 	fmt.Printf("  rx-sim ch/k/v : %d / %d / %d\n", o.RxSimChannel, o.RxSimKey, o.RxSimVelocity)
 }
 

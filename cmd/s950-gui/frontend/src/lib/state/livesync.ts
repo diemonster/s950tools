@@ -134,14 +134,17 @@ export function programToJSON(p: Program): any {
 }
 
 function keygroupToJSON(kg: Keygroup): any {
-  // Reassemble control_bits from the toggle UI. Other bits
-  // (transpose, vibrato-desync, vel-release, vel-xfade-curve)
-  // aren't exposed in the UI — preserve them from rawBytesHex via
-  // the Go decoder's round-trip behaviour. For freshly-created
-  // keygroups (no raw bytes), the default 4 keeps vibrato-desync
-  // on and transpose enabled.
+  // Reassemble control_bits from the toggle UI. We expose two bits:
+  //   bit 0 (transpose OFF) — driven by the "Const-pitch" toggle
+  //   bit 3 (one-shot)      — driven by the "One-shot" toggle
+  // The other bits (vibrato-desync, vel-release, vel-xfade variants)
+  // aren't surfaced; the default 4 keeps vibrato-desync on. Bits
+  // not in our UI are NOT preserved across edits — if a future
+  // round-trip needs them, decode rawBytesHex on the Go side and
+  // mask in our exposed bits there.
   let ctrl = 4;
-  if (kg.oneShot) ctrl |= 0x08;
+  if (kg.oneShot)    ctrl |= 0x08;
+  if (kg.constPitch) ctrl |= 0x01;
   return {
     lower_key: kg.lowKey,
     upper_key: kg.highKey,
