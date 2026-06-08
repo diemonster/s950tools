@@ -1761,6 +1761,7 @@
         class="waveform"
         class:waveform--slicing={$slicing.active}
         class:waveform--manual={$slicing.active && $slicing.mode === 'manual'}
+        class:is-zoomed={$slicing.zoom > 1}
         bind:this={waveformEl}
         on:click={onWaveformClick}
         on:mousemove={onWaveformMouseMove}
@@ -1985,7 +1986,7 @@
                Unlike Reverse, Mode IS honored by the device's playback
                engine on SPRM write (checked at end-of-region per
                trigger), so no front-panel ENT is required. -->
-          <div class="row row--inline">
+          <div class="row">
             <span class="row__label">Mode</span>
             <div class="mode-row">
               <button type="button" class="toggle {smp.mode === 'one-shot' ? 'on' : ''}" on:click={() => selectedSample.update({ mode: 'one-shot' })}>Once</button>
@@ -2078,7 +2079,7 @@
                   role="button"
                   tabindex="0">
                   <span class="slice-list__num">{String(i + 1).padStart(2, '0')}</span>
-                  <span>{sl.start.toLocaleString()} — {(sl.start + sl.length).toLocaleString()}</span>
+                  <span class="slice-list__range" title="{sl.start.toLocaleString()} — {(sl.start + sl.length).toLocaleString()}">{sl.start.toLocaleString()} — {(sl.start + sl.length).toLocaleString()}</span>
                   <span class="slice-list__loop">{sl.loopMode}</span>
                   <button
                     type="button"
@@ -2139,7 +2140,7 @@
                   format={(v) => v.toLocaleString()}
                   on:change={(e) => updateSliceAt($slicing.selectedIndex, { length: e.detail })} />
               </div>
-              <div class="row row--inline">
+              <div class="row">
                 <span class="row__label">Loop</span>
                 <div class="mode-row">
                   {#each LOOP_MODES as m}
@@ -2707,7 +2708,13 @@
     border: var(--bw) solid var(--black);
     border-radius: var(--r);
     overflow: hidden;
+    /* --scroll-h is the height the horizontal scrollbar steals from
+       the bottom of the waveform when zoom > 1. Every overlay that
+       anchors to the ruler at bottom: 18px adds this so the bar
+       doesn't visually mask their bottom 10px. */
+    --scroll-h: 0px;
   }
+  .waveform.is-zoomed { --scroll-h: 10px; }
   .waveform__svg { display: block; width: 100%; height: 100%; }
   /* Reverse-sample mirror — synthetic shape flips so the visual
      read of playback direction matches the SPRM Reversed flag. */
@@ -2758,7 +2765,7 @@
   }
   .waveform__loop {
     position: absolute;
-    top: 0; bottom: 18px;
+    top: 0; bottom: calc(18px + var(--scroll-h, 0px));
     left: var(--loop-start);
     width: var(--loop-width);
     background: color-mix(in srgb, var(--rb-cyan) 14%, transparent);
@@ -2767,7 +2774,7 @@
   }
   .waveform__inactive {
     position: absolute;
-    top: 0; bottom: 18px;
+    top: 0; bottom: calc(18px + var(--scroll-h, 0px));
     background: rgba(0,0,0,0.55);
   }
   .waveform__inactive--pre  { left: 0; width: var(--start); }
@@ -2775,7 +2782,7 @@
 
   .marker {
     position: absolute;
-    top: 0; bottom: 18px;
+    top: 0; bottom: calc(18px + var(--scroll-h, 0px));
     width: 2px;
     margin-left: -1px;
     background: var(--marker-color, var(--rb-green));
@@ -2873,12 +2880,27 @@
     min-height: 0;
   }
   .controls :global(.card) {
-    /* Bumped a touch now that the identity card no longer eats
-       ~60px of vertical room — gives the Slices card breathing
-       space for loop-mode rows without immediately scrolling. */
-    max-height: 360px;
+    /* Bumped (360 → 420) so the Device & File card's full button
+       stack (Apply + Import + Copy + Save + Send + Get SPRM, plus
+       the divider) fits without truncating the last button when
+       slicing is active. The Slices/Playback cards are still comfortably
+       bounded — they typically settle below this cap. */
+    max-height: 420px;
     overflow-y: auto;
+    /* Force visible thin scrollbars instead of macOS overlay style
+       so when content DOES overflow, the user sees the affordance
+       and knows to scroll. Same pattern as the Keygroup panels. */
+    scrollbar-width: thin;
+    scrollbar-color: var(--grey-medium) transparent;
   }
+  .controls :global(.card)::-webkit-scrollbar { width: 8px; }
+  .controls :global(.card)::-webkit-scrollbar-track { background: transparent; }
+  .controls :global(.card)::-webkit-scrollbar-thumb {
+    background: var(--grey-medium);
+    border-radius: 4px;
+    border: 2px solid var(--white);
+  }
+  .controls :global(.card)::-webkit-scrollbar-thumb:hover { background: var(--grey-dark); }
 
   /* Merged slicing workspace. One outer card spanning two grid columns;
      two inner halves divided by a hairline. padding: 0 lets the inner
@@ -2903,6 +2925,15 @@
   }
   .slice-pair__col + .slice-pair__col {
     border-left: 1px solid var(--grey-light);
+  }
+  /* Selected-slice Start/Length rows live inside the slice-pair col,
+     which is half a 1fr column inside the 3-up controls grid. The
+     default .row label column (120px) leaves only ~70px for the
+     6-digit-comma NumField + stepper at 1280px. Narrow the label
+     to 88px to give the value room. Scoped to slice-pair so the
+     Playback card's Tune/Loudness rows are unaffected. */
+  .slice-pair__col :global(.row) {
+    grid-template-columns: 88px 1fr;
   }
   .slice-pair__empty {
     font-family: var(--font-mono);
@@ -2970,7 +3001,7 @@
      vertical guide. Selected slice flips to magenta. */
   .slice-marker {
     position: absolute;
-    top: 0; bottom: 18px;
+    top: 0; bottom: calc(18px + var(--scroll-h, 0px));
     left: var(--x);
     width: 0;
     pointer-events: auto;
@@ -3037,7 +3068,7 @@
      a glance which slices alternate without selecting them. */
   .slice-loop {
     position: absolute;
-    top: 18px; bottom: 18px;
+    top: 18px; bottom: calc(18px + var(--scroll-h, 0px));
     background: color-mix(in srgb, var(--rb-cyan) 14%, transparent);
     border-left: 1px solid var(--rb-cyan);
     border-right: 1px solid var(--rb-cyan);
@@ -3085,7 +3116,7 @@
   .waveform__playhead {
     position: absolute;
     top: 0;
-    bottom: 18px;
+    bottom: calc(18px + var(--scroll-h, 0px));
     width: 2px;
     pointer-events: none;
     z-index: 2;
@@ -3099,7 +3130,7 @@
   .waveform__cursor {
     position: absolute;
     top: 0;
-    bottom: 18px;
+    bottom: calc(18px + var(--scroll-h, 0px));
     width: 1px;
     pointer-events: none;
     z-index: 1;
@@ -3146,11 +3177,22 @@
   }
   .slice-list__row {
     display: grid;
-    grid-template-columns: 28px 1fr auto 22px 22px;
+    /* Loop column pinned to 72px ('ping-pong' worst case) so the
+       range cell gets a stable min-width: 0 1fr. The range span
+       below ellipsises long values instead of forcing the row past
+       its container (was overflowing into a horizontal scrollbar
+       at narrow .slice-pair__col widths). */
+    grid-template-columns: 28px minmax(0, 1fr) 72px 22px 22px;
     align-items: center;
     gap: 6px;
     padding: 3px 8px;
     cursor: pointer;
+  }
+  .slice-list__row > .slice-list__range {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .slice-list__row + .slice-list__row { border-top: 1px solid var(--grey-light); }
   .slice-list__row:hover { background: var(--grey-light); }
@@ -3187,21 +3229,28 @@
   /* Inline row variant — label width is content-sized instead of a
      fixed 120px grid track, so the toggles get the full remaining
      width of the card. */
-  .row--inline {
-    display: flex;
-    grid-template-columns: unset;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 0;
-  }
+  /* Segmented toggle row — Once / Loop / Ping-pong (and the Mode
+     equivalent on the Playback card). Lives in the value cell of a
+     standard .row grid so the buttons align horizontally with the
+     NumField value boxes above. flex: 1 1 0 on the toggles makes
+     them share the cell width equally, so they always sit on one
+     line and resize together as the panel narrows; min-width: 0 +
+     ellipsis lets the longest label (PING-PONG) truncate gracefully
+     at very tight widths instead of overflowing the row. */
   .mode-row {
-    display: inline-flex;
+    display: flex;
+    width: 100%;
     gap: 4px;
     flex-wrap: nowrap;
     min-width: 0;
   }
   .mode-row :global(.toggle) {
-    padding: 3px 8px;
-    flex-shrink: 0;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 3px 6px;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

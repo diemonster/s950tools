@@ -191,7 +191,7 @@ body {
   box-shadow: 0 2px 0 var(--rb-magenta);
 }
 .logo--toggle:active { transform: translateY(0); box-shadow: none; }
-.tabs { display: flex; gap: 4px; margin-left: 24px; }
+.tabs { display: flex; gap: 4px; margin-left: 24px; flex-shrink: 0; }
 .tab {
   font-family: var(--font-mono);
   text-transform: uppercase;
@@ -245,6 +245,10 @@ body {
   letter-spacing: 0.1em;
   padding: 4px 7px;
   color: var(--grey-dark);
+  /* Pin the width so toggling 'EXM' ↔ 'EXM ✓' doesn't push the
+     System + slot chips left/right by ~14px on every flip. */
+  min-width: 4ch;
+  text-align: center;
 }
 .chip--exm:hover { background: var(--grey-light); }
 .chip--exm-on {
@@ -254,20 +258,45 @@ body {
 }
 .chip--exm-on:hover { background: var(--rb-cyan); opacity: 0.85; }
 
-/* Tighter modes layered in three steps. The default Wails window is
+/* Tighter modes layered in steps. The default Wails window is
    1440px wide, which is already cramped once port names are picked
-   and the status + slot chips are visible. The two chip __noun
-   suffixes (memory's "/ 1.5M words" and the slot chip's "samples")
-   are the first to drop — at <=1700 — because that's where the
-   topbar starts clipping the trailing slot chip on a default-sized
-   Wails window with both MIDI ports picked. Below 1440 the
-   chip__label prefixes ("MIDI in", "Ch", …) drop too; below 1280
-   the chips compact their font + padding entirely. */
-@media (max-width: 1700px) {
+   and the status + slot chips are visible. Port-name truncation now
+   applies at ALL widths — a full /dev/cu.usbserial-XXXXX path is
+   ~180px wide and would swell the chip past every breakpoint budget
+   if left intrinsic. The title attribute on the select still shows
+   the full name on hover. */
+.topbar .chip--select .chip__value,
+.topbar .chip--mem strong {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+/* Step-down breakpoints, ordered from gentlest to most aggressive.
+   The first two trim text inside chips (noun suffix, then label
+   prefix); the next two start dropping whole chips, prioritising
+   the slot counter (rightmost, navigation-critical) staying visible
+   over the convenience shortcuts (Refresh + System) which have
+   alternative entry points elsewhere in the UI. */
+@media (max-width: 1820px) {
   .chip__noun { display: none; }
 }
-@media (max-width: 1440px) {
+@media (max-width: 1560px) {
   .chip__label { display: none; }
+}
+@media (max-width: 1500px) {
+  /* Connected-state shortcut chips (↻ Refresh, ⚙ System) add ~180px
+     of pressure on the right side once you're on serial + connected.
+     Drop them here — well before the slot chip starts getting clipped
+     by overflow:hidden — so the slot counter survives at typical
+     1400-1500px Wails windows. Their actions remain reachable: System
+     opens an OVS modal that we can re-route through a menu later;
+     Refresh is essentially a manual re-fetch the user rarely needs. */
+  .topbar .chip--btn:not(.chip--btn-primary) { display: none; }
+  /* Also tighten the port-name truncation so the chip stops swelling
+     into the space vacated by the dropped shortcuts. */
+  .topbar .chip--select .chip__value { max-width: 110px; }
 }
 @media (max-width: 1280px) {
   .topbar { gap: 8px; padding: 0 10px; }
@@ -277,34 +306,22 @@ body {
   .logo { font-size: 12px; padding: 3px 8px; }
 }
 @media (max-width: 1100px) {
-  /* Below this, MIDI port chips would still get cramped — collapse
-     port name to fixed-width with ellipsis so they don't push other
-     chips off-screen. */
-  .topbar .chip strong {
-    display: inline-block;
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    vertical-align: bottom;
-  }
-  /* Port chip values (full /dev/tty.usbserial-… paths) get the same
-     ellipsis treatment. The bold-only rule above misses them because
-     the value lives in .chip__value, not <strong>. */
-  .topbar .chip__value {
-    display: inline-block;
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    vertical-align: bottom;
-  }
-  /* Hide low-priority chips so the slot counter (the rightmost,
-     navigation-critical chip) doesn't get clipped by the topbar's
-     overflow:hidden. Memory + EXM are diagnostic / power-user info
-     and they get a dedicated surface elsewhere on smaller windows. */
+  /* Memory + EXM are diagnostic / power-user info; the same memory
+     usage is visible in the catalog. Slot counter stays. */
   .chip--mem,
   .chip--exm { display: none; }
+  .topbar .chip--select .chip__value { max-width: 90px; }
 }
-.chip--status { display: inline-flex; align-items: center; gap: 6px; }
+.chip--status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Pin a min-width wide enough for the longest label ('Connecting…',
+     'Conn. error') so the status chip doesn't resize on every phase
+     transition and shove Memory/EXM/System/slot left or right. */
+  min-width: 11ch;
+  justify-content: flex-start;
+}
 .status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -412,8 +429,11 @@ body {
   /* 28 slot · name · meta(rate or LOCAL tag) · optional × close.
      The auto-auto suffix collapses to a single column on rows that
      don't have a delete button (device samples + programs), so the
-     layout looks identical regardless of source. */
-  grid-template-columns: 28px 1fr auto auto;
+     layout looks identical regardless of source. minmax(0, 1fr) on
+     the name column lets text-overflow: ellipsis actually fire when
+     a long on-disk filename arrives via local import — bare 1fr's
+     min-content floor would otherwise refuse to shrink. */
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
@@ -850,6 +870,14 @@ body.modal-open .modal-backdrop { display: flex; }
   color: var(--grey-medium);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  /* Ellipsise the decorative subtitle instead of letting it push the
+     title to wrap when both texts together exceed the 540px modal
+     head width (notably 'S950 not responding over RS-232' + its
+     route '... no reply from sampler'). */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .modal__body { padding: 16px 18px; }
 .modal__step {

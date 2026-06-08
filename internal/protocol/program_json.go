@@ -193,7 +193,14 @@ type KeygroupJSON struct {
 	// 8 = left group (0..3), 9 = right group (4..7), 255 = ALL outputs.
 	VoiceOutAssign uint8 `json:"voice_out_assign"`
 
-	// MidiOffset shifts MIDI input by N semitones for this keygroup (0..15).
+	// MidiOffset is added to the program's basic MIDI channel to
+	// derive this keygroup's effective receive channel (0..15). The
+	// Drumify front-panel function uses it to put each drum keygroup
+	// on its own MIDI channel. Per dxzl/akai-s950's ProgramsForm —
+	// the only public reference for this byte — values >15 should
+	// be clamped to 0; the frontend already does so in catalog.ts.
+	// (NOT a semitone transpose — per-layer transpose lives in
+	// SoftTune / LoudTune.)
 	MidiOffset uint8 `json:"midi_offset"`
 
 	// VelXfade50pct is the velocity at which the soft/loud crossfade is

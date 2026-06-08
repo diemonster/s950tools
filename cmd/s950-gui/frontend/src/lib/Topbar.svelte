@@ -757,6 +757,11 @@
   :global(.ovs-row > span:first-child),
   :global(.ovs-row > span:nth-child(2)) {
     flex: 1;
+    /* Defensive — long inline labels ("Omni on (receive on all
+       channels — overrides basic channel)") want to grow the row
+       past the modal's max-width:92vw on very narrow viewports
+       unless the flex item is allowed to shrink below min-content. */
+    min-width: 0;
   }
   :global(.ovs-row input[type="number"]),
   :global(.ovs-row input[type="text"]) {

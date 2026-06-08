@@ -515,6 +515,10 @@
   .kg-card { display: flex; flex-direction: column; }
   .kg-table-wrap {
     overflow-y: auto;
+    /* x-scroll too so long sample names + the Edit ↗ button don't
+       get silently clipped by the parent .card's overflow: hidden
+       at narrow widths (notably the stacked layout below 1100px). */
+    overflow-x: auto;
     max-height: 360px;
     margin: 0 -2px;
   }
@@ -630,7 +634,12 @@
     margin: 0 4px;
   }
   .hint {
-    margin-left: auto;
+    /* Always land on its own row at the right edge instead of fighting
+       for inline space with the action buttons — margin-left: auto
+       used to push it solo to a wrapped row anyway, which read as
+       broken. Pin it explicitly so the layout intent is clear. */
+    flex-basis: 100%;
+    text-align: right;
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--grey-dark);
@@ -649,6 +658,13 @@
     list-style: none;
     padding: 6px 0;
     border-top: 1px solid var(--grey-light);
+  }
+  /* WebKit (Wails on macOS) still paints the native disclosure
+     triangle unless ::-webkit-details-marker is explicitly hidden;
+     list-style:none alone isn't enough. Otherwise the row reads
+     '▶ Advanced ▸' with both the native + custom chevrons. */
+  details.advanced :global(summary)::-webkit-details-marker {
+    display: none;
   }
   details.advanced :global(summary)::after { content: " ▸"; }
   details.advanced[open] :global(summary)::after { content: " ▾"; }

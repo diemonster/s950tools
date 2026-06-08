@@ -133,16 +133,46 @@ export function programToJSON(p: Program): any {
   };
 }
 
-function keygroupToJSON(kg: Keygroup): any {
-  // Reassemble control_bits from the toggle UI. We expose two bits:
-  //   bit 0 (transpose OFF) — driven by the "Const-pitch" toggle
-  //   bit 3 (one-shot)      — driven by the "One-shot" toggle
-  // The other bits (vibrato-desync, vel-release, vel-xfade variants)
-  // aren't surfaced; the default 4 keeps vibrato-desync on. Bits
-  // not in our UI are NOT preserved across edits — if a future
-  // round-trip needs them, decode rawBytesHex on the Go side and
-  // mask in our exposed bits there.
-  let ctrl = 4;
+// Byte offset of ControlBits inside the 140-byte keygroup wire payload.
+// Matches `kgKBITS = 36` in internal/protocol/program.go. The field is
+// DB-encoded (low 7 bits at byte N, bit 7 at byte N+1) per the S950's
+// SysEx codec — keep the constants and the decoder in sync.
+const KG_CTRL_BITS_OFFSET = 36;
+// Mask of ControlBits the UI exposes: bit 0 ("transpose OFF" via the
+// Const-pitch toggle) + bit 3 (one-shot trigger). Edits ONLY touch
+// these bits; everything else (vibrato-desync, vel-release, vel-xfade
+// curve variants) is preserved from the keygroup's last-known wire
+// payload so toggling One-shot doesn't silently reset, say, the
+// vel-release mode the user set from the front panel.
+const KG_CTRL_BITS_UI_MASK = 0x09;
+
+// Extract the original ControlBits byte from a keygroup's rawBytesHex
+// (the 140-byte wire image stashed on Get). Returns null when no raw
+// bytes are present (freshly-added keygroup via Add Zone) or when the
+// hex string is malformed.
+function readRawControlBits(rawBytesHex: string | undefined): number | null {
+  if (!rawBytesHex) return null;
+  const i = KG_CTRL_BITS_OFFSET * 2;
+  if (rawBytesHex.length < i + 4) return null;
+  const lo = parseInt(rawBytesHex.slice(i, i + 2), 16);
+  const hi = parseInt(rawBytesHex.slice(i + 2, i + 4), 16);
+  if (Number.isNaN(lo) || Number.isNaN(hi)) return null;
+  // Mirror sysex.DecodeDB from internal/sysex/codec.go.
+  return (lo & 0x7F) | ((hi & 0x01) << 7);
+}
+
+export function keygroupToJSON(kg: Keygroup): any {
+  // ControlBits round-trip:
+  //   bit 0 (transpose OFF) ← Const-pitch toggle (UI-controlled)
+  //   bit 3 (one-shot)      ← One-shot toggle    (UI-controlled)
+  // Other bits (vibrato-desync, vel-release, vel-xfade variants)
+  // aren't surfaced in the UI, so they must SURVIVE every edit.
+  // Read the device's last-known ControlBits out of rawBytesHex,
+  // clear the bits the UI owns, then OR in the toggle values.
+  // When rawBytesHex is missing (Add Zone in a fresh program), the
+  // base value 4 keeps vibrato-desync on + transpose enabled.
+  const base = readRawControlBits(kg.rawBytesHex) ?? 4;
+  let ctrl = base & ~KG_CTRL_BITS_UI_MASK;
   if (kg.oneShot)    ctrl |= 0x08;
   if (kg.constPitch) ctrl |= 0x01;
   return {

@@ -849,6 +849,10 @@
        override with resize cursors via .zone__handle. */
     cursor: grab;
     box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4);
+    /* Narrow (1-2 key) zones need to suppress overflow so the
+       meta line doesn't wrap and collide with neighbours' bands. */
+    overflow: hidden;
+    min-width: 0;
   }
   .zone:active { cursor: grabbing; }
 
@@ -877,6 +881,10 @@
     font-family: var(--font-mono);
     font-size: 9px;
     color: var(--grey-medium);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .zone.selected {
     box-shadow:
@@ -1165,4 +1173,22 @@
      panels flow naturally. Placed at the very end of the stylesheet
      so these rules override every earlier .panel / .row-splitter
      declaration regardless of where in the file they appear. */
+  @media (max-width: 1100px) {
+    .properties {
+      grid-template-columns: minmax(0, 1fr);
+      /* Three panel rows back-to-back; drop the splitter row entirely
+         when stacked (no horizontal columns left to rebalance). */
+      grid-template-rows: auto auto auto;
+    }
+    .panel {
+      border-right: none;
+      border-bottom: var(--bw) solid var(--black);
+      /* Each stacked panel scrolls inside its own viewport instead of
+         the whole properties row; bound the height so all three are
+         reachable on a short window. */
+      max-height: 40vh;
+    }
+    .panel--last-col { border-bottom: none; }
+    .row-splitter { display: none; }
+  }
 </style>
