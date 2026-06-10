@@ -42,6 +42,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/bivers/s950/internal/transport"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -215,6 +216,30 @@ func (a *App) MidiThruStatus() *MidiThruState {
 	defer a.thruMu.Unlock()
 	st := a.thruSnapshotLocked()
 	return &st
+}
+
+// MidiThruCapabilities describes what the host platform supports so
+// the frontend can shape the THRU chip: on Windows the virtual-port
+// option is hidden (WinMM has no app-created MIDI ports — see
+// transport.OpenVirtualMidiIn) and the hint steers users to a
+// loopback driver instead.
+type MidiThruCapabilities struct {
+	VirtualSupported bool   `json:"virtualSupported"`
+	VirtualPortName  string `json:"virtualPortName"`
+	Hint             string `json:"hint"`
+}
+
+func (a *App) MidiThruCaps() *MidiThruCapabilities {
+	caps := &MidiThruCapabilities{
+		VirtualSupported: transport.VirtualMidiPortsSupported(),
+		VirtualPortName:  VirtualThruPortName,
+	}
+	if !caps.VirtualSupported {
+		caps.Hint = "Virtual MIDI ports aren't available on this OS. " +
+			"Install a loopback driver (e.g. loopMIDI), point your DAW at it, " +
+			"and pick that port here."
+	}
+	return caps
 }
 
 // stopThruLocked tears the thru session down without the silence

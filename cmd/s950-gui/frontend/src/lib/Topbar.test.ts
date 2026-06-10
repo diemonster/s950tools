@@ -29,6 +29,7 @@ vi.mock('../../wailsjs/go/main/App', () => ({
   ImportSample:       vi.fn().mockResolvedValue(null),
   InspectSlicing:     vi.fn().mockResolvedValue({ ok: true }),
   ListPorts:          vi.fn().mockResolvedValue({ ins: [], outs: [], serial: [] }),
+  MidiThruCaps:       vi.fn().mockResolvedValue({ virtualSupported: true, virtualPortName: 'S950 RS-232 (s950-tools)', hint: '' }),
   MidiThruStart:      vi.fn().mockResolvedValue({ active: true, source: 'X', virtual: false, forwarded: 0, dropped: 0 }),
   MidiThruStatus:     vi.fn().mockResolvedValue({ active: false, source: '', virtual: false, forwarded: 0, dropped: 0 }),
   MidiThruStop:       vi.fn().mockResolvedValue({ active: false, source: '', virtual: false, forwarded: 0, dropped: 0 }),

@@ -5,6 +5,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 vi.mock('../../../wailsjs/go/main/App', () => ({
+  MidiThruCaps:   vi.fn().mockResolvedValue({
+    virtualSupported: true, virtualPortName: 'S950 RS-232 (s950-tools)', hint: '',
+  }),
   MidiThruStart:  vi.fn(),
   MidiThruStatus: vi.fn().mockResolvedValue({ active: false }),
   MidiThruStop:   vi.fn().mockResolvedValue({ active: false }),
@@ -13,7 +16,7 @@ vi.mock('../../../wailsjs/go/main/App', () => ({
 import * as App from '../../../wailsjs/go/main/App';
 import {
   midiThru, midiThruError, startThru, stopThru, initMidiThruEvents,
-  syncThruStatus, thruPref, setThruPref, autoStartThru,
+  syncThruStatus, thruPref, setThruPref, autoStartThru, thruCaps,
   type MidiThruState,
 } from './midithru';
 
@@ -25,8 +28,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   midiThru.set({ active: false, source: '', virtual: false, forwarded: 0, dropped: 0 });
   midiThruError.set('');
+  thruCaps.set({ virtualSupported: true, virtualPortName: 'S950 RS-232 (s950-tools)', hint: '' });
   ((App as any).MidiThruStop as ReturnType<typeof vi.fn>)
     .mockResolvedValue({ active: false });
+  // mockResolvedValue survives clearAllMocks — re-install the
+  // supported-platform default so the Windows tests can't leak.
+  ((App as any).MidiThruCaps as ReturnType<typeof vi.fn>).mockResolvedValue({
+    virtualSupported: true, virtualPortName: 'S950 RS-232 (s950-tools)', hint: '',
+  });
 });
 
 describe('startThru', () => {
@@ -130,6 +139,35 @@ describe('thru auto-start preference', () => {
     await autoStartThru(); // must not throw
     expect(get(midiThru).active).toBe(false);
     expect(get(midiThruError)).toContain('not supported');
+  });
+
+  it('skips the virtual default silently on platforms without virtual ports (Windows)', async () => {
+    // Windows: WinMM has no app-created MIDI ports. The 'virtual'
+    // default must not fire a doomed start on every connect — the
+    // chip shows the loopMIDI hint instead, with no error noise.
+    ((App as any).MidiThruCaps as ReturnType<typeof vi.fn>).mockResolvedValue({
+      virtualSupported: false,
+      virtualPortName: 'S950 RS-232 (s950-tools)',
+      hint: 'Install a loopback driver (e.g. loopMIDI)…',
+    });
+    await autoStartThru();
+    expect((App as any).MidiThruStart).not.toHaveBeenCalled();
+    expect(get(midiThruError)).toBe('');
+    expect(get(thruCaps).virtualSupported).toBe(false);
+  });
+
+  it('still restores a remembered physical input on Windows', async () => {
+    // The physical-port path (incl. loopMIDI ports) is fully
+    // supported everywhere — capability gating must not block it.
+    ((App as any).MidiThruCaps as ReturnType<typeof vi.fn>).mockResolvedValue({
+      virtualSupported: false, virtualPortName: '', hint: 'loopMIDI…',
+    });
+    setThruPref('port:loopMIDI Port');
+    ((App as any).MidiThruStart as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...ACTIVE, source: 'loopMIDI Port',
+    });
+    await autoStartThru();
+    expect((App as any).MidiThruStart).toHaveBeenCalledWith('loopMIDI Port', false);
   });
 });
 

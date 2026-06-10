@@ -10,7 +10,7 @@
 // than at module load so tests can import this module without a
 // Wails runtime present.
 
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import * as App from '../../../wailsjs/go/main/App';
 
 export type MidiThruState = {
@@ -33,6 +33,32 @@ export const midiThru = writable<MidiThruState>({ ...INACTIVE });
 
 // Last start/stop error for the chip's tooltip; cleared on success.
 export const midiThruError = writable<string>('');
+
+// Platform capabilities — shapes the THRU chip. Windows has no
+// app-created MIDI ports (WinMM), so the virtual option is hidden
+// there and the hint steers users to a loopback driver (loopMIDI)
+// selected as a regular input. Defaults assume virtual support so
+// macOS/Linux render correctly even before the binding resolves.
+export type MidiThruCaps = {
+  virtualSupported: boolean;
+  virtualPortName: string;
+  hint: string;
+};
+
+export const thruCaps = writable<MidiThruCaps>({
+  virtualSupported: true,
+  virtualPortName: 'S950 RS-232 (s950-tools)',
+  hint: '',
+});
+
+export async function loadThruCaps(): Promise<void> {
+  try {
+    const caps = await (App as any).MidiThruCaps();
+    if (caps) thruCaps.set(caps);
+  } catch {
+    // Binding unreachable (test render) — keep optimistic defaults.
+  }
+}
 
 let eventsWired = false;
 
@@ -110,13 +136,17 @@ export function setThruPref(v: string): void {
 }
 
 // autoStartThru applies the persisted preference after a successful
-// serial connect. Best-effort: a failure (e.g. virtual ports
-// unsupported on this platform, remembered input unplugged) lands in
-// midiThruError for the chip tooltip but never blocks the session.
+// serial connect. Best-effort: a failure (e.g. remembered input
+// unplugged) lands in midiThruError for the chip tooltip but never
+// blocks the session. The 'virtual' default is skipped silently on
+// platforms without virtual-port support (Windows) — there the chip
+// shows the loopMIDI hint instead of a spurious startup error.
 export async function autoStartThru(): Promise<void> {
   const pref = thruPref();
   if (pref === '') return;
   if (pref === 'virtual') {
+    await loadThruCaps();
+    if (!get(thruCaps).virtualSupported) return;
     await startThru('', true);
   } else if (pref.startsWith('port:')) {
     await startThru(pref.slice('port:'.length), false);

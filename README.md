@@ -104,6 +104,28 @@ The project is organized as follows:
   `PutSampleOpenLoop`, slot-picking, NAK collection).
 - [cmd/s950-tools/](cmd/s950-tools/) — the cobra CLI that wires it all together.
 
+## MIDI thru over RS-232 (GUI)
+
+Hardware quirk: when the S950's front-panel controller-select is on
+**RS-232C**, the DIN MIDI input is completely dead — notes included. The
+serial line, however, accepts channel messages. The GUI's **THRU** chip
+(visible on serial sessions) forwards live MIDI from the host down the
+RS-232 wire so the sampler stays playable while the app is connected:
+
+- **macOS / Linux** — defaults to a virtual MIDI port named
+  **"S950 RS-232 (s950-tools)"**, published automatically when a serial
+  session connects (CoreMIDI on macOS, ALSA sequencer on Linux). Point
+  your DAW's track output at it and play.
+- **Windows** — the Windows multimedia API has no app-created MIDI
+  ports, so the virtual option is hidden. Install a loopback driver
+  such as [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html),
+  point the DAW at the loopback port, and select that port on the THRU
+  chip like any other input.
+
+Forwarded messages are dropped (never interleaved into SysEx) while a
+transfer owns the wire; dropped note-offs and sustain releases are
+flushed as soon as the wire frees, so transfers can't stick a voice.
+
 ## References
 
 The protocol implementation is cross-checked against

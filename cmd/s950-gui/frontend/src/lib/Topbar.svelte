@@ -17,7 +17,7 @@
   import { theme, toggleTheme } from './state/theme';
   import {
     midiThru, midiThruError, startThru, stopThru, initMidiThruEvents,
-    syncThruStatus, setThruPref,
+    syncThruStatus, setThruPref, thruCaps, loadThruCaps,
   } from './state/midithru';
   import * as App from '../../wailsjs/go/main/App';
 
@@ -292,6 +292,9 @@
     await refreshStatus();
     // Same reload-survival for MIDI thru: the backend keeps
     // forwarding across a webview reload; reseed the chip from it.
+    // Capabilities shape the dropdown (no virtual option on
+    // Windows — WinMM can't create app-owned MIDI ports).
+    await loadThruCaps();
     await syncThruStatus();
   });
 
@@ -448,12 +451,16 @@
       title={$midiThruError
         || ($midiThru.active
             ? `Forwarding ${$midiThru.source} → RS-232 (${$midiThru.forwarded} msgs${$midiThru.dropped ? `, ${$midiThru.dropped} dropped during transfers` : ''})`
-            : 'Forward a MIDI input (or a virtual port your DAW can target) to the S950 over RS-232')}>
+            : ($thruCaps.virtualSupported
+                ? 'Forward a MIDI input (or a virtual port your DAW can target) to the S950 over RS-232'
+                : $thruCaps.hint || 'Forward a MIDI input to the S950 over RS-232'))}>
       <span class="chip__label">Thru</span>
       <span class="chip__value">{$midiThru.active ? `♪ ${thruSourceShort}` : 'off'}</span>
       <select value={thruSelectValue} disabled={thruBusy} on:change={onThruChange}>
         <option value="">off</option>
-        <option value={THRU_VIRTUAL}>Virtual port (for DAWs)</option>
+        {#if $thruCaps.virtualSupported}
+          <option value={THRU_VIRTUAL}>Virtual port (for DAWs)</option>
+        {/if}
         {#each $inputPorts as p}
           <option value={THRU_PORT + p.name}>{p.name}</option>
         {/each}

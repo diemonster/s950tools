@@ -16,6 +16,7 @@ package transport
 import (
 	"errors"
 	"fmt"
+	"runtime"
 
 	"gitlab.com/gomidi/midi/v2"
 	"gitlab.com/gomidi/midi/v2/drivers"
@@ -84,13 +85,41 @@ func OpenMidiInListener(port string, onMsg func(msg []byte)) (*MidiInListener, e
 	return listenChannelMessages(in, onMsg)
 }
 
+// VirtualMidiPortsSupported reports whether the host OS can publish
+// virtual MIDI ports. CoreMIDI (macOS) and ALSA (Linux) support
+// them; the Windows multimedia API has no concept of app-created
+// MIDI ports. Pure GOOS switch — exported for the GUI's capability
+// binding and for tests (virtualPortsSupportedOn is the testable
+// seam).
+func VirtualMidiPortsSupported() bool {
+	return virtualPortsSupportedOn(runtime.GOOS)
+}
+
+func virtualPortsSupportedOn(goos string) bool {
+	switch goos {
+	case "darwin", "linux":
+		return true
+	}
+	return false
+}
+
 // OpenVirtualMidiIn publishes a virtual MIDI destination named `name`
 // (visible to DAWs as an output port they can target — e.g. Ableton's
 // track-output list) and delivers everything sent to it to onMsg.
-// macOS/Linux only: rtmidi has no virtual-port support on Windows,
-// where this returns an error and callers should offer the
-// physical-port path instead.
+//
+// macOS/Linux only. The Windows check MUST stay explicit: RtMidi's
+// WinMM backend treats openVirtualPort as a non-fatal WARNING and
+// returns success without creating anything — without this gate a
+// Windows caller would report an active virtual port that no DAW can
+// see (the worst failure mode: silently broken). Windows users
+// bridge with a loopback driver (e.g. loopMIDI) and the physical-
+// port path instead.
 func OpenVirtualMidiIn(name string, onMsg func(msg []byte)) (*MidiInListener, error) {
+	if !VirtualMidiPortsSupported() {
+		return nil, fmt.Errorf(
+			"virtual MIDI ports are not supported on %s — create a loopback port (e.g. loopMIDI) and select it as a regular input instead",
+			runtime.GOOS)
+	}
 	drv, ok := drivers.Get().(*rtmididrv.Driver)
 	if !ok {
 		return nil, errors.New("virtual MIDI ports are not supported by this MIDI driver")

@@ -386,6 +386,26 @@ func TestMidiThruStart_PropagatesOpenerError(t *testing.T) {
 	}
 }
 
+func TestMidiThruCaps_ReflectsPlatform(t *testing.T) {
+	// On the platforms this test runs (darwin/linux dev + CI) virtual
+	// ports are supported and no hint is needed; the Windows shape
+	// (false + loopMIDI hint) is pinned via the transport package's
+	// pure seam. Wiring check: the binding must expose the stable
+	// virtual port name the docs/DAW routing rely on.
+	app := NewApp()
+	caps := app.MidiThruCaps()
+	if caps.VirtualPortName != VirtualThruPortName {
+		t.Errorf("VirtualPortName = %q, want %q", caps.VirtualPortName, VirtualThruPortName)
+	}
+	if caps.VirtualSupported {
+		if caps.Hint != "" {
+			t.Errorf("no hint expected when virtual is supported, got %q", caps.Hint)
+		}
+	} else if !strings.Contains(caps.Hint, "loopMIDI") {
+		t.Errorf("unsupported platforms must hint the loopback workaround, got %q", caps.Hint)
+	}
+}
+
 func TestClassifyNote(t *testing.T) {
 	cases := []struct {
 		msg        []byte
