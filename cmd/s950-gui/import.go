@@ -34,7 +34,14 @@ func (a *App) ImportSample(path string) (*ImportInfo, error) {
 		}
 		path = picked
 	}
+	return importSampleFromPath(path)
+}
 
+// importSampleFromPath is ImportSample's testable core — given an
+// absolute path, loads + normalises + clamps + converts to 12-bit
+// words. No Wails dialog, no App state, so the audio-shape pipeline
+// can be exercised without the runtime.
+func importSampleFromPath(path string) (*ImportInfo, error) {
 	// LoadAudio handles WAV + AIFF, channel folding, and 16-bit
 	// normalisation. ChannelMix is the safest default — averages all
 	// channels rather than dropping phase information.

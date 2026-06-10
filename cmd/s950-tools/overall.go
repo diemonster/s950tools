@@ -11,10 +11,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/bivers/s950/internal/device"
 	"github.com/bivers/s950/internal/protocol"
 )
 
@@ -30,32 +32,43 @@ func newGetOverallCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			o, err := d.GetOverall()
-			if err != nil {
-				return err
-			}
-			if asJSON || outPath != "" {
-				out := os.Stdout
-				if outPath != "" {
-					f, err := os.Create(outPath)
-					if err != nil {
-						return fmt.Errorf("create %s: %w", outPath, err)
-					}
-					defer f.Close()
-					out = f
+			// --output implies --json; redirect the writer to the file
+			// and let the run core not care which sink it's writing to.
+			w := cmd.OutOrStdout()
+			if outPath != "" {
+				f, err := os.Create(outPath)
+				if err != nil {
+					return fmt.Errorf("create %s: %w", outPath, err)
 				}
-				enc := json.NewEncoder(out)
-				enc.SetIndent("", "  ")
-				return enc.Encode(o)
+				defer f.Close()
+				w = f
+				asJSON = true
 			}
-			printOverall(o)
-			return nil
+			return runGetOverall(w, d, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of a table")
 	cmd.Flags().StringVarP(&outPath, "output", "o", "",
 		"write JSON to this file instead of stdout (implies --json)")
 	return cmd
+}
+
+// runGetOverall is newGetOverallCmd's testable core — reads the OVS
+// block and renders to w either as the labelled table or as indented
+// JSON. The cobra wrapper handles --output redirection (which simply
+// swaps `w` for an opened file before calling here).
+func runGetOverall(w io.Writer, d *device.Device, asJSON bool) error {
+	o, err := d.GetOverall()
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(o)
+	}
+	printOverallTo(w, o)
+	return nil
 }
 
 func newSetOverallCmd() *cobra.Command {
@@ -72,19 +85,27 @@ func newSetOverallCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("read %s: %w", args[0], err)
 			}
-			var o protocol.OverallSettings
-			if err := json.Unmarshal(buf, &o); err != nil {
-				return fmt.Errorf("parse JSON: %w", err)
-			}
 			d, cleanup, err := newDevice()
 			if err != nil {
 				return err
 			}
 			defer cleanup()
-			return d.SetOverall(&o)
+			return runSetOverall(d, buf)
 		},
 	}
 	return cmd
+}
+
+// runSetOverall is newSetOverallCmd's testable core — unmarshals
+// `jsonBytes` into an OverallSettings and writes it. Split from the
+// file-read so tests can drive the decode + wire-send without touching
+// the filesystem.
+func runSetOverall(d *device.Device, jsonBytes []byte) error {
+	var o protocol.OverallSettings
+	if err := json.Unmarshal(jsonBytes, &o); err != nil {
+		return fmt.Errorf("parse JSON: %w", err)
+	}
+	return d.SetOverall(&o)
 }
 
 func newGetDrumCmd() *cobra.Command {
@@ -98,24 +119,33 @@ func newGetDrumCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			drs, err := d.GetDrum()
-			if err != nil {
-				return err
-			}
-			if outPath == "" {
-				fmt.Fprintf(os.Stderr, "DRS: %d bytes (use -o file.bin to save)\n", len(drs.Bytes))
-				return nil
-			}
-			if err := os.WriteFile(outPath, drs.Bytes, 0o644); err != nil {
-				return fmt.Errorf("write %s: %w", outPath, err)
-			}
-			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", outPath, len(drs.Bytes))
-			return nil
+			return runGetDrum(cmd.ErrOrStderr(), d, outPath)
 		},
 	}
 	cmd.Flags().StringVarP(&outPath, "output", "o", "",
 		"path to write the raw DRS bytes (omit for size-only report)")
 	return cmd
+}
+
+// runGetDrum is newGetDrumCmd's testable core — fetches DRS, prints a
+// status line to `status`, and writes the binary blob to `outPath`
+// when non-empty. Status output is intentionally separate from the
+// file write so the cobra wrapper can route them to stderr / disk
+// while tests capture status only.
+func runGetDrum(status io.Writer, d *device.Device, outPath string) error {
+	drs, err := d.GetDrum()
+	if err != nil {
+		return err
+	}
+	if outPath == "" {
+		fmt.Fprintf(status, "DRS: %d bytes (use -o file.bin to save)\n", len(drs.Bytes))
+		return nil
+	}
+	if err := os.WriteFile(outPath, drs.Bytes, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outPath, err)
+	}
+	fmt.Fprintf(status, "wrote %s (%d bytes)\n", outPath, len(drs.Bytes))
+	return nil
 }
 
 func newSetDrumCmd() *cobra.Command {
@@ -133,24 +163,38 @@ func newSetDrumCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			return d.SetDrum(&protocol.DrumSettings{Bytes: buf})
+			return runSetDrum(d, buf)
 		},
 	}
 	return cmd
 }
 
+// runSetDrum is newSetDrumCmd's testable core — wraps the raw bytes
+// in a DrumSettings and writes. Split from the file-read so tests can
+// drive the wire-send path without touching the filesystem.
+func runSetDrum(d *device.Device, drsBytes []byte) error {
+	return d.SetDrum(&protocol.DrumSettings{Bytes: drsBytes})
+}
+
 func printOverall(o *protocol.OverallSettings) {
-	fmt.Printf("Overall Settings\n")
-	fmt.Printf("  prog name     : %q\n", o.ProgName)
-	fmt.Printf("  basic ch      : %d %s\n", o.BasicChannel, omniLabel(o.OmniOn))
-	fmt.Printf("  midi tx ch    : %d\n", o.MidiTxChannel)
-	fmt.Printf("  ctrl mode     : %s (front-panel only — wire writes ignored)\n",
+	printOverallTo(os.Stdout, o)
+}
+
+// printOverallTo writes the human-readable OVS dump to w. Split from
+// printOverall so tests can capture the output without redirecting
+// stdout. Used by the `get-overall` cobra command's RunE.
+func printOverallTo(w io.Writer, o *protocol.OverallSettings) {
+	fmt.Fprintf(w, "Overall Settings\n")
+	fmt.Fprintf(w, "  prog name     : %q\n", o.ProgName)
+	fmt.Fprintf(w, "  basic ch      : %d %s\n", o.BasicChannel, omniLabel(o.OmniOn))
+	fmt.Fprintf(w, "  midi tx ch    : %d\n", o.MidiTxChannel)
+	fmt.Fprintf(w, "  ctrl mode     : %s (front-panel only — wire writes ignored)\n",
 		controllerLabel(o.ControllerSelect))
-	fmt.Printf("  rs-232 baud   : %d\n", o.BaudRate)
-	fmt.Printf("  pitch wheel   : ±%d semitones\n", o.PitchWheelRange)
-	fmt.Printf("  loudness CC7  : %s\n", onOff(o.LoudnessOnCC7))
-	fmt.Printf("  MPEN (?)      : %s (purpose unconfirmed — see protocol/overall.go)\n", onOff(o.MPEN))
-	fmt.Printf("  rx-sim ch/k/v : %d / %d / %d\n", o.RxSimChannel, o.RxSimKey, o.RxSimVelocity)
+	fmt.Fprintf(w, "  rs-232 baud   : %d\n", o.BaudRate)
+	fmt.Fprintf(w, "  pitch wheel   : ±%d semitones\n", o.PitchWheelRange)
+	fmt.Fprintf(w, "  loudness CC7  : %s\n", onOff(o.LoudnessOnCC7))
+	fmt.Fprintf(w, "  MPEN (?)      : %s (purpose unconfirmed — see protocol/overall.go)\n", onOff(o.MPEN))
+	fmt.Fprintf(w, "  rx-sim ch/k/v : %d / %d / %d\n", o.RxSimChannel, o.RxSimKey, o.RxSimVelocity)
 }
 
 func omniLabel(on bool) string {

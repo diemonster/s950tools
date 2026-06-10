@@ -51,10 +51,19 @@ func (a *App) SaveSampleWav(name string, rate uint32, pcm []int16) (string, erro
 	if path == "" {
 		return "", nil // user cancelled
 	}
+	if err := writeSampleWav(path, rate, pcm); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
+// writeSampleWav is the path-taking core of SaveSampleWav — writes
+// int16 PCM at `rate` as a 16-bit mono WAV to `path`. Split from the
+// dialog shell so the encode path is unit-testable.
+func writeSampleWav(path string, rate uint32, pcm []int16) error {
 	f, err := os.Create(path)
 	if err != nil {
-		return "", fmt.Errorf("create %s: %w", filepath.Base(path), err)
+		return fmt.Errorf("create %s: %w", filepath.Base(path), err)
 	}
 	defer f.Close()
 
@@ -68,10 +77,10 @@ func (a *App) SaveSampleWav(name string, rate uint32, pcm []int16) (string, erro
 		buf.Data[i] = int(s)
 	}
 	if err := enc.Write(buf); err != nil {
-		return "", fmt.Errorf("encode WAV: %w", err)
+		return fmt.Errorf("encode WAV: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return "", fmt.Errorf("close WAV: %w", err)
+		return fmt.Errorf("close WAV: %w", err)
 	}
-	return path, nil
+	return nil
 }

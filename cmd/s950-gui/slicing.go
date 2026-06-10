@@ -32,6 +32,20 @@ func (a *App) InspectSlicing(req SlicingRequest) (*SlicingPreflight, error) {
 // and ApplySlicing's pre-flight re-check so a single device.Catalog()
 // powers both, and both share the same validation rules.
 func (a *App) inspectSlicingLocked(d *device.Device, req SlicingRequest) (*SlicingPreflight, error) {
+	entries, err := d.Catalog()
+	if err != nil {
+		return nil, fmt.Errorf("read catalog: %w", err)
+	}
+	return planSlicing(entries, req), nil
+}
+
+// planSlicing is the pure planner — given a catalog snapshot and a
+// SlicingRequest, returns the preflight report (slot picks, occupied
+// overwrites, errors, warnings, time estimate). No transport, no
+// Wails, no App state, so the full slot-allocation + validation
+// matrix is unit-testable. inspectSlicingLocked is the thin shell
+// that reads the catalog and hands off here.
+func planSlicing(entries []protocol.CatalogEntry, req SlicingRequest) *SlicingPreflight {
 	report := &SlicingPreflight{
 		SampleSlots: make([]int, 0, len(req.Slices)),
 	}
@@ -52,11 +66,6 @@ func (a *App) inspectSlicingLocked(d *device.Device, req SlicingRequest) (*Slici
 				req.BaseMidiKey, len(req.Slices)))
 	}
 
-	// Catalog the device so we know which slots are occupied.
-	entries, err := d.Catalog()
-	if err != nil {
-		return nil, fmt.Errorf("read catalog: %w", err)
-	}
 	sampleOccupied := map[int]string{}
 	programOccupied := map[int]string{}
 	for _, e := range entries {
@@ -111,7 +120,11 @@ func (a *App) inspectSlicingLocked(d *device.Device, req SlicingRequest) (*Slici
 			fmt.Sprintf("program slot %d outside 0..99", progSlot))
 	}
 	report.ProgramSlot = progSlot
-	if name, ok := programOccupied[progSlot]; ok {
+	// Same TONE carve-out as the sample-slot warning above: TONE is
+	// the S950's boot placeholder and findFreeProgramSlot already
+	// treats it as free, so don't contradict that with a stale-name
+	// overwrite warning.
+	if name, ok := programOccupied[progSlot]; ok && name != "TONE" {
 		report.OccupiedSlots = append(report.OccupiedSlots, OccupiedSlot{
 			Kind: "program", Slot: progSlot, Name: name,
 		})
@@ -136,7 +149,7 @@ func (a *App) inspectSlicingLocked(d *device.Device, req SlicingRequest) (*Slici
 	report.EstimatedSeconds = int(device.ExpectedDrainTime(bytes).Seconds())
 
 	report.OK = len(report.Errors) == 0
-	return report, nil
+	return report
 }
 
 // findFreeBlock returns the lowest slot N such that [N..N+count) are

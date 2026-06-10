@@ -68,10 +68,23 @@ type App struct {
 	// share state but pooling the lock keeps the App struct's
 	// invariant ("everything mutable goes through mu") simple.
 	cache *waveformcache.Cache
+
+	// openMIDI / openSerial / listSerialPorts are seams over the
+	// transport package's open + enumerate functions. NewApp wires
+	// them to the real implementations; tests substitute fakes so
+	// Connect, ConnectSerial, ListPorts, and Probe can be exercised
+	// without touching rtmidi or a real serial port.
+	openMIDI        func(transport.Options) (transport.Transport, error)
+	openSerial      func(transport.SerialOptions) (transport.Transport, error)
+	listSerialPorts func() ([]string, error)
 }
 
 func NewApp() *App {
-	return &App{}
+	return &App{
+		openMIDI:        transport.Open,
+		openSerial:      transport.OpenSerial,
+		listSerialPorts: transport.ListSerialPorts,
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -100,7 +113,7 @@ func (a *App) ListPorts() (*PortList, error) {
 	for _, p := range outs {
 		out.Outs = append(out.Outs, Port{Name: p.Name})
 	}
-	if ser, serr := transport.ListSerialPorts(); serr == nil {
+	if ser, serr := a.listSerialPorts(); serr == nil {
 		for _, p := range ser {
 			out.Serial = append(out.Serial, SerialPort{Name: p})
 		}
@@ -119,7 +132,7 @@ func (a *App) Connect(in, out string, channel int) error {
 
 	a.closeTransportLocked()
 
-	t, err := transport.Open(transport.Options{
+	t, err := a.openMIDI(transport.Options{
 		In:     in,
 		Out:    out,
 		OnWire: a.makeOnWire(),
@@ -147,7 +160,7 @@ func (a *App) ConnectSerial(port string, baud int) error {
 
 	a.closeTransportLocked()
 
-	t, err := transport.OpenSerial(transport.SerialOptions{
+	t, err := a.openSerial(transport.SerialOptions{
 		Port:   port,
 		Baud:   baud,
 		OnWire: a.makeOnWire(),
@@ -189,7 +202,12 @@ func (a *App) adoptTransportLocked(t transport.Transport, kind string, channel b
 // makeOnWire returns the wire-log callback the transport publishes
 // every SysEx envelope through. Identical for MIDI and serial so
 // the frontend's wire-log panel doesn't care which is in use.
+// Returns nil when there is no Wails context yet (tests, pre-
+// startup) so the transport doesn't fire events at a nil runtime.
 func (a *App) makeOnWire() func(direction string, msg []byte) {
+	if a.ctx == nil {
+		return nil
+	}
 	return func(direction string, msg []byte) {
 		wruntime.EventsEmit(a.ctx, "wire:traffic", WireMessage{
 			Direction: direction,

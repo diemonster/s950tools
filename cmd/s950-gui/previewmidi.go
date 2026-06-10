@@ -41,18 +41,25 @@ func (a *App) PreviewMidi(note, velocity, channel, durationMs int) error {
 	}
 	defer a.mu.Unlock()
 
-	ch := byte(channel & 0x0F)
-	n := byte(note & 0x7F)
-	v := byte(velocity & 0x7F)
-
-	on := []byte{0x90 | ch, n, v}
-	if err := d.T.Send(on); err != nil {
+	if err := d.T.Send(noteOnBytes(note, velocity, channel)); err != nil {
 		return fmt.Errorf("send Note On: %w", err)
 	}
 	time.Sleep(time.Duration(durationMs) * time.Millisecond)
-	off := []byte{0x80 | ch, n, 0x00}
-	if err := d.T.Send(off); err != nil {
+	if err := d.T.Send(noteOffBytes(note, channel)); err != nil {
 		return fmt.Errorf("send Note Off: %w", err)
 	}
 	return nil
+}
+
+// noteOnBytes returns the 3-byte MIDI Note-On message for the given
+// note/velocity/channel. Pure helper — splits out the byte-shaping
+// from PreviewMidi so the clamp semantics are unit-testable without
+// a transport.
+func noteOnBytes(note, velocity, channel int) []byte {
+	return []byte{0x90 | byte(channel&0x0F), byte(note & 0x7F), byte(velocity & 0x7F)}
+}
+
+// noteOffBytes returns the 3-byte MIDI Note-Off message. Pure helper.
+func noteOffBytes(note, channel int) []byte {
+	return []byte{0x80 | byte(channel&0x0F), byte(note & 0x7F), 0x00}
 }

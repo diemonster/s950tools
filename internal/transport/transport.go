@@ -307,59 +307,94 @@ func (t *midiTransport) handleMessage(msg midi.Message, _ int32) {
 func (t *midiTransport) popOneSysEx() ([]byte, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.rxQ) == 0 {
+	env, rest, ok := popSysExEnvelope(t.rxQ)
+	if !ok {
+		// Defensive cleanup: a non-F0 head can't be a valid envelope
+		// and stalls the queue. Reset so the next inbound F0 starts
+		// fresh.
+		if len(t.rxQ) > 0 && t.rxQ[0] != 0xF0 {
+			t.rxQ = t.rxQ[:0]
+		}
 		return nil, false
 	}
-	if t.rxQ[0] != 0xF0 {
-		// Shouldn't happen since we only push F0-prefixed payloads.
-		t.rxQ = t.rxQ[:0]
-		return nil, false
+	t.rxQ = rest
+	return env, true
+}
+
+// popSysExEnvelope peels the first complete F0..F7 envelope off
+// `buf` and returns it alongside the trimmed remainder. Returns
+// (nil, buf, false) when buf doesn't start with F0 or no terminating
+// F7 is present yet. Pure helper — used by midiTransport.popOneSysEx
+// for queue-mutation but kept transport-agnostic so its byte-level
+// rules can be unit-tested without rtmidi.
+func popSysExEnvelope(buf []byte) (envelope, remaining []byte, ok bool) {
+	if len(buf) == 0 || buf[0] != 0xF0 {
+		return nil, buf, false
 	}
-	// Find F7. The driver only pushes complete SysEx, so a terminator is
-	// expected somewhere — but be defensive.
-	for i := 1; i < len(t.rxQ); i++ {
-		if t.rxQ[i] == 0xF7 {
-			out := make([]byte, i+1)
-			copy(out, t.rxQ[:i+1])
-			t.rxQ = append([]byte(nil), t.rxQ[i+1:]...)
-			return out, true
+	for i := 1; i < len(buf); i++ {
+		if buf[i] == 0xF7 {
+			env := make([]byte, i+1)
+			copy(env, buf[:i+1])
+			rest := append([]byte(nil), buf[i+1:]...)
+			return env, rest, true
 		}
 	}
-	return nil, false
+	return nil, buf, false
 }
 
 func pickPortIn(ports []drivers.In, want string) (drivers.In, error) {
-	if want == "" {
-		return ports[0], nil
+	names := portNamesIn(ports)
+	idx := pickPortIdx(names, want)
+	if idx < 0 {
+		return nil, fmt.Errorf("no input port matches %q (have: %s)", want, strings.Join(names, ", "))
 	}
-	w := strings.ToLower(want)
-	for _, p := range ports {
-		if strings.Contains(strings.ToLower(p.String()), w) {
-			return p, nil
-		}
-	}
-	names := make([]string, 0, len(ports))
-	for _, p := range ports {
-		names = append(names, p.String())
-	}
-	return nil, fmt.Errorf("no input port matches %q (have: %s)", want, strings.Join(names, ", "))
+	return ports[idx], nil
 }
 
 func pickPortOut(ports []drivers.Out, want string) (drivers.Out, error) {
+	names := portNamesOut(ports)
+	idx := pickPortIdx(names, want)
+	if idx < 0 {
+		return nil, fmt.Errorf("no output port matches %q (have: %s)", want, strings.Join(names, ", "))
+	}
+	return ports[idx], nil
+}
+
+// pickPortIdx returns the index of the first entry in `names` whose
+// value (case-insensitively) contains `want`. Empty `want` picks the
+// first available entry. Returns -1 when no candidate matches or the
+// list is empty. Pure helper — the matching rule doesn't depend on
+// the MIDI driver, so it can be tested without rtmidi.
+func pickPortIdx(names []string, want string) int {
+	if len(names) == 0 {
+		return -1
+	}
 	if want == "" {
-		return ports[0], nil
+		return 0
 	}
 	w := strings.ToLower(want)
-	for _, p := range ports {
-		if strings.Contains(strings.ToLower(p.String()), w) {
-			return p, nil
+	for i, n := range names {
+		if strings.Contains(strings.ToLower(n), w) {
+			return i
 		}
 	}
-	names := make([]string, 0, len(ports))
+	return -1
+}
+
+func portNamesIn(ports []drivers.In) []string {
+	out := make([]string, 0, len(ports))
 	for _, p := range ports {
-		names = append(names, p.String())
+		out = append(out, p.String())
 	}
-	return nil, fmt.Errorf("no output port matches %q (have: %s)", want, strings.Join(names, ", "))
+	return out
+}
+
+func portNamesOut(ports []drivers.Out) []string {
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, p.String())
+	}
+	return out
 }
 
 func prefixForLog(b []byte) []byte {

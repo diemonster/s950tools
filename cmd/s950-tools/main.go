@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -161,25 +162,32 @@ func newCatalogCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-
-			entries, err := d.Catalog()
-			if err != nil {
-				return err
-			}
-			fmt.Printf("%-4s %-4s %s\n", "TYPE", "NUM", "NAME")
-			for _, e := range entries {
-				typeName := "?"
-				switch e.Type {
-				case 'P':
-					typeName = "PRG"
-				case 'S':
-					typeName = "SMP"
-				}
-				fmt.Printf("%-4s %-4d %s\n", typeName, e.Num, e.Name)
-			}
-			return nil
+			return runCatalog(cmd.OutOrStdout(), d)
 		},
 	}
+}
+
+// runCatalog is newCatalogCmd's testable core — fetches the catalog
+// and renders the table to w. Split from the cobra wiring so a fake
+// transport can drive it without rtmidi. The cobra wrapper is now a
+// thin 4-liner that opens a transport and hands off here.
+func runCatalog(w io.Writer, d *device.Device) error {
+	entries, err := d.Catalog()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "%-4s %-4s %s\n", "TYPE", "NUM", "NAME")
+	for _, e := range entries {
+		typeName := "?"
+		switch e.Type {
+		case 'P':
+			typeName = "PRG"
+		case 'S':
+			typeName = "SMP"
+		}
+		fmt.Fprintf(w, "%-4s %-4d %s\n", typeName, e.Num, e.Name)
+	}
+	return nil
 }
 
 func newGetParamsCmd() *cobra.Command {
@@ -198,22 +206,29 @@ func newGetParamsCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-
-			p, err := d.GetParams(num)
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(params2JSON(p))
-			}
-			printParams(p, num)
-			return nil
+			return runGetParams(cmd.OutOrStdout(), d, num, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of a table")
 	return cmd
+}
+
+// runGetParams is newGetParamsCmd's testable core — reads the SPRM
+// for `num` and renders either the table or the JSON view to w.
+// Split from the cobra wiring so the format choice can be regression-
+// tested without rtmidi.
+func runGetParams(w io.Writer, d *device.Device, num byte, asJSON bool) error {
+	p, err := d.GetParams(num)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(params2JSON(p))
+	}
+	printParamsTo(w, p, num)
+	return nil
 }
 
 func newGetProgramCmd() *cobra.Command {
@@ -234,33 +249,42 @@ func newGetProgramCmd() *cobra.Command {
 			defer cleanup()
 			d.RequestTimeout = 8 * time.Second // programs are bigger than catalog
 
-			p, err := d.GetProgram(num)
-			if err != nil {
-				return err
-			}
-			j := p.ToJSON()
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
+			w := cmd.OutOrStdout()
 			if outPath != "" {
 				f, err := os.Create(outPath)
 				if err != nil {
 					return fmt.Errorf("create %s: %w", outPath, err)
 				}
 				defer f.Close()
-				enc = json.NewEncoder(f)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(&j); err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "wrote %s\n", outPath)
-				return nil
+				w = f
 			}
-			return enc.Encode(&j)
+			if err := runGetProgram(w, d, num); err != nil {
+				return err
+			}
+			if outPath != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s\n", outPath)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&outPath, "output", "o", "",
 		"write JSON to this file instead of stdout")
 	return cmd
+}
+
+// runGetProgram is newGetProgramCmd's testable core — reads program
+// `num` and JSON-encodes it to `w`. The cobra wrapper handles the
+// --output redirect + the stderr "wrote N" status line; this core
+// only cares about the wire fetch and the encode.
+func runGetProgram(w io.Writer, d *device.Device, num byte) error {
+	p, err := d.GetProgram(num)
+	if err != nil {
+		return err
+	}
+	j := p.ToJSON()
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(&j)
 }
 
 func newPutProgramCmd() *cobra.Command {
@@ -676,18 +700,27 @@ func newMonitorCmd() *cobra.Command {
 // waitWithProgress sleeps for d, printing a dot every second so long
 // transfers don't look hung.
 func waitWithProgress(d time.Duration) {
-	if d <= time.Second {
-		time.Sleep(d)
+	waitWithProgressTo(os.Stderr, d, time.Second)
+}
+
+// waitWithProgressTo is the seam version: writes progress dots to
+// `w` once per `tickEvery` until `total` elapses. Split out so tests
+// can drive a 30 ms wait with a 10 ms tick and assert on the captured
+// dot count without sitting on a real one-second ticker. The public
+// function above keeps the production behaviour (os.Stderr + 1 Hz).
+func waitWithProgressTo(w io.Writer, total, tickEvery time.Duration) {
+	if total <= tickEvery {
+		time.Sleep(total)
 		return
 	}
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(tickEvery)
 	defer tick.Stop()
-	deadline := time.Now().Add(d)
+	deadline := time.Now().Add(total)
 	for time.Now().Before(deadline) {
 		<-tick.C
-		fmt.Fprintf(os.Stderr, ".")
+		fmt.Fprintf(w, ".")
 	}
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(w)
 }
 
 func parseSampleNum(s string) (byte, error) {
@@ -702,18 +735,25 @@ func parseSampleNum(s string) (byte, error) {
 }
 
 func printParams(p *protocol.SampleParams, num byte) {
-	fmt.Printf("Sample %d: %q\n", num, p.Name)
-	fmt.Printf("  total words : %d\n", p.TotalWords)
-	fmt.Printf("  sample rate : %d Hz\n", p.SampleRateHz)
-	fmt.Printf("  nominal pch : %d (C3=960; 1/16-semitone)\n", p.NominalPitch)
-	fmt.Printf("  loud offset : %d\n", p.LoudOffset)
-	fmt.Printf("  replay mode : %q\n", p.ReplayMode)
-	fmt.Printf("  start       : %d\n", p.Start)
-	fmt.Printf("  end         : %d\n", p.End)
-	fmt.Printf("  loop length : %d\n", p.LoopLength)
-	fmt.Printf("  reversed    : %q\n", p.Reversed)
+	printParamsTo(os.Stdout, p, num)
+}
+
+// printParamsTo writes the human-readable SPRM dump to w. Split from
+// printParams so tests can capture the output without redirecting
+// stdout. Used by the `get-params` cobra command's RunE.
+func printParamsTo(w io.Writer, p *protocol.SampleParams, num byte) {
+	fmt.Fprintf(w, "Sample %d: %q\n", num, p.Name)
+	fmt.Fprintf(w, "  total words : %d\n", p.TotalWords)
+	fmt.Fprintf(w, "  sample rate : %d Hz\n", p.SampleRateHz)
+	fmt.Fprintf(w, "  nominal pch : %d (C3=960; 1/16-semitone)\n", p.NominalPitch)
+	fmt.Fprintf(w, "  loud offset : %d\n", p.LoudOffset)
+	fmt.Fprintf(w, "  replay mode : %q\n", p.ReplayMode)
+	fmt.Fprintf(w, "  start       : %d\n", p.Start)
+	fmt.Fprintf(w, "  end         : %d\n", p.End)
+	fmt.Fprintf(w, "  loop length : %d\n", p.LoopLength)
+	fmt.Fprintf(w, "  reversed    : %q\n", p.Reversed)
 	if p.VelXFade != 0 {
-		fmt.Printf("  velocity xf : on\n")
+		fmt.Fprintf(w, "  velocity xf : on\n")
 	}
 }
 

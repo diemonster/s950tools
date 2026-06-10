@@ -54,7 +54,7 @@ func (a *App) ProbeForS950() (*ProbeResult, error) {
 	a.closeTransportLocked()
 	a.mu.Unlock()
 
-	ports, err := transport.ListSerialPorts()
+	ports, err := a.listSerialPorts()
 	if err != nil {
 		return nil, fmt.Errorf("list serial ports: %w", err)
 	}
@@ -68,7 +68,7 @@ func (a *App) ProbeForS950() (*ProbeResult, error) {
 	for _, port := range candidates {
 		for _, baud := range probeBauds {
 			tried = append(tried, fmt.Sprintf("%s @ %d", port, baud))
-			if ok := probeOne(port, baud, rcat); ok {
+			if ok := a.probeOne(port, baud, rcat); ok {
 				return &ProbeResult{Port: port, Baud: baud}, nil
 			}
 		}
@@ -79,9 +79,11 @@ func (a *App) ProbeForS950() (*ProbeResult, error) {
 // probeOne opens `port` at `baud`, sends RCAT, and returns true if
 // the response starts with the AKAI exclusive header (F0 47). Any
 // other reply is treated as "not an S950" — non-matching gear stays
-// untouched. Resources are released on every path.
-func probeOne(port string, baud int, rcat []byte) bool {
-	t, err := transport.OpenSerial(transport.SerialOptions{Port: port, Baud: baud})
+// untouched. Resources are released on every path. Method on App
+// (rather than free function) so it routes through openSerial — the
+// same injection seam Connect uses — for hermetic testing.
+func (a *App) probeOne(port string, baud int, rcat []byte) bool {
+	t, err := a.openSerial(transport.SerialOptions{Port: port, Baud: baud})
 	if err != nil {
 		return false
 	}

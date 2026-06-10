@@ -42,12 +42,8 @@ func (a *App) SaveProgramJSON(j protocol.ProgramJSON, suggestedName string) (str
 	if path == "" {
 		return "", nil // user cancelled
 	}
-	buf, err := json.MarshalIndent(&j, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode JSON: %w", err)
-	}
-	if err := os.WriteFile(path, buf, 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", filepath.Base(path), err)
+	if err := writeProgramJSON(path, &j); err != nil {
+		return "", err
 	}
 	return path, nil
 }
@@ -69,6 +65,28 @@ func (a *App) OpenProgramJSON() (*protocol.ProgramJSON, error) {
 	if path == "" {
 		return nil, nil
 	}
+	return loadProgramJSON(path)
+}
+
+// writeProgramJSON is the path-taking core of SaveProgramJSON —
+// indented-JSON encodes the program and writes it to `path`. Split
+// from the dialog shell so the encode + write can be exercised
+// without the Wails runtime.
+func writeProgramJSON(path string, j *protocol.ProgramJSON) error {
+	buf, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode JSON: %w", err)
+	}
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+// loadProgramJSON is the path-taking core of OpenProgramJSON —
+// reads + unmarshals. Split from the dialog shell so the decode
+// path is unit-testable.
+func loadProgramJSON(path string) (*protocol.ProgramJSON, error) {
 	buf, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
