@@ -13,11 +13,11 @@ export function Connect(arg1:string,arg2:string,arg3:number):Promise<void>;
 
 export function ConnectSerial(arg1:string,arg2:number):Promise<void>;
 
-export function CopySampleAudio(arg1:number):Promise<Array<number>>;
+export function CopySampleAudio(arg1:number):Promise<main.CopiedAudio>;
 
 export function Disconnect():Promise<void>;
 
-export function GetCachedWaveform(arg1:number,arg2:string,arg3:number):Promise<Array<number>>;
+export function GetCachedWaveform(arg1:number,arg2:string,arg3:number):Promise<main.CachedWaveform>;
 
 export function GetDrum():Promise<protocol.DrumSettings>;
 
@@ -39,7 +39,7 @@ export function PreviewMidi(arg1:number,arg2:number,arg3:number,arg4:number):Pro
 
 export function ProbeForS950():Promise<main.ProbeResult>;
 
-export function PutCachedWaveform(arg1:number,arg2:string,arg3:number,arg4:Array<number>):Promise<void>;
+export function PutCachedWaveform(arg1:number,arg2:string,arg3:number,arg4:Array<number>,arg5:number):Promise<void>;
 
 export function ResampleSample(arg1:Array<number>,arg2:number,arg3:number):Promise<main.ResampledSample>;
 

@@ -102,6 +102,13 @@ export async function flushSampleWriteback() {
 
   const s = get(samples).find((x) => x.slot === slot);
   if (!s) return;
+  // Re-check device-coherence at flush time, not just at schedule
+  // time. A resample can flip source to 'local' inside the debounce
+  // window (param edit arms the timer → user changes the RATE
+  // dropdown → timer fires); pushing the post-resample SPRM (new
+  // rate, new TotalWords) onto the device's unchanged SDATA is
+  // exactly the mismatch the schedule-time guard exists to prevent.
+  if (s.source !== 'device') return;
 
   setSync('sending', 'Sending...');
   try {

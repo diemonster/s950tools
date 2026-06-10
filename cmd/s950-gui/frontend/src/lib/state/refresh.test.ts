@@ -114,7 +114,7 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
     samples.set([withAudio, withoutAudio]);
 
     ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([0x800, 0x800, 0x800]);
+      .mockResolvedValueOnce({ words: [0x800, 0x800, 0x800], sampleRateHz: 26040 });
 
     await refreshAllFromDevice();
     // Only slot 4 should have been fetched — slot 3 already has PCM.
@@ -151,16 +151,20 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
     samples.set([deviceSample(5, 'TONE', 3)]);
 
     // 0x800 = silence (encodes to 0 PCM); 0xC00/0x400 are positive
-    // and negative excursions to verify the int16 scaling.
+    // and negative excursions to verify the int16 scaling. The 40000
+    // rate is the dump-header rate — overrides the SPRM rate that
+    // came in via the catalog scan.
     ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([0x800, 0xC00, 0x400]);
+      .mockResolvedValueOnce({ words: [0x800, 0xC00, 0x400], sampleRateHz: 40000 });
 
     await refreshAllFromDevice();
 
     const s = get(samples).find((x) => x.slot === 5);
     expect(s?.words12).toEqual([0x800, 0xC00, 0x400]);
     expect(s?.pcm?.length).toBe(3);
-    expect((App as any).PutCachedWaveform).toHaveBeenCalledWith(5, 'TONE', 3, [0x800, 0xC00, 0x400]);
+    // Rate is overridden by the dump header's rate.
+    expect(s?.rate).toBe(40000);
+    expect((App as any).PutCachedWaveform).toHaveBeenCalledWith(5, 'TONE', 3, [0x800, 0xC00, 0x400], 40000);
   });
 });
 

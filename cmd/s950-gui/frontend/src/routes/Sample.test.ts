@@ -334,7 +334,7 @@ describe('Sample tab — Copy from S950 (Phase 1C)', () => {
     // negative excursions — both should land in pcm with non-zero
     // values (int16-scaled, matching ImportSample's convention).
     ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([0x800, 0xC00, 0x400]);
+      .mockResolvedValueOnce({ words: [0x800, 0xC00, 0x400], sampleRateHz: 40000 });
 
     const { container } = render(Sample);
     const btn = Array.from(container.querySelectorAll('button.btn'))
@@ -352,11 +352,14 @@ describe('Sample tab — Copy from S950 (Phase 1C)', () => {
     expect(s?.pcm?.[0]).toBe(0);            // silence
     expect(s?.pcm?.[1]).toBeGreaterThan(0); // positive
     expect(s?.pcm?.[2]).toBeLessThan(0);    // negative
+    // Rate from the dump header overrides the catalog-time SPRM rate.
+    expect(s?.rate).toBe(40000);
 
     // Persistence path: PutCachedWaveform called with the buffer's
-    // length (not the sample's possibly-stale length field) so the
-    // cache key always matches the file body's word count.
-    expect((App as any).PutCachedWaveform).toHaveBeenCalledWith(5, 'TONE', 3, [0x800, 0xC00, 0x400]);
+    // length (not the sample's possibly-stale length field) and the
+    // dump-header rate so the cache hit on next session re-attaches
+    // with the right rate.
+    expect((App as any).PutCachedWaveform).toHaveBeenCalledWith(5, 'TONE', 3, [0x800, 0xC00, 0x400], 40000);
     cleanup();
   });
 

@@ -146,12 +146,14 @@ function makeWaveform(n = 120_000): number[] {
 const WAVEFORM_FIXTURE = makeWaveform();
 
 export async function CopySampleAudio(_slot: number) {
-  return WAVEFORM_FIXTURE;
+  return { words: WAVEFORM_FIXTURE, sampleRateHz: 26040 };
 }
 export async function GetCachedWaveform(_slot: number, _name: string, _len: number) {
-  return WAVEFORM_FIXTURE;
+  return { words: WAVEFORM_FIXTURE, sampleRateHz: 26040 };
 }
-export async function PutCachedWaveform(_a: number, _b: string, _c: number, _d: number[]) {}
+export async function PutCachedWaveform(
+  _a: number, _b: string, _c: number, _d: number[], _e: number,
+) {}
 export async function ClearWaveformCache() {}
 
 // ---------- Connection ----------

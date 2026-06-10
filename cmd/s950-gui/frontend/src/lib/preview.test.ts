@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { hasHostAudio, buildPingPongLoopBuffer, zohRenderPCM, effectivePreviewOffset } from './preview';
+import {
+  hasHostAudio,
+  buildPingPongLoopBuffer,
+  zohRenderPCM,
+  effectivePreviewOffset,
+  bufferParamsFor,
+} from './preview';
 import { newLocalSample } from './state/samples';
 
 // Most of preview.ts is Web Audio-bound and isn't worth mocking
@@ -176,15 +182,23 @@ describe('zohRenderPCM', () => {
 
 // effectivePreviewOffset is the rule Sample.svelte hands to
 // previewSample so host preview pitch-matches what the device
-// will play. Pure function, three input cases, three expected
-// outputs — locked here so a regression in the math wouldn't
-// silently shift everyone's host preview.
+// will play. Pure function — locked here so a regression in the
+// math wouldn't silently shift everyone's host preview.
+//
+// The offset only applies to SINGLE-KEY keygroup mappings
+// (lowKey === highKey, the sliced-kit / drum-map shape). A ranged
+// keygroup plays a different pitch on every key, so there's no one
+// device pitch to mirror — the old midpoint guess made host preview
+// of Translator-built kits (wide-range keygroups) play several
+// semitones sharp.
 describe('effectivePreviewOffset — best-of-both-worlds pitch math', () => {
   it('returns 0 for purely-local samples (recorded pitch)', () => {
     // Imported audio that's never touched the device — the user
     // wants to hear it as recorded. Even with a wildly different
     // mapping note hypothetically supplied, source='local' wins.
-    expect(effectivePreviewOffset({ source: 'local', mappingNote: 36 })).toBe(0);
+    expect(effectivePreviewOffset({
+      source: 'local', mappingNote: 36, mappingLowKey: 36, mappingHighKey: 36,
+    })).toBe(0);
     expect(effectivePreviewOffset({ source: 'local' })).toBe(0);
   });
 
@@ -197,22 +211,97 @@ describe('effectivePreviewOffset — best-of-both-worlds pitch math', () => {
     expect(effectivePreviewOffset({ source: 'device', mappingNote: undefined })).toBe(0);
   });
 
-  it('returns (note - 60) for device samples with a mapping below C3', () => {
-    // Kick drum convention: mapped to MIDI 36 (C1). Device shifts
-    // playback by (36 - NominalPitchAsMIDI) semitones. For NP=960
-    // (C3=60), that's -24. Host needs to match: offset = 36 - 60.
-    expect(effectivePreviewOffset({ source: 'device', mappingNote: 36 })).toBe(-24);
+  it('returns (note - 60) for single-key mappings below C3', () => {
+    // Kick drum convention: mapped to MIDI 36 (C1) only. Device
+    // shifts playback by (36 - NominalPitchAsMIDI) semitones. For
+    // NP=960 (C3=60), that's -24. Host needs to match.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 36, mappingLowKey: 36, mappingHighKey: 36,
+    })).toBe(-24);
   });
 
-  it('returns (note - 60) for device samples with a mapping above C3', () => {
-    // Treble keygroup at MIDI 72 (C4). Device shifts +12; host
-    // matches.
-    expect(effectivePreviewOffset({ source: 'device', mappingNote: 72 })).toBe(12);
+  it('returns (note - 60) for single-key mappings above C3', () => {
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 72, mappingLowKey: 72, mappingHighKey: 72,
+    })).toBe(12);
   });
 
-  it('returns 0 for device samples mapped exactly to C3 (60)', () => {
-    // Trivial case but worth pinning — no offset needed, host's
-    // tune-only behaviour is correct.
-    expect(effectivePreviewOffset({ source: 'device', mappingNote: 60 })).toBe(0);
+  it('returns 0 for a single-key mapping exactly at C3 (60)', () => {
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 60, mappingLowKey: 60, mappingHighKey: 60,
+    })).toBe(0);
+  });
+
+  it('returns 0 for RANGED keygroups even when a midpoint note is supplied', () => {
+    // Translator-/floppy-built kits typically map each sample across
+    // a wide key range (e.g. 24..127, midpoint 75). The device plays
+    // a different pitch per trigger key, so host preview must stay
+    // at recorded pitch instead of guessing — the +15-semitone
+    // sharp playback this used to cause is the regression locked
+    // out here.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 75, mappingLowKey: 24, mappingHighKey: 127,
+    })).toBe(0);
+    // Even a narrow 2-key range is ambiguous.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 60, mappingLowKey: 60, mappingHighKey: 61,
+    })).toBe(0);
+  });
+
+  it('returns 0 when the range is not supplied at all (defensive)', () => {
+    // A caller that only knows the note can't prove single-key —
+    // recorded pitch is the safe default.
+    expect(effectivePreviewOffset({ source: 'device', mappingNote: 36 })).toBe(0);
+  });
+});
+
+// bufferParamsFor guards the invariant that source word w lives at
+// buffer time w / srcRate — every words-to-seconds conversion in
+// previewRegion (start offset, duration, loop points, fade-out
+// scheduling) relies on it. The bug class this locks out: a 48 kHz
+// sample copied 1:1 into a 44.1 kHz-labeled buffer played ~1.5
+// semitones flat AND had its tail truncated because the play window
+// addressed the wrong frames.
+describe('bufferParamsFor — buffer rate/length selection', () => {
+  it('ZOH-expands low-rate samples into a context-rate buffer', () => {
+    // 26040 Hz sample on a 48 kHz context: frames scale up, buffer
+    // is at the context rate (the stair-step expansion path).
+    const p = bufferParamsFor(26040, 26040, 48000);
+    expect(p.rate).toBe(48000);
+    expect(p.frames).toBe(Math.ceil((26040 * 48000) / 26040));
+  });
+
+  it('labels the buffer at the SOURCE rate when srcRate > ctxRate', () => {
+    // 48 kHz sample on a 44.1 kHz context: 1:1 frames, buffer
+    // declared at 48 kHz so the browser downsamples correctly and
+    // word w stays at time w/48000.
+    const p = bufferParamsFor(71112, 48000, 44100);
+    expect(p.rate).toBe(48000);
+    expect(p.frames).toBe(71112);
+  });
+
+  it('is 1:1 at equal rates', () => {
+    const p = bufferParamsFor(1000, 48000, 48000);
+    expect(p.rate).toBe(48000);
+    expect(p.frames).toBe(1000);
+  });
+
+  it('keeps the invariant: word w at time w/srcRate in both branches', () => {
+    const srcLen = 500;
+    for (const [srcRate, ctxRate] of [[26040, 48000], [48000, 44100], [22050, 22050]] as const) {
+      const { frames, rate } = bufferParamsFor(srcLen, srcRate, ctxRate);
+      // Last word's buffer-time position must equal (srcLen-1)/srcRate
+      // regardless of which branch was taken. In the expansion branch
+      // word w sits at frame floor(w*rate/srcRate); in the 1:1 branch
+      // at frame w. Both divided by `rate` give w/srcRate (±1 frame
+      // of floor rounding).
+      const lastWordFrame = srcRate < ctxRate
+        ? Math.floor(((srcLen - 1) * rate) / srcRate)
+        : srcLen - 1;
+      const bufferTime = lastWordFrame / rate;
+      const expected = (srcLen - 1) / srcRate;
+      expect(Math.abs(bufferTime - expected)).toBeLessThan(1 / rate + 1e-9);
+      expect(lastWordFrame).toBeLessThan(frames);
+    }
   });
 });

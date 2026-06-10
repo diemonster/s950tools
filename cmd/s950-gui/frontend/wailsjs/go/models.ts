@@ -27,6 +27,20 @@ export namespace device {
 
 export namespace main {
 	
+	export class CachedWaveform {
+	    words: number[];
+	    sampleRateHz: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CachedWaveform(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.words = source["words"];
+	        this.sampleRateHz = source["sampleRateHz"];
+	    }
+	}
 	export class CatalogItem {
 	    kind: string;
 	    slot: number;
@@ -96,6 +110,20 @@ export namespace main {
 	        this.out = source["out"];
 	        this.channel = source["channel"];
 	        this.baud = source["baud"];
+	    }
+	}
+	export class CopiedAudio {
+	    words: number[];
+	    sampleRateHz: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CopiedAudio(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.words = source["words"];
+	        this.sampleRateHz = source["sampleRateHz"];
 	    }
 	}
 	export class ImportInfo {

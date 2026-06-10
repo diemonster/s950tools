@@ -175,4 +175,20 @@ describe('scheduleSampleWriteback — source gate', () => {
     scheduleSampleWriteback(0);
     expect((App as any).SetSampleParams).not.toHaveBeenCalled();
   });
+
+  it('re-checks the source AT FLUSH TIME: schedule-then-resample must not send', async () => {
+    // The race the flush-time gate exists for: the user edits an
+    // SPRM param on a device-coherent sample (arming the 400 ms
+    // debounce), then changes the RATE dropdown before the timer
+    // fires. The resample flips source to 'local' but the pending
+    // timer + slot survive. Without the flush-time re-check, the
+    // flush would push the post-resample SPRM (new rate, new
+    // TotalWords) onto the device's unchanged SDATA.
+    samples.set([deviceSample(3)]); // device-coherent at schedule time
+    scheduleSampleWriteback(3);     // passes the schedule-time gate
+    // Mid-debounce: resample flips the row to local.
+    samples.update((xs) => xs.map((x) => (x.slot === 3 ? { ...x, source: 'local' as const } : x)));
+    await new Promise((r) => setTimeout(r, 450));
+    expect((App as any).SetSampleParams).not.toHaveBeenCalled();
+  });
 });

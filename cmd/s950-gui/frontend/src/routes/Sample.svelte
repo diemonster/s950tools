@@ -451,14 +451,23 @@
     }
     startCopyTicker();
     try {
-      const words = await (App as any).CopySampleAudio(slot);
+      const copied = (await (App as any).CopySampleAudio(slot)) as { words?: number[]; sampleRateHz?: number } | null;
+      const words = copied?.words ?? [];
       if (!Array.isArray(words) || words.length === 0) {
         throw new Error('Device returned an empty sample');
       }
       // Attach to the live samples store. Re-derives PCM from the
       // 12-bit words so the waveform display flips from synthetic
-      // to real on the next paint.
-      const audio = { words12: words as number[], pcm: wordsToPcm(words as number[]) };
+      // to real on the next paint. Take the dump header's rate as
+      // authoritative for these bytes — it can diverge from the
+      // SPRM (e.g. when the device internally resampled a too-fast
+      // upload but left the SPRM rate alone).
+      const dumpRate = copied?.sampleRateHz;
+      const audio: { words12: number[]; pcm: number[]; rate?: number } = {
+        words12: words,
+        pcm: wordsToPcm(words),
+      };
+      if (dumpRate) audio.rate = dumpRate;
       samples.update((xs) =>
         xs.map((s) => (s.slot === slot ? { ...s, ...audio } : s)),
       );
@@ -466,7 +475,7 @@
       // without another round-trip. Uses the same path as Apply
       // Slicing — keyed by words.length (the cache truth, not the
       // sample's possibly-stale length field).
-      try { await (App as any).PutCachedWaveform(slot, name, words.length, words); } catch {}
+      try { await (App as any).PutCachedWaveform(slot, name, words.length, words, dumpRate ?? 0); } catch {}
       copyPhase = 'done';
     } catch (e: any) {
       copyError = String(e?.message ?? e);
@@ -974,16 +983,19 @@
       // Best-of-both-worlds host preview:
       //   • Local samples → recorded pitch (offset 0). The user
       //     hears what they imported.
-      //   • Device samples with a keygroup mapping → mirror the
+      //   • Device samples mapped to a SINGLE key → mirror the
       //     device's pitch shift so host preview sounds like what
       //     the S950 will play when this program is loaded.
-      //   • Device samples without a mapping → recorded pitch
-      //     (offset 0); no program triggers them anyway.
+      //   • Device samples on ranged keygroups or without a
+      //     mapping → recorded pitch (a ranged keygroup has no
+      //     single device pitch to mirror).
       // The pure helper in preview.ts owns the rule so this stays
       // testable + a single-source-of-truth.
       const offset = preview.effectivePreviewOffset({
         source: smp.source,
         mappingNote: deviceMapping?.note,
+        mappingLowKey: deviceMapping?.lowKey,
+        mappingHighKey: deviceMapping?.highKey,
       });
       preview.previewSample(smp, offset);
     }
@@ -998,6 +1010,8 @@
     programName: string;
     keygroupN: number;
     note: number;
+    lowKey: number;
+    highKey: number;
   };
   $: deviceMapping = ((): DeviceMapping | null => {
     if (!smp || smp.source !== 'device') return null;
@@ -1012,9 +1026,15 @@
             keygroupN: k.n,
             // Use the keygroup's centre key — most kits map a
             // sample to a single key, in which case low == high.
-            // For ranged keygroups, picking the middle is the
-            // least-surprising default.
+            // For ranged keygroups, the middle is the least-
+            // surprising MIDI trigger note. The raw range is
+            // carried alongside so effectivePreviewOffset can tell
+            // single-key maps (apply pitch offset) apart from
+            // ranged keygroups (no single device pitch — host
+            // preview stays at recorded pitch).
             note: Math.floor((k.lowKey + k.highKey) / 2),
+            lowKey: k.lowKey,
+            highKey: k.highKey,
           };
         }
       }

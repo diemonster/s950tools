@@ -42,11 +42,21 @@ export function wordsToPcm(words: ReadonlyArray<number>): number[] {
 // GUI from showing live device state.
 export async function hydrateSampleFromCache(
   s: Sample,
-): Promise<{ pcm: number[]; words12: number[] } | null> {
+): Promise<{ pcm: number[]; words12: number[]; rate: number } | null> {
   try {
-    const words = await (App as any).GetCachedWaveform(s.slot, s.name, s.length);
-    if (!words || (Array.isArray(words) && words.length === 0)) return null;
-    return { words12: words as number[], pcm: wordsToPcm(words) };
+    const cached = await (App as any).GetCachedWaveform(s.slot, s.name, s.length);
+    // The binding now returns { words, sampleRateHz } | null. Be
+    // defensive about both shapes during the migration: legacy v1
+    // cache files were forced-corrupted on the Go side so a clean
+    // miss is null; a hit always carries both fields.
+    if (!cached) return null;
+    const words = cached.words as number[] | undefined;
+    if (!words || words.length === 0) return null;
+    return {
+      words12: words,
+      pcm: wordsToPcm(words),
+      rate: cached.sampleRateHz ?? s.rate,
+    };
   } catch (e) {
     console.warn(`waveformcache: get(${s.slot}, ${s.name}) failed:`, e);
     return null;
@@ -73,7 +83,7 @@ export async function hydrateAllSamplesFromCache(): Promise<void> {
   // Build a slot → audio map of hits only, then overlay. Skipping the
   // misses keeps unrelated rows untouched and avoids an unnecessary
   // store write when nothing was found.
-  const hits = new Map<number, { pcm: number[]; words12: number[] }>();
+  const hits = new Map<number, { pcm: number[]; words12: number[]; rate: number }>();
   for (const f of fetched) {
     if (f.audio) hits.set(f.slot, f.audio);
   }
@@ -83,7 +93,10 @@ export async function hydrateAllSamplesFromCache(): Promise<void> {
     xs.map((s) => {
       const cap = hits.get(s.slot);
       if (!cap) return s;
-      return { ...s, pcm: cap.pcm, words12: cap.words12 };
+      // Take the cached rate too — it was captured from the dump
+      // header at copy time and is authoritative for the audio
+      // bytes, whereas s.rate came from the (possibly stale) SPRM.
+      return { ...s, pcm: cap.pcm, words12: cap.words12, rate: cap.rate };
     }),
   );
 }
@@ -103,7 +116,7 @@ export async function hydrateAllSamplesFromCache(): Promise<void> {
 export async function persistSampleToCache(s: Sample): Promise<void> {
   if (!s.words12 || s.words12.length === 0) return;
   try {
-    await (App as any).PutCachedWaveform(s.slot, s.name, s.words12.length, s.words12);
+    await (App as any).PutCachedWaveform(s.slot, s.name, s.words12.length, s.words12, s.rate);
   } catch (e) {
     // Persistence is best-effort: a write failure degrades the next
     // session back to the synthetic waveform, but the live session

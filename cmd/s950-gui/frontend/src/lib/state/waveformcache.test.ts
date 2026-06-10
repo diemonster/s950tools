@@ -9,19 +9,23 @@ import { get } from 'svelte/store';
 
 // Per-key cached entries: tests pre-seed this map so GetCachedWaveform
 // returns the right blob for a given (slot, name, totalWords). Misses
-// resolve to null (the Go side's miss contract).
+// resolve to null (the Go side's miss contract). v2 of the cache also
+// stores sampleRateHz alongside the words.
 type CacheKey = string;
-const cache = new Map<CacheKey, number[]>();
+type CacheValue = { words: number[]; sampleRateHz: number };
+const cache = new Map<CacheKey, CacheValue>();
 const keyOf = (slot: number, name: string, total: number) => `${slot}|${name}|${total}`;
 
 vi.mock('../../../wailsjs/go/main/App', () => ({
   GetCachedWaveform: vi.fn((slot: number, name: string, total: number) =>
     Promise.resolve(cache.get(keyOf(slot, name, total)) ?? null),
   ),
-  PutCachedWaveform: vi.fn((slot: number, name: string, total: number, words: number[]) => {
-    cache.set(keyOf(slot, name, total), words);
-    return Promise.resolve();
-  }),
+  PutCachedWaveform: vi.fn(
+    (slot: number, name: string, total: number, words: number[], sampleRateHz: number) => {
+      cache.set(keyOf(slot, name, total), { words, sampleRateHz });
+      return Promise.resolve();
+    },
+  ),
 }));
 
 import { samples, newLocalSample, type Sample } from './samples';
@@ -73,7 +77,7 @@ describe('wordsToPcm', () => {
 
 describe('hydrateSampleFromCache', () => {
   it('returns words + derived pcm on a hit', async () => {
-    cache.set(keyOf(0, 'KICK', 4), [0x800, 0xC00, 0x800, 0x400]);
+    cache.set(keyOf(0, 'KICK', 4), { words: [0x800, 0xC00, 0x800, 0x400], sampleRateHz: 26040 });
     const out = await hydrateSampleFromCache(deviceSample(0, 'KICK', 4));
     expect(out?.words12).toEqual([0x800, 0xC00, 0x800, 0x400]);
     expect(out?.pcm[0]).toBeCloseTo(0, 5);
@@ -109,8 +113,8 @@ describe('hydrateAllSamplesFromCache', () => {
       deviceSample(1, 'SNARE', 4),
       newLocalSample(2, 'LOCAL', 44100, 4), // local: must be skipped
     ]);
-    cache.set(keyOf(0, 'KICK', 4),  [0x800, 0x900, 0x800, 0x700]);
-    cache.set(keyOf(1, 'SNARE', 4), [0x800, 0xA00, 0xB00, 0xC00]);
+    cache.set(keyOf(0, 'KICK', 4),  { words: [0x800, 0x900, 0x800, 0x700], sampleRateHz: 26040 });
+    cache.set(keyOf(1, 'SNARE', 4), { words: [0x800, 0xA00, 0xB00, 0xC00], sampleRateHz: 22050 });
 
     await hydrateAllSamplesFromCache();
 
@@ -128,7 +132,7 @@ describe('hydrateAllSamplesFromCache', () => {
     samples.set([
       { ...deviceSample(0, 'KICK', 1), ...existing },
     ]);
-    cache.set(keyOf(0, 'KICK', 1), [0x000]); // wildly different
+    cache.set(keyOf(0, 'KICK', 1), { words: [0x000], sampleRateHz: 26040 }); // wildly different
     await hydrateAllSamplesFromCache();
     const list = get(samples);
     expect(list[0].words12).toEqual([0xC00]); // unchanged
@@ -146,7 +150,7 @@ describe('hydrateAllSamplesFromCache', () => {
       deviceSample(0, 'HIT', 2),
       deviceSample(1, 'MISS', 2),
     ]);
-    cache.set(keyOf(0, 'HIT', 2), [0x800, 0xC00]);
+    cache.set(keyOf(0, 'HIT', 2), { words: [0x800, 0xC00], sampleRateHz: 26040 });
     // slot 1 intentionally absent
 
     await hydrateAllSamplesFromCache();
@@ -164,7 +168,10 @@ describe('persistSampleToCache / persistSamplesToCache', () => {
       pcm: [0, 0, 0, 0],
     };
     await persistSampleToCache(s);
-    expect(cache.get(keyOf(0, 'CACHED', 4))).toEqual([1, 2, 3, 4]);
+    expect(cache.get(keyOf(0, 'CACHED', 4))?.words).toEqual([1, 2, 3, 4]);
+    // Rate is captured from the sample (the source of truth for
+    // device-sourced rows after Copy from S950).
+    expect(cache.get(keyOf(0, 'CACHED', 4))?.sampleRateHz).toBe(44100);
   });
 
   it('keys cache by words12.length, not sample.length', async () => {
@@ -197,8 +204,8 @@ describe('persistSampleToCache / persistSamplesToCache', () => {
       { ...deviceSample(2, 'C', 2), words12: [5, 6] }, // not requested
     ]);
     await persistSamplesToCache([0, 1]);
-    expect(cache.get(keyOf(0, 'A', 2))).toEqual([1, 2]);
-    expect(cache.get(keyOf(1, 'B', 2))).toEqual([3, 4]);
+    expect(cache.get(keyOf(0, 'A', 2))?.words).toEqual([1, 2]);
+    expect(cache.get(keyOf(1, 'B', 2))?.words).toEqual([3, 4]);
     expect(cache.has(keyOf(2, 'C', 2))).toBe(false);
   });
 
@@ -206,10 +213,12 @@ describe('persistSampleToCache / persistSamplesToCache', () => {
     const App = await import('../../../wailsjs/go/main/App');
     ((App as any).PutCachedWaveform as ReturnType<typeof vi.fn>)
       .mockImplementationOnce(() => Promise.reject(new Error('boom')))
-      .mockImplementationOnce((slot: number, name: string, total: number, words: number[]) => {
-        cache.set(keyOf(slot, name, total), words);
-        return Promise.resolve();
-      });
+      .mockImplementationOnce(
+        (slot: number, name: string, total: number, words: number[], sampleRateHz: number) => {
+          cache.set(keyOf(slot, name, total), { words, sampleRateHz });
+          return Promise.resolve();
+        },
+      );
     samples.set([
       { ...deviceSample(0, 'FAIL', 2), words12: [9, 9] },
       { ...deviceSample(1, 'OK',   2), words12: [1, 2] },
@@ -218,7 +227,7 @@ describe('persistSampleToCache / persistSamplesToCache', () => {
     await persistSamplesToCache([0, 1]);
     // First write threw → no entry. Second still landed.
     expect(cache.has(keyOf(0, 'FAIL', 2))).toBe(false);
-    expect(cache.get(keyOf(1, 'OK', 2))).toEqual([1, 2]);
+    expect(cache.get(keyOf(1, 'OK', 2))?.words).toEqual([1, 2]);
     warn.mockRestore();
   });
 });

@@ -177,17 +177,23 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
         progress: 60 + (i / Math.max(1, needsAudio.length)) * 40,
       }));
       try {
-        const words = await App.CopySampleAudio(s.slot);
+        const copied = (await App.CopySampleAudio(s.slot)) as { words?: number[]; sampleRateHz?: number } | null;
+        const words = copied?.words ?? [];
         if (!Array.isArray(words) || words.length === 0) continue;
-        const pcm = wordsToPcm(words as number[]);
+        const pcm = wordsToPcm(words);
+        // Override the SPRM rate with the dump header's rate — the
+        // dump is authoritative for the audio bytes that just landed.
+        // Falls back to the row's existing s.rate when the backend
+        // didn't supply one (defensive against a mid-migration build).
+        const rate = copied?.sampleRateHz ?? s.rate;
         samples.update((xs) => xs.map((x) =>
-          x.slot === s.slot ? { ...x, words12: words as number[], pcm } : x,
+          x.slot === s.slot ? { ...x, words12: words, pcm, rate } : x,
         ));
         // Persist immediately so a cancelled refresh still keeps
         // whatever we managed to download. Next session re-attaches
-        // from the cache without re-fetching.
+        // from the cache without re-fetching, with the rate intact.
         try {
-          await persistSampleToCache({ ...s, words12: words as number[], pcm });
+          await persistSampleToCache({ ...s, words12: words, pcm, rate });
         } catch (e) {
           console.warn(`refresh: cache write for slot ${s.slot} failed:`, e);
         }

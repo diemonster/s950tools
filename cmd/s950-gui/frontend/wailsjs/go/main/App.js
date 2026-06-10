@@ -74,8 +74,8 @@ export function ProbeForS950() {
   return window['go']['main']['App']['ProbeForS950']();
 }
 
-export function PutCachedWaveform(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['PutCachedWaveform'](arg1, arg2, arg3, arg4);
+export function PutCachedWaveform(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['PutCachedWaveform'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function ResampleSample(arg1, arg2, arg3) {

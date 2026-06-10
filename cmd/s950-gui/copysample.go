@@ -3,7 +3,24 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"github.com/bivers/s950/internal/sample"
 )
+
+// CopiedAudio is what CopySampleAudio returns: the device-side audio
+// words plus the rate the SDS dump header reports for them (derived
+// from the dump's PeriodNS). The S950 samples/plays 7.5–48 kHz
+// (continuously variable, per the Operator's Manual — 40 kHz was the
+// S900's ceiling) and normally stores the rate it was told verbatim,
+// so this usually matches the SPRM's SampleRateHz. Carrying the
+// dump-header rate is defense-in-depth: it's the field bound to the
+// audio bytes themselves, so if the two ever diverge (third-party
+// floppy tools, firmware quirks), the host previews at the rate the
+// dump claims for the words it actually delivered.
+type CopiedAudio struct {
+	Words        []uint16 `json:"words"`
+	SampleRateHz uint32   `json:"sampleRateHz"`
+}
 
 // Phase 1C "Copy from S950": user-initiated pull of a sample's audio
 // from the device for samples we didn't upload ourselves (factory
@@ -28,7 +45,7 @@ const copySampleTimeout = 10 * time.Minute
 // User-initiated only — bound to the "Copy from S950" button. Never
 // auto-invoked because SDATA dumps are slow (seconds to minutes) and
 // the user should opt in to that wire traffic.
-func (a *App) CopySampleAudio(slot int) ([]uint16, error) {
+func (a *App) CopySampleAudio(slot int) (*CopiedAudio, error) {
 	if slot < 0 || slot > 99 {
 		return nil, fmt.Errorf("slot %d out of range (0..99)", slot)
 	}
@@ -54,8 +71,12 @@ func (a *App) CopySampleAudio(slot int) ([]uint16, error) {
 
 	// The frontend persists into the Phase 1B cache via the standard
 	// PutCachedWaveform binding once it has the words in hand — it
-	// already knows the sample's SPRM name from refreshCatalog, so
-	// returning just the audio here keeps this binding focused on
-	// the wire transfer.
-	return words, nil
+	// already knows the sample's SPRM name from refreshCatalog. We
+	// also return the dump header's playback rate so the host
+	// preview plays the audio at its real rate, not the SPRM-claimed
+	// rate which can lag the device's internal resampling.
+	return &CopiedAudio{
+		Words:        words,
+		SampleRateHz: sample.PeriodNSToHz(hdr.PeriodNS),
+	}, nil
 }

@@ -143,6 +143,8 @@
     overallModalOpen = true;
     overallPhase = 'loading';
     overallError = '';
+    cachePhase = 'idle';
+    cacheError = '';
     try {
       overallEdit = await App.GetOverall();
       overallPhase = 'editing';
@@ -156,6 +158,32 @@
     overallPhase = 'idle';
     overallEdit = null;
     overallError = '';
+    cachePhase = 'idle';
+    cacheError = '';
+  }
+
+  // ---------- Host waveform-cache maintenance ----------
+  // Clears the Phase 1B disk cache (~/Library/Caches/s950-tools on
+  // macOS). Host-disk-only: nothing is sent to the device, and the
+  // live session's in-memory audio stays attached — the only effect
+  // is that the NEXT session re-pulls audio from the sampler instead
+  // of hydrating from disk. Two-step confirm guards the click; the
+  // action lives in the System modal but deliberately does not
+  // depend on the OVS fetch succeeding, so it stays usable when the
+  // sampler is disconnected (that's exactly when you may want to
+  // clean up a stale cache).
+  let cachePhase: 'idle' | 'confirm' | 'clearing' | 'done' | 'error' = 'idle';
+  let cacheError = '';
+  async function clearWaveCache() {
+    cachePhase = 'clearing';
+    cacheError = '';
+    try {
+      await App.ClearWaveformCache();
+      cachePhase = 'done';
+    } catch (e: any) {
+      cachePhase = 'error';
+      cacheError = String(e?.message ?? e);
+    }
   }
   async function saveOverall() {
     if (!overallEdit) return;
@@ -419,7 +447,7 @@
           {:else}Refresh from S950
           {/if}
         </h2>
-        <div class="modal__route">full system state · all programs + sample params</div>
+        <div class="modal__route">full system state · programs + SPRM</div>
       </header>
       <div class="modal__body">
         {#if $refreshState.phase === 'idle'}
@@ -595,6 +623,44 @@
             aren't exposed here. Their current device values are
             preserved unchanged when you save.
           </p>
+        {/if}
+
+        <!-- Host-side maintenance. Rendered outside the OVS phase
+             branches so it stays reachable when the sampler is
+             disconnected (GetOverall error) — clearing the disk
+             cache never needs the device. Hidden only while an OVS
+             read/write is in flight to avoid stray clicks. -->
+        {#if overallPhase !== 'loading' && overallPhase !== 'saving'}
+          <div class="cache-tools">
+            <div class="cache-tools__head">Host waveform cache</div>
+            <p class="modal__prose modal__prose--hint">
+              Audio copied from the S950 is cached on this computer so
+              the next session shows real waveforms without
+              re-downloading. Clearing it doesn't touch the device or
+              the current session — the next Refresh re-pulls audio
+              from the sampler.
+            </p>
+            {#if cachePhase === 'confirm'}
+              <div class="cache-tools__row">
+                <button type="button" class="btn btn--danger" on:click={clearWaveCache}>
+                  Confirm clear
+                </button>
+                <button type="button" class="btn" on:click={() => (cachePhase = 'idle')}>
+                  Keep
+                </button>
+              </div>
+            {:else if cachePhase === 'clearing'}
+              <span class="modal__waitnote">clearing…</span>
+            {:else if cachePhase === 'done'}
+              <span class="cache-tools__done">✓ cache cleared — next session re-pulls from the S950</span>
+            {:else if cachePhase === 'error'}
+              <div class="modal__step modal__step--error">{cacheError || 'Unknown error'}</div>
+            {:else}
+              <button type="button" class="btn" on:click={() => (cachePhase = 'confirm')}>
+                Clear waveform cache…
+              </button>
+            {/if}
+          </div>
         {/if}
       </div>
       <footer class="modal__foot">
@@ -779,5 +845,31 @@
   :global(.ovs-row input[type="checkbox"]) {
     margin: 0;
     cursor: pointer;
+  }
+
+  /* Host-maintenance section at the bottom of the System modal —
+     visually separated from the device-side OVS form by a rule, so
+     it reads as "this part is about your computer, not the S950". */
+  :global(.cache-tools) {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--grey-light);
+  }
+  :global(.cache-tools__head) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--grey-dark);
+    margin-bottom: 4px;
+  }
+  :global(.cache-tools__row) {
+    display: flex;
+    gap: 8px;
+  }
+  :global(.cache-tools__done) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--grey-dark);
   }
 </style>

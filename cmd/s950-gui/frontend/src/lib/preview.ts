@@ -100,22 +100,40 @@ function tuneToRate(tune: number): number {
 //     the sample at its recorded pitch, tweaked only by tune.
 //     "Listen to what you imported."
 //
-//   • Device samples with a mapping → offset = (mapping.note - 60).
+//   • Device samples mapped to a SINGLE KEY (lowKey === highKey,
+//     the sliced-kit / drum-map shape) → offset = (note - 60).
 //     The device shifts by (trigger_note - NominalPitch_as_MIDI) =
 //     (trigger_note - (60 - tune)) = (trigger_note - 60) + tune.
 //     Tune is already added inside previewRegion, so we hand back
 //     just the (trigger_note - 60) half here. "Listen to what the
 //     device will play."
 //
+//   • Device samples mapped across a key RANGE → offset = 0. A
+//     ranged keygroup plays a different pitch on every key, so
+//     there is no single "what the device will play" — guessing
+//     the range midpoint (the old behaviour) made host preview of
+//     Translator-/floppy-built kits play several semitones sharp
+//     for no reason the user could see. Recorded pitch is the only
+//     honest answer.
+//
 // Exported so Sample.svelte can hand the right value to
 // previewSample without recomputing the rule at every call site,
 // AND so the unit test can lock the contract in.
 export function effectivePreviewOffset(args: {
   source: 'device' | 'local';
-  mappingNote?: number; // MIDI note, undefined when no mapping found
+  mappingNote?: number;    // MIDI note, undefined when no mapping found
+  mappingLowKey?: number;  // keygroup range — offset only applies when
+  mappingHighKey?: number; // low === high (unambiguous single-key map)
 }): number {
   if (args.source !== 'device') return 0;
   if (args.mappingNote === undefined) return 0;
+  if (
+    args.mappingLowKey === undefined ||
+    args.mappingHighKey === undefined ||
+    args.mappingLowKey !== args.mappingHighKey
+  ) {
+    return 0;
+  }
   return args.mappingNote - 60;
 }
 
@@ -162,9 +180,13 @@ const bufferCache = new Map<number, { pcm: number[]; rate: number; buf: AudioBuf
 // source PCM into the AudioContext rate and we'd lose the
 // characteristic stair-step / aliasing of low-rate samples.
 //
-// When fromRate >= toRate we let the browser's downsampler handle
-// it (the inverse case — S950 samples up to 65 kHz on a 48 kHz
-// AudioContext is rare and not the lo-fi-character path).
+// When fromRate >= toRate the copy is 1:1 — the caller creates the
+// AudioBuffer at the SOURCE rate in that case (see bufferFor), so
+// the browser's own resampler performs the downsample at play time
+// against a correctly-labeled buffer. (Historic bug: this branch
+// used to feed a 48 kHz sample into a buffer labeled at the
+// AudioContext rate, which silently played it slow/flat and broke
+// the word↔seconds math downstream.)
 export function zohRenderPCM(pcm: number[], fromRate: number, toRate: number, out: Float32Array): void {
   if (pcm.length === 0) return; // empty input → silent buffer (already zeroed)
   if (fromRate >= toRate) {
@@ -189,6 +211,36 @@ export function zohRenderPCM(pcm: number[], fromRate: number, toRate: number, ou
   }
 }
 
+// bufferParamsFor decides the AudioBuffer's frame count and declared
+// sample rate for a given (source length, source rate, context rate).
+// Pure — exported for unit tests, since the invariant it guards is
+// subtle and was silently broken once before:
+//
+//   INVARIANT: source word w must live at buffer time w / srcRate.
+//
+// Two cases keep that true:
+//   • srcRate < ctxRate  → ZOH-expand into a ctxRate buffer. Word w
+//     lands at frame w·ctxRate/srcRate = time w/srcRate. The
+//     expansion (sample-and-hold) is deliberate: it preserves the
+//     S950's unfiltered stair-step character that the browser's
+//     high-quality resampler would smooth away.
+//   • srcRate ≥ ctxRate  → 1:1 copy into a buffer DECLARED AT THE
+//     SOURCE RATE. Word w is frame w = time w/srcRate; the browser
+//     downsamples at play time. (Labeling this buffer at ctxRate —
+//     the old behaviour — played 48 kHz samples slow/flat and made
+//     all the words-to-seconds math address the wrong frames,
+//     truncating the tail of the region.)
+export function bufferParamsFor(
+  srcLen: number,
+  srcRate: number,
+  ctxRate: number,
+): { frames: number; rate: number } {
+  if (srcRate < ctxRate) {
+    return { frames: Math.ceil((srcLen * ctxRate) / srcRate), rate: ctxRate };
+  }
+  return { frames: srcLen, rate: srcRate };
+}
+
 function bufferFor(s: Sample): AudioBuffer | null {
   if (!s.pcm || s.pcm.length === 0) return null;
   const cached = bufferCache.get(s.slot);
@@ -198,18 +250,9 @@ function bufferFor(s: Sample): AudioBuffer | null {
     return cached.buf;
   }
   const ac = audioContext();
-  // Render at the AudioContext's native rate so the browser doesn't
-  // re-interpolate a sub-rate buffer with its (high-quality) built-in
-  // resampler — that would smooth away the lo-fi character the
-  // resample-on-upload feature was meant to add. ZOH expansion
-  // (sample-and-hold) keeps the device's stair-step audible. For
-  // same-or-higher source rates this is a 1:1 copy.
-  const dstRate = ac.sampleRate;
-  const dstFrames = s.rate < dstRate
-    ? Math.ceil((s.pcm.length * dstRate) / s.rate)
-    : s.pcm.length;
-  const buf = ac.createBuffer(1, dstFrames, dstRate);
-  zohRenderPCM(s.pcm, s.rate, dstRate, buf.getChannelData(0));
+  const { frames, rate } = bufferParamsFor(s.pcm.length, s.rate, ac.sampleRate);
+  const buf = ac.createBuffer(1, frames, rate);
+  zohRenderPCM(s.pcm, s.rate, rate, buf.getChannelData(0));
   bufferCache.set(s.slot, { pcm: s.pcm, rate: s.rate, buf });
   return buf;
 }
@@ -242,12 +285,9 @@ function buildReversedRegion(
   for (let i = 0; i < len; i++) {
     reversed[i] = s.pcm[begin + len - 1 - i];
   }
-  const dstRate = ac.sampleRate;
-  const dstFrames = s.rate < dstRate
-    ? Math.ceil((len * dstRate) / s.rate)
-    : len;
-  const buf = ac.createBuffer(1, dstFrames, dstRate);
-  zohRenderPCM(reversed, s.rate, dstRate, buf.getChannelData(0));
+  const { frames, rate } = bufferParamsFor(len, s.rate, ac.sampleRate);
+  const buf = ac.createBuffer(1, frames, rate);
+  zohRenderPCM(reversed, s.rate, rate, buf.getChannelData(0));
   return buf;
 }
 
@@ -474,11 +514,19 @@ export function previewRegion(
     // loop region. Looping this buffer produces alternating
     // backward/forward playback that bounces off loopStart and loopEnd.
     // See buildPingPongLoopBuffer() for the math.
+    //
+    // Frame indices and the stitched buffer's rate must both use the
+    // SOURCE BUFFER's declared rate (buf.sampleRate), not s.rate —
+    // they differ whenever bufferParamsFor ZOH-expanded a low-rate
+    // sample to the context rate. Indexing with s.rate extracted the
+    // wrong slice of frames and the s.rate-labeled pingBuf played it
+    // at the wrong speed.
     const srcArr = buf.getChannelData(0);
-    const startIdx = Math.max(0, Math.floor(loopStartAbs * s.rate));
-    const endIdx   = Math.min(srcArr.length, Math.floor(loopEndAbs * s.rate));
+    const bufRate = buf.sampleRate;
+    const startIdx = Math.max(0, Math.floor(loopStartAbs * bufRate));
+    const endIdx   = Math.min(srcArr.length, Math.floor(loopEndAbs * bufRate));
     const pingData = buildPingPongLoopBuffer(srcArr, startIdx, endIdx);
-    const pingBuf  = ac.createBuffer(1, pingData.length, s.rate);
+    const pingBuf  = ac.createBuffer(1, pingData.length, bufRate);
     pingBuf.getChannelData(0).set(pingData);
 
     const loopSrc = ac.createBufferSource();
