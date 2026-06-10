@@ -27,3 +27,9 @@ go.work.sum
 
 # Claude Code: personal config / runtime files
 .claude/
+
+# Akai floppy images (library content — never commit)
+*.img
+*.IMG
+*.hfe
+*.HFE

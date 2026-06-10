@@ -132,6 +132,15 @@ The protocol implementation is cross-checked against
 [`dxzl/akai-s950`](https://github.com/dxzl/akai-s950), which has the most
 complete public dump of the S900/S950 PRGHEDR / KEYGROUP / SPRM byte layouts.
 
+The floppy-image support ([internal/akaidisk/](internal/akaidisk/)) is built
+from the on-disk format documented by Klaus Michael Indlekofer's
+[akaiutil](https://sourceforge.net/projects/akaiutil/) (Copyright © 2008–2025
+K. M. Indlekofer), and the test suite optionally uses a locally-built
+`akaiutil` binary as a cross-verification oracle — images written by this
+project are decoded by the reference implementation and compared field by
+field (see `internal/akaidisk/oracle_test.go` for setup). No akaiutil code is
+included in or linked into this project.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -76,6 +76,7 @@ func main() {
 		newSetOverallCmd(),
 		newGetDrumCmd(),
 		newSetDrumCmd(),
+		newImageInspectCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

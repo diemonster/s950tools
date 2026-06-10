@@ -30,6 +30,10 @@ export function Disconnect() {
   return window['go']['main']['App']['Disconnect']();
 }
 
+export function ExportGotekImage(arg1) {
+  return window['go']['main']['App']['ExportGotekImage'](arg1);
+}
+
 export function GetCachedWaveform(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetCachedWaveform'](arg1, arg2, arg3);
 }
@@ -60,6 +64,10 @@ export function InspectSlicing(arg1) {
 
 export function ListPorts() {
   return window['go']['main']['App']['ListPorts']();
+}
+
+export function MidiThruCaps() {
+  return window['go']['main']['App']['MidiThruCaps']();
 }
 
 export function MidiThruStart(arg1, arg2) {

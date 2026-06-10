@@ -17,6 +17,8 @@ export function CopySampleAudio(arg1:number):Promise<main.CopiedAudio>;
 
 export function Disconnect():Promise<void>;
 
+export function ExportGotekImage(arg1:main.ExportImageRequest):Promise<main.ExportImageResult>;
+
 export function GetCachedWaveform(arg1:number,arg2:string,arg3:number):Promise<main.CachedWaveform>;
 
 export function GetDrum():Promise<protocol.DrumSettings>;
@@ -32,6 +34,8 @@ export function ImportSample(arg1:string):Promise<main.ImportInfo>;
 export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPreflight>;
 
 export function ListPorts():Promise<main.PortList>;
+
+export function MidiThruCaps():Promise<main.MidiThruCapabilities>;
 
 export function MidiThruStart(arg1:string,arg2:boolean):Promise<main.MidiThruState>;
 

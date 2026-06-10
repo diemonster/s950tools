@@ -21,6 +21,8 @@
   import { onMount } from 'svelte';
   import * as App from '../../wailsjs/go/main/App';
   import { programToJSON } from '../lib/state/livesync';
+  import { samples } from '../lib/state/samples';
+  import { sampleToSampleParams } from '../lib/state/converters';
 
   // Connection identifier for modal subtitles / log lines. Mirrors
   // the same helper in Sample.svelte: "<port> · Ch <n>" on MIDI,
@@ -114,6 +116,45 @@
       setSync('error', 'Save failed: ' + String(e?.message ?? e));
     }
   }
+  // Export Gotek image: snapshot ALL current programs + every
+  // sample that has host audio into a bootable 800 KB floppy image.
+  // Mirrors the device's own "save entire memory" mental model —
+  // pick-and-choose can come later if disks start overflowing.
+  // Samples without host audio (device rows never copied/imported)
+  // are skipped client-side; the backend treats them as an error to
+  // keep its contract strict.
+  let exportBusy = false;
+  async function exportGotekImage() {
+    if (exportBusy) return;
+    exportBusy = true;
+    try {
+      const progJSONs = get(programs).map((p) => programToJSON(p));
+      const sampleRows = get(samples).filter((s) => s.words12 && s.words12.length > 0);
+      if (progJSONs.length === 0 && sampleRows.length === 0) {
+        setSync('error', 'Nothing to export — load or import programs/samples first');
+        return;
+      }
+      const req = {
+        programs: progJSONs,
+        samples: sampleRows.map((s) => ({
+          params: sampleToSampleParams(s),
+          words: s.words12,
+        })),
+        forceRS232: true,
+      };
+      const res = await (App as any).ExportGotekImage(req);
+      if (!res) return; // user cancelled the dialog
+      const skipped = get(samples).length - sampleRows.length;
+      setSync('synced',
+        `Exported ${res.files} files (${res.freeBlocks} KB free)` +
+        (skipped > 0 ? ` · ${skipped} sample(s) without host audio skipped` : ''));
+    } catch (e: any) {
+      setSync('error', 'Export failed: ' + String(e?.message ?? e));
+    } finally {
+      exportBusy = false;
+    }
+  }
+
   async function openProgramJSON() {
     try {
       const json = await App.OpenProgramJSON();
@@ -363,6 +404,14 @@
         <div class="actions__group">
           <button type="button" class="btn" on:click={openProgramJSON}>Open .json...</button>
           <button type="button" class="btn" on:click={saveProgramJSON} disabled={!hasProgram}>Save .json...</button>
+          <button
+            type="button"
+            class="btn"
+            on:click={exportGotekImage}
+            disabled={exportBusy}
+            title="Write all current programs + samples (with host audio) as a bootable S950 floppy image for a Gotek/FlashFloppy drive. The image's settings file boots the sampler with controller-select on RS-232C.">
+            {exportBusy ? 'Exporting…' : 'Export Gotek .img...'}
+          </button>
         </div>
         <div class="actions__sep"></div>
         <div class="actions__group">
