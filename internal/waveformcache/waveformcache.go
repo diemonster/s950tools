@@ -12,14 +12,17 @@
 // fallback is the same synthetic squiggle the device samples already
 // rendered before Phase 1B existed.
 //
-// File layout:
+// File layout (v2, current):
 //   magic       8 bytes "S950WAVE"
-//   version     uint32 LE (1)
+//   version     uint32 LE (2)
 //   wordCount   uint32 LE
+//   rateHz      uint32 LE
 //   words       wordCount × uint16 LE
 //
-// Older / unknown versions are treated as cache misses. The cache
-// is purely additive — losing the directory is never fatal.
+// v1 (history) lacked the rateHz field — version-1 files are treated
+// as cache misses on read so the audio is re-fetched with its real
+// dump-header rate the next time the user refreshes. The cache is
+// purely additive — losing the directory is never fatal.
 package waveformcache
 
 import (
@@ -49,10 +52,21 @@ type Key struct {
 	TotalWords int
 }
 
+// Entry is a cached waveform plus its device-reported playback rate.
+// The rate is the SDS dump header's PeriodNS field converted to Hz —
+// authoritative for the audio bytes regardless of what the SPRM
+// claimed. Without it the GUI re-attaches at the SPRM rate on a
+// cache hit, and any divergence (e.g. a 48k SPRM over 40k bytes on
+// a kit cut on the S950) plays back at the wrong pitch.
+type Entry struct {
+	Words        []uint16
+	SampleRateHz uint32
+}
+
 const (
 	magic        = "S950WAVE"
-	currentVer   = uint32(1)
-	headerBytes  = len(magic) + 4 + 4 // magic + version + wordCount
+	currentVer   = uint32(2)
+	headerBytes  = len(magic) + 4 + 4 + 4 // magic + version + wordCount + rateHz
 	wordBytes    = 2
 	maxWordCount = 1 << 22 // 4M words ≈ 8 MB — well above the 1.5M-word EXM005 ceiling
 )
@@ -75,16 +89,16 @@ func (c *Cache) Path(k Key) string {
 	return filepath.Join(c.dir, k.fileName())
 }
 
-// Put writes words to the cache under k. Returns nil on success; an
+// Put writes entry to the cache under k. Returns nil on success; an
 // error if the directory can't be created or the write fails. Refuses
 // pathologically-large blobs to keep a corrupt-on-disk file from
 // being silently accepted by a future Get.
-func (c *Cache) Put(k Key, words []uint16) error {
-	if len(words) == 0 {
+func (c *Cache) Put(k Key, entry Entry) error {
+	if len(entry.Words) == 0 {
 		return errors.New("waveformcache: refusing to cache zero-length audio")
 	}
-	if len(words) > maxWordCount {
-		return fmt.Errorf("waveformcache: %d words exceeds cap (%d)", len(words), maxWordCount)
+	if len(entry.Words) > maxWordCount {
+		return fmt.Errorf("waveformcache: %d words exceeds cap (%d)", len(entry.Words), maxWordCount)
 	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return fmt.Errorf("waveformcache: mkdir %q: %w", c.dir, err)
@@ -108,10 +122,13 @@ func (c *Cache) Put(k Key, words []uint16) error {
 	if err := binary.Write(tmp, binary.LittleEndian, currentVer); err != nil {
 		return err
 	}
-	if err := binary.Write(tmp, binary.LittleEndian, uint32(len(words))); err != nil {
+	if err := binary.Write(tmp, binary.LittleEndian, uint32(len(entry.Words))); err != nil {
 		return err
 	}
-	if err := binary.Write(tmp, binary.LittleEndian, words); err != nil {
+	if err := binary.Write(tmp, binary.LittleEndian, entry.SampleRateHz); err != nil {
+		return err
+	}
+	if err := binary.Write(tmp, binary.LittleEndian, entry.Words); err != nil {
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
@@ -126,44 +143,47 @@ func (c *Cache) Put(k Key, words []uint16) error {
 	return nil
 }
 
-// Get reads cached words for k. Returns os.ErrNotExist when the file
-// is missing (the normal cache-miss case), ErrCorrupt when the file
-// exists but can't be parsed, or another error on I/O failure.
-func (c *Cache) Get(k Key) ([]uint16, error) {
+// Get reads the cached entry for k. Returns os.ErrNotExist when the
+// file is missing (the normal cache-miss case), ErrCorrupt when the
+// file exists but can't be parsed (also returned for v1 files —
+// callers should re-fetch so the rate is captured), or another error
+// on I/O failure.
+func (c *Cache) Get(k Key) (Entry, error) {
 	f, err := os.Open(c.Path(k))
 	if err != nil {
-		return nil, err
+		return Entry{}, err
 	}
 	defer f.Close()
 
 	hdr := make([]byte, headerBytes)
 	if _, err := io.ReadFull(f, hdr); err != nil {
-		return nil, ErrCorrupt
+		return Entry{}, ErrCorrupt
 	}
 	if string(hdr[:len(magic)]) != magic {
-		return nil, ErrCorrupt
+		return Entry{}, ErrCorrupt
 	}
 	version := binary.LittleEndian.Uint32(hdr[len(magic):])
 	if version != currentVer {
-		return nil, ErrCorrupt
+		return Entry{}, ErrCorrupt
 	}
 	wordCount := binary.LittleEndian.Uint32(hdr[len(magic)+4:])
 	if wordCount == 0 || wordCount > maxWordCount {
-		return nil, ErrCorrupt
+		return Entry{}, ErrCorrupt
 	}
 	// Cross-check: claimed wordCount must agree with the key. A
 	// mismatch suggests the file is for a different sample that
 	// happened to land at this name — treat as corrupt so the caller
 	// re-captures rather than displaying mis-sized audio.
 	if int(wordCount) != k.TotalWords {
-		return nil, ErrCorrupt
+		return Entry{}, ErrCorrupt
 	}
+	rateHz := binary.LittleEndian.Uint32(hdr[len(magic)+8:])
 
-	out := make([]uint16, wordCount)
-	if err := binary.Read(f, binary.LittleEndian, out); err != nil {
-		return nil, ErrCorrupt
+	words := make([]uint16, wordCount)
+	if err := binary.Read(f, binary.LittleEndian, words); err != nil {
+		return Entry{}, ErrCorrupt
 	}
-	return out, nil
+	return Entry{Words: words, SampleRateHz: rateHz}, nil
 }
 
 // Delete drops the cache entry for k. Missing files are not errors —

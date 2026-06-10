@@ -176,13 +176,8 @@ func runSetDrum(d *device.Device, drsBytes []byte) error {
 	return d.SetDrum(&protocol.DrumSettings{Bytes: drsBytes})
 }
 
-func printOverall(o *protocol.OverallSettings) {
-	printOverallTo(os.Stdout, o)
-}
-
-// printOverallTo writes the human-readable OVS dump to w. Split from
-// printOverall so tests can capture the output without redirecting
-// stdout. Used by the `get-overall` cobra command's RunE.
+// printOverallTo writes the human-readable OVS dump to w. Used by
+// the `get-overall` cobra command's RunE (via runGetOverall).
 func printOverallTo(w io.Writer, o *protocol.OverallSettings) {
 	fmt.Fprintf(w, "Overall Settings\n")
 	fmt.Fprintf(w, "  prog name     : %q\n", o.ProgName)

@@ -20,20 +20,23 @@ func TestPutGetRoundTrip(t *testing.T) {
 	k := Key{Slot: 0, Name: "KICK", TotalWords: 4}
 	words := []uint16{0x800, 0x123, 0x456, 0xFFF}
 
-	if err := c.Put(k, words); err != nil {
+	if err := c.Put(k, Entry{Words: words, SampleRateHz: 40000}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, err := c.Get(k)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if len(got) != len(words) {
-		t.Fatalf("len = %d, want %d", len(got), len(words))
+	if len(got.Words) != len(words) {
+		t.Fatalf("len = %d, want %d", len(got.Words), len(words))
 	}
 	for i := range words {
-		if got[i] != words[i] {
-			t.Errorf("word[%d] = %#x, want %#x", i, got[i], words[i])
+		if got.Words[i] != words[i] {
+			t.Errorf("word[%d] = %#x, want %#x", i, got.Words[i], words[i])
 		}
+	}
+	if got.SampleRateHz != 40000 {
+		t.Errorf("SampleRateHz = %d, want 40000", got.SampleRateHz)
 	}
 }
 
@@ -47,7 +50,7 @@ func TestGetMissing(t *testing.T) {
 
 func TestPutRejectsEmpty(t *testing.T) {
 	c := newTestCache(t)
-	err := c.Put(Key{Slot: 0, Name: "X", TotalWords: 0}, []uint16{})
+	err := c.Put(Key{Slot: 0, Name: "X", TotalWords: 0}, Entry{Words: []uint16{}})
 	if err == nil {
 		t.Fatal("expected error for empty audio")
 	}
@@ -61,7 +64,7 @@ func TestPutRejectsOversize(t *testing.T) {
 	// oversized via the key would NOT trigger this — Put uses len(words).
 	// So allocate maxWordCount+1 with `make`. Small enough for a test.
 	words := make([]uint16, maxWordCount+1)
-	err := c.Put(Key{Slot: 0, Name: "X", TotalWords: len(words)}, words)
+	err := c.Put(Key{Slot: 0, Name: "X", TotalWords: len(words)}, Entry{Words: words})
 	if err == nil {
 		t.Fatal("expected oversize error")
 	}
@@ -72,10 +75,10 @@ func TestGetCorruptMagic(t *testing.T) {
 	k := Key{Slot: 1, Name: "BAD", TotalWords: 2}
 	// Put a real entry, then overwrite the magic so the next Get
 	// fails the header check.
-	if err := c.Put(k, []uint16{1, 2}); err != nil {
+	if err := c.Put(k, Entry{Words: []uint16{1, 2}, SampleRateHz: 26040}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(c.Path(k), []byte("NOTAWAVE"), 0o644); err != nil {
+	if err := os.WriteFile(c.Path(k), []byte("NOTAWAVE0000"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.Get(k)
@@ -107,7 +110,7 @@ func TestGetCorruptKeyMismatch(t *testing.T) {
 	// treat as corrupt and let the caller re-capture.
 	c := newTestCache(t)
 	k := Key{Slot: 0, Name: "MISMATCH", TotalWords: 4}
-	if err := c.Put(k, []uint16{1, 2, 3, 4}); err != nil {
+	if err := c.Put(k, Entry{Words: []uint16{1, 2, 3, 4}}); err != nil {
 		t.Fatal(err)
 	}
 	// Look up under a key with a different TotalWords. The path
@@ -127,7 +130,7 @@ func TestGetCorruptKeyMismatch(t *testing.T) {
 func TestDelete(t *testing.T) {
 	c := newTestCache(t)
 	k := Key{Slot: 0, Name: "GONE", TotalWords: 2}
-	if err := c.Put(k, []uint16{1, 2}); err != nil {
+	if err := c.Put(k, Entry{Words: []uint16{1, 2}, SampleRateHz: 26040}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Delete(k); err != nil {
@@ -144,10 +147,10 @@ func TestDelete(t *testing.T) {
 
 func TestClear(t *testing.T) {
 	c := newTestCache(t)
-	if err := c.Put(Key{Slot: 0, Name: "A", TotalWords: 2}, []uint16{1, 2}); err != nil {
+	if err := c.Put(Key{Slot: 0, Name: "A", TotalWords: 2}, Entry{Words: []uint16{1, 2}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Put(Key{Slot: 1, Name: "B", TotalWords: 2}, []uint16{3, 4}); err != nil {
+	if err := c.Put(Key{Slot: 1, Name: "B", TotalWords: 2}, Entry{Words: []uint16{3, 4}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Clear(); err != nil {
@@ -209,7 +212,7 @@ func TestAtomicWriteLeavesNoTempFiles(t *testing.T) {
 	// After a successful Put, the cache directory contains exactly
 	// one file (the final blob) — no .tmp-* leftovers.
 	c := newTestCache(t)
-	if err := c.Put(Key{Slot: 0, Name: "X", TotalWords: 2}, []uint16{1, 2}); err != nil {
+	if err := c.Put(Key{Slot: 0, Name: "X", TotalWords: 2}, Entry{Words: []uint16{1, 2}}); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(c.dir)

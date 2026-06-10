@@ -45,10 +45,19 @@ var (
 	MinSampleRateHz = uint32(math.Round(1e9 / float64(MaxPeriodNS))) // 2000 Hz
 )
 
-// RateAliases maps short names to sample rates in Hz. Includes the S950's own
-// preset rates plus a few iconic 12-bit-era machines for character matching.
+// RateAliases maps short names to sample rates in Hz. Includes common
+// rates used with the S950 plus a few iconic 12-bit-era machines for
+// character matching.
+//
+// Note the S950 has NO native preset rates — its front-panel sampling
+// rate is continuously variable from 7.5 to 48 kHz (the user keys in
+// a bandwidth of 3,000..19,200 Hz; rate = 2.5 × bandwidth, per the
+// Operator's Manual). The "s950-N" aliases below are CLI conveniences
+// at round numbers inside that range, not hardware presets, and they
+// deliberately stop short of the 48 kHz maximum.
 var RateAliases = map[string]uint32{
-	// S950 native preset rates, low → high. "s950-N" where N is the kHz tens.
+	// Convenience rates inside the S950's 7.5–48 kHz window,
+	// low → high. "s950-N" where N is the kHz tens.
 	"s950-7":  7500,
 	"s950-10": 10000,
 	"s950-12": 12000,

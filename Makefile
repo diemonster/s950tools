@@ -63,7 +63,7 @@ lint-frontend: ## svelte-check + ESLint
 check: lint test ## Run lint + test together (CI default)
 
 # ---------- Build ----------
-.PHONY: build build-cli build-gui build-gui-universal
+.PHONY: build build-cli build-gui build-gui-universal dev-gui
 build: build-cli build-gui ## Build CLI binary + Wails desktop app
 
 build-cli: ## Build the s950-tools CLI binary
@@ -73,6 +73,9 @@ build-cli: ## Build the s950-tools CLI binary
 build-gui: ## Build the Wails desktop app for the host arch (fast, local dev)
 	@echo "→ Building GUI (wails build, host arch)"
 	@cd cmd/s950-gui && $(MAC_BUILD_ENV) wails build
+
+dev-gui: ## Run `wails dev` with the deployment-target env aligned
+	@cd cmd/s950-gui && $(MAC_BUILD_ENV) wails dev
 
 build-gui-universal: ## Build a universal macOS .app (arm64 + amd64) for distribution
 	@echo "→ Building GUI (wails build, darwin/universal)"

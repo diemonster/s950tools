@@ -310,10 +310,6 @@ func newPutProgramCmd() *cobra.Command {
 			if err := json.Unmarshal(buf, &pj); err != nil {
 				return fmt.Errorf("parse JSON: %w", err)
 			}
-			p := &protocol.Program{}
-			if err := p.FromJSON(&pj); err != nil {
-				return fmt.Errorf("decode program: %w", err)
-			}
 
 			d, cleanup, err := newDevice()
 			if err != nil {
@@ -321,81 +317,12 @@ func newPutProgramCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			// --- Sample manifest, if any ---
-			if len(pj.Samples) > 0 {
-				kitDir := filepath.Dir(path)
-				existing := map[string]bool{}
-				if cat, err := d.Catalog(); err == nil {
-					for _, e := range cat {
-						if e.Type == 'S' {
-							existing[e.Name] = true
-						}
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "warning: catalog read failed (%v); proceeding without skip-if-present\n", err)
-				}
-
-				for i, spec := range pj.Samples {
-					name := spec.Name
-					if name == "" {
-						base := filepath.Base(spec.File)
-						name = strings.ToUpper(strings.TrimSuffix(base, filepath.Ext(base)))
-						if len(name) > 10 {
-							name = name[:10]
-						}
-					}
-					if existing[name] && !forceSamples {
-						fmt.Fprintf(os.Stderr, "[%d/%d] %s: already on device, skipping\n",
-							i+1, len(pj.Samples), name)
-						continue
-					}
-					filePath := spec.File
-					if !filepath.IsAbs(filePath) {
-						filePath = filepath.Join(kitDir, filePath)
-					}
-					fmt.Fprintf(os.Stderr, "[%d/%d] %s ← %s\n",
-						i+1, len(pj.Samples), name, filePath)
-					if _, err := uploadSample(d, uploadSampleOpts{
-						Path:          filePath,
-						Name:          name,
-						Rate:          spec.Rate,
-						ChannelMode:   spec.ChannelMode,
-						TuneSemitones: spec.Tune,
-						MaxFrames:     spec.MaxFrames,
-						LoopStart:     spec.LoopStart,
-						LoopEnd:       spec.LoopEnd,
-						Mode:          spec.Mode,
-						PreferredSlot: 0, // lowest empty
-					}); err != nil {
-						return fmt.Errorf("sample %q: %w", name, err)
-					}
-				}
-			}
-
-			// --- Program ---
-			d.T.Drain()
-			start := time.Now()
-			if err := d.SetProgram(byte(slot), p); err != nil {
-				return fmt.Errorf("write program: %w", err)
-			}
-			naks := d.CollectNAKs(500 * time.Millisecond)
-			if naks > 0 {
-				return fmt.Errorf("write received %d NAK(s) — program may not have stored cleanly; please retry (and consider power-cycling the S950 if the target slot was already populated)", naks)
-			}
-			fmt.Fprintf(os.Stderr, "wrote program %q (%d keygroup%s) to slot %d in %s\n",
-				p.Name, len(p.Keygroups), plural(len(p.Keygroups)), slot,
-				time.Since(start).Round(time.Millisecond))
-
-			if !skipVerify {
-				time.Sleep(200 * time.Millisecond)
-				v, err := d.GetProgram(byte(slot))
-				if err != nil {
-					return fmt.Errorf("verify (get-program): %w", err)
-				}
-				fmt.Fprintf(os.Stderr, "verified: name=%q keygroups=%d\n",
-					v.Name, len(v.Keygroups))
-			}
-			return nil
+			return runPutProgram(cmd.ErrOrStderr(), d, &pj, putProgramOpts{
+				Slot:         byte(slot),
+				SkipVerify:   skipVerify,
+				ForceSamples: forceSamples,
+				KitDir:       filepath.Dir(path),
+			})
 		},
 	}
 	cmd.Flags().IntVar(&slot, "slot", 0, "destination program slot (0..99)")
@@ -404,6 +331,124 @@ func newPutProgramCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&forceSamples, "force-samples", false,
 		"re-upload samples even when a sample of the same name already exists on the device")
 	return cmd
+}
+
+// putProgramOpts is the flag bag for runPutProgram. Split off the
+// cobra closure so tests can construct it directly.
+type putProgramOpts struct {
+	// Slot is the destination program slot (0..99).
+	Slot byte
+	// SkipVerify disables the post-write get-program verification
+	// read — matches the --no-verify CLI flag. Tests usually set
+	// this true to avoid having to synthesise a PRGM reply.
+	SkipVerify bool
+	// ForceSamples re-uploads samples even when a same-named entry
+	// already exists in the device catalog. Default behaviour skips
+	// the upload to save wire time during iterative kit builds.
+	ForceSamples bool
+	// KitDir is the directory used to resolve relative sample.File
+	// paths against. The cobra wrapper passes filepath.Dir(jsonPath);
+	// tests can use a tempdir.
+	KitDir string
+}
+
+// runPutProgram is newPutProgramCmd's testable core. Given an
+// already-decoded ProgramJSON, it orchestrates the manifest sample
+// uploads (with skip-if-present), the program write, the NAK
+// collection, and the optional verify read. Split from the cobra
+// wrapper so the catalog-driven skip logic + the NAK-error path can
+// be exercised with a fake transport.
+func runPutProgram(status io.Writer, d *device.Device, pj *protocol.ProgramJSON, opts putProgramOpts) error {
+	p := &protocol.Program{}
+	if err := p.FromJSON(pj); err != nil {
+		return fmt.Errorf("decode program: %w", err)
+	}
+
+	// --- Sample manifest, if any ---
+	if len(pj.Samples) > 0 {
+		existing := map[string]bool{}
+		if cat, err := d.Catalog(); err == nil {
+			for _, e := range cat {
+				if e.Type == 'S' {
+					existing[e.Name] = true
+				}
+			}
+		} else {
+			fmt.Fprintf(status, "warning: catalog read failed (%v); proceeding without skip-if-present\n", err)
+		}
+
+		for i, spec := range pj.Samples {
+			name := resolveSampleName(spec)
+			if existing[name] && !opts.ForceSamples {
+				fmt.Fprintf(status, "[%d/%d] %s: already on device, skipping\n",
+					i+1, len(pj.Samples), name)
+				continue
+			}
+			filePath := spec.File
+			if !filepath.IsAbs(filePath) {
+				filePath = filepath.Join(opts.KitDir, filePath)
+			}
+			fmt.Fprintf(status, "[%d/%d] %s ← %s\n",
+				i+1, len(pj.Samples), name, filePath)
+			if _, err := uploadSample(status, d, uploadSampleOpts{
+				Path:          filePath,
+				Name:          name,
+				Rate:          spec.Rate,
+				ChannelMode:   spec.ChannelMode,
+				TuneSemitones: spec.Tune,
+				MaxFrames:     spec.MaxFrames,
+				LoopStart:     spec.LoopStart,
+				LoopEnd:       spec.LoopEnd,
+				Mode:          spec.Mode,
+				PreferredSlot: 0, // lowest empty
+			}); err != nil {
+				return fmt.Errorf("sample %q: %w", name, err)
+			}
+		}
+	}
+
+	// --- Program ---
+	d.T.Drain()
+	start := time.Now()
+	if err := d.SetProgram(opts.Slot, p); err != nil {
+		return fmt.Errorf("write program: %w", err)
+	}
+	naks := d.CollectNAKs(500 * time.Millisecond)
+	if naks > 0 {
+		return fmt.Errorf("write received %d NAK(s) — program may not have stored cleanly; please retry (and consider power-cycling the S950 if the target slot was already populated)", naks)
+	}
+	fmt.Fprintf(status, "wrote program %q (%d keygroup%s) to slot %d in %s\n",
+		p.Name, len(p.Keygroups), plural(len(p.Keygroups)), opts.Slot,
+		time.Since(start).Round(time.Millisecond))
+
+	if !opts.SkipVerify {
+		time.Sleep(200 * time.Millisecond)
+		v, err := d.GetProgram(opts.Slot)
+		if err != nil {
+			return fmt.Errorf("verify (get-program): %w", err)
+		}
+		fmt.Fprintf(status, "verified: name=%q keygroups=%d\n",
+			v.Name, len(v.Keygroups))
+	}
+	return nil
+}
+
+// resolveSampleName returns the SPRM name a sample manifest entry
+// should be uploaded under: spec.Name verbatim when set, otherwise
+// the file basename uppercased, extension stripped, truncated to the
+// S950's 10-character limit. Pure helper — split from runPutProgram's
+// loop so the name-derivation rules can be table-tested without a
+// device.
+func resolveSampleName(spec protocol.SampleSpec) string {
+	if spec.Name != "" {
+		return spec.Name
+	}
+	base := filepath.Base(spec.File)
+	name := strings.ToUpper(strings.TrimSuffix(base, filepath.Ext(base)))
+	if len(name) > 10 {
+		name = name[:10]
+	}
+	return name
 }
 
 func plural(n int) string {
@@ -440,59 +485,21 @@ type uploadSampleOpts struct {
 // SPRM (sample name / tune / loop) when any of those is set.
 //
 // Returns the slot it actually landed in.
-func uploadSample(d *device.Device, o uploadSampleOpts) (byte, error) {
-	chMode, err := sample.ParseChannelMode(o.ChannelMode)
+func uploadSample(status io.Writer, d *device.Device, o uploadSampleOpts) (byte, error) {
+	a, words, err := prepareSampleAudio(status, o)
 	if err != nil {
 		return 0, err
-	}
-	storeRate, err := sample.ParseRate(o.Rate)
-	if err != nil {
-		return 0, err
-	}
-	a, err := sample.LoadAudio(o.Path, chMode)
-	if err != nil {
-		return 0, fmt.Errorf("load %s: %w", o.Path, err)
-	}
-	fmt.Fprintf(os.Stderr, "  loaded %d frames @ %dHz\n", len(a.PCM), a.SampleRate)
-
-	switch {
-	case storeRate != 0:
-		if !sample.InRange(storeRate) {
-			return 0, fmt.Errorf("rate %d outside S950 range (%d..%d Hz)",
-				storeRate, sample.MinSampleRateHz, sample.MaxSampleRateHz)
-		}
-		if storeRate != a.SampleRate {
-			orig := a.SampleRate
-			a = sample.ResampleTo(a, storeRate)
-			fmt.Fprintf(os.Stderr, "  resampled %dHz -> %dHz (%d frames)\n",
-				orig, a.SampleRate, len(a.PCM))
-		}
-	case !sample.InRange(a.SampleRate):
-		orig := a.SampleRate
-		a = sample.ResampleToS950Range(a, 0)
-		fmt.Fprintf(os.Stderr, "  source %dHz out of range; resampled to %dHz (%d frames)\n",
-			orig, a.SampleRate, len(a.PCM))
-	}
-
-	if o.MaxFrames > 0 && o.MaxFrames < len(a.PCM) {
-		a.PCM = a.PCM[:o.MaxFrames]
-		fmt.Fprintf(os.Stderr, "  truncated to %d frames\n", len(a.PCM))
-	}
-
-	words, err := sample.PCM16ToWords(a.PCM)
-	if err != nil {
-		return 0, fmt.Errorf("convert: %w", err)
 	}
 
 	finalSlot := byte(o.PreferredSlot)
 	if picked, changed, perr := d.PickSlot(finalSlot); perr == nil {
 		finalSlot = picked
 		if changed {
-			fmt.Fprintf(os.Stderr, "  slot %d occupied; using slot %d\n",
+			fmt.Fprintf(status, "  slot %d occupied; using slot %d\n",
 				o.PreferredSlot, finalSlot)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "  warning: catalog read failed (%v); using slot %d as-is\n",
+		fmt.Fprintf(status, "  warning: catalog read failed (%v); using slot %d as-is\n",
 			perr, o.PreferredSlot)
 	}
 
@@ -506,9 +513,9 @@ func uploadSample(d *device.Device, o uploadSampleOpts) (byte, error) {
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "  queued %d bytes; waiting %s for MIDI drain...\n",
+	fmt.Fprintf(status, "  queued %d bytes; waiting %s for MIDI drain...\n",
 		sent, drain.Round(100*time.Millisecond))
-	waitWithProgress(drain)
+	waitWithProgressTo(status, drain, time.Second)
 
 	if naks := d.CollectNAKs(500 * time.Millisecond); naks > 0 {
 		return 0, fmt.Errorf("%d NAK(s) from S950 — sample may be truncated; please retry", naks)
@@ -531,16 +538,7 @@ func uploadSample(d *device.Device, o uploadSampleOpts) (byte, error) {
 			p.Name = o.Name
 		}
 		if o.TuneSemitones != 0 {
-			// --tune applies relative to the current SNOMP. Lower SNOMP =
-			// higher playback at the same key, so positive tune SUBTRACTS.
-			pitch := int32(p.NominalPitch) - int32(o.TuneSemitones*16)
-			if pitch < 0 {
-				pitch = 0
-			}
-			if pitch > 0xFFFF {
-				pitch = 0xFFFF
-			}
-			p.NominalPitch = uint16(pitch)
+			p.NominalPitch = applyTuneToPitch(p.NominalPitch, o.TuneSemitones)
 		}
 		if o.LoopStart != 0 || o.LoopEnd != 0 {
 			p.Start = o.LoopStart
@@ -554,6 +552,75 @@ func uploadSample(d *device.Device, o uploadSampleOpts) (byte, error) {
 	return finalSlot, nil
 }
 
+// prepareSampleAudio loads the source file, applies the requested
+// rate / channel-mix transforms, truncates to MaxFrames, and converts
+// to S950 12-bit words. Pure: no wire traffic, only filesystem + the
+// internal/sample package. Split from uploadSample so the audio-shape
+// path can be table-tested without a transport.
+func prepareSampleAudio(status io.Writer, o uploadSampleOpts) (*sample.LoadedAudio, []uint16, error) {
+	chMode, err := sample.ParseChannelMode(o.ChannelMode)
+	if err != nil {
+		return nil, nil, err
+	}
+	storeRate, err := sample.ParseRate(o.Rate)
+	if err != nil {
+		return nil, nil, err
+	}
+	a, err := sample.LoadAudio(o.Path, chMode)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load %s: %w", o.Path, err)
+	}
+	fmt.Fprintf(status, "  loaded %d frames @ %dHz\n", len(a.PCM), a.SampleRate)
+
+	switch {
+	case storeRate != 0:
+		if !sample.InRange(storeRate) {
+			return nil, nil, fmt.Errorf("rate %d outside S950 range (%d..%d Hz)",
+				storeRate, sample.MinSampleRateHz, sample.MaxSampleRateHz)
+		}
+		if storeRate != a.SampleRate {
+			orig := a.SampleRate
+			a = sample.ResampleTo(a, storeRate)
+			fmt.Fprintf(status, "  resampled %dHz -> %dHz (%d frames)\n",
+				orig, a.SampleRate, len(a.PCM))
+		}
+	case !sample.InRange(a.SampleRate):
+		orig := a.SampleRate
+		a = sample.ResampleToS950Range(a, 0)
+		fmt.Fprintf(status, "  source %dHz out of range; resampled to %dHz (%d frames)\n",
+			orig, a.SampleRate, len(a.PCM))
+	}
+
+	if o.MaxFrames > 0 && o.MaxFrames < len(a.PCM) {
+		a.PCM = a.PCM[:o.MaxFrames]
+		fmt.Fprintf(status, "  truncated to %d frames\n", len(a.PCM))
+	}
+
+	words, err := sample.PCM16ToWords(a.PCM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("convert: %w", err)
+	}
+	return a, words, nil
+}
+
+// applyTuneToPitch returns the SNOMP value resulting from applying
+// `semitones` worth of tune-by-ear adjustment to `current`. Positive
+// semitones SUBTRACTS from SNOMP (lower SNOMP = higher playback at
+// the same key — same direction dxzl/akai-s950 uses). Clamped to
+// uint16 so a wild --tune value can't wrap around to a garbage pitch.
+func applyTuneToPitch(current uint16, semitones float64) uint16 {
+	// SNOMP resolution is 1/16 semitone: each semitone is 16 units.
+	delta := int32(semitones * 16)
+	pitch := int32(current) - delta
+	if pitch < 0 {
+		return 0
+	}
+	if pitch > 0xFFFF {
+		return 0xFFFF
+	}
+	return uint16(pitch)
+}
+
 func newProgramTemplateCmd() *cobra.Command {
 	var name string
 	var nKeygroups int
@@ -562,24 +629,20 @@ func newProgramTemplateCmd() *cobra.Command {
 		Use:   "program-template",
 		Short: "Emit a starter program JSON you can edit then upload via put-program",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p := protocol.NewDefaultProgram(name, nKeygroups)
-			j := p.ToJSON()
-			out := os.Stdout
+			w := cmd.OutOrStdout()
 			if outPath != "" {
 				f, err := os.Create(outPath)
 				if err != nil {
 					return fmt.Errorf("create %s: %w", outPath, err)
 				}
 				defer f.Close()
-				out = f
+				w = f
 			}
-			enc := json.NewEncoder(out)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(&j); err != nil {
+			if err := runProgramTemplate(w, name, nKeygroups); err != nil {
 				return err
 			}
 			if outPath != "" {
-				fmt.Fprintf(os.Stderr, "wrote %s (%d keygroup%s, defaults)\n",
+				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s (%d keygroup%s, defaults)\n",
 					outPath, nKeygroups, plural(nKeygroups))
 			}
 			return nil
@@ -591,6 +654,19 @@ func newProgramTemplateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&outPath, "output", "o", "",
 		"write JSON to this file instead of stdout")
 	return cmd
+}
+
+// runProgramTemplate is newProgramTemplateCmd's testable core —
+// builds a default Program with `nKeygroups` keygroups under `name`
+// and indented-JSON encodes it to w. Pure: no wire, no filesystem.
+// The cobra wrapper handles --output redirection by swapping w for an
+// opened file before calling here.
+func runProgramTemplate(w io.Writer, name string, nKeygroups int) error {
+	p := protocol.NewDefaultProgram(name, nKeygroups)
+	j := p.ToJSON()
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(&j)
 }
 
 func newPutSampleCmd() *cobra.Command {
@@ -612,7 +688,7 @@ func newPutSampleCmd() *cobra.Command {
 			}
 			defer cleanup()
 			start := time.Now()
-			finalSlot, err := uploadSample(d, uploadSampleOpts{
+			finalSlot, err := uploadSample(cmd.ErrOrStderr(), d, uploadSampleOpts{
 				Path:          args[0],
 				Rate:          rateStr,
 				ChannelMode:   channelStr,
@@ -626,7 +702,7 @@ func newPutSampleCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "done in %s (slot %d)\n",
+			fmt.Fprintf(cmd.ErrOrStderr(), "done in %s (slot %d)\n",
 				time.Since(start).Round(time.Millisecond), finalSlot)
 			return nil
 		},
@@ -697,17 +773,10 @@ func newMonitorCmd() *cobra.Command {
 	return cmd
 }
 
-// waitWithProgress sleeps for d, printing a dot every second so long
-// transfers don't look hung.
-func waitWithProgress(d time.Duration) {
-	waitWithProgressTo(os.Stderr, d, time.Second)
-}
-
-// waitWithProgressTo is the seam version: writes progress dots to
-// `w` once per `tickEvery` until `total` elapses. Split out so tests
-// can drive a 30 ms wait with a 10 ms tick and assert on the captured
-// dot count without sitting on a real one-second ticker. The public
-// function above keeps the production behaviour (os.Stderr + 1 Hz).
+// waitWithProgressTo sleeps for `total`, writing a dot to `w` once
+// per `tickEvery` so long transfers don't look hung. Short waits
+// (total <= tickEvery) sleep silently. Used by uploadSample's MIDI-
+// drain wait; the writer + tick seams make it test-pace-able.
 func waitWithProgressTo(w io.Writer, total, tickEvery time.Duration) {
 	if total <= tickEvery {
 		time.Sleep(total)
@@ -734,13 +803,8 @@ func parseSampleNum(s string) (byte, error) {
 	return byte(n), nil
 }
 
-func printParams(p *protocol.SampleParams, num byte) {
-	printParamsTo(os.Stdout, p, num)
-}
-
-// printParamsTo writes the human-readable SPRM dump to w. Split from
-// printParams so tests can capture the output without redirecting
-// stdout. Used by the `get-params` cobra command's RunE.
+// printParamsTo writes the human-readable SPRM dump to w. Used by
+// the `get-params` cobra command's RunE (via runGetParams).
 func printParamsTo(w io.Writer, p *protocol.SampleParams, num byte) {
 	fmt.Fprintf(w, "Sample %d: %q\n", num, p.Name)
 	fmt.Fprintf(w, "  total words : %d\n", p.TotalWords)
