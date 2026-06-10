@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,17 @@ type App struct {
 	openMIDI        func(transport.Options) (transport.Transport, error)
 	openSerial      func(transport.SerialOptions) (transport.Transport, error)
 	listSerialPorts func() ([]string, error)
+
+	// MIDI-thru state (midithru.go). thruMu guards thru. LOCK ORDER:
+	// mu before thruMu (thruMu is innermost — acquiring or blocking
+	// on mu while holding thruMu is forbidden; the rtmidi callback
+	// additionally may only TryLock mu, see midithru.go's header).
+	// openThruIn / openThruVirtual are the listener seams, faked in
+	// tests.
+	thruMu          sync.Mutex
+	thru            *thruState
+	openThruIn      func(port string, onMsg func([]byte)) (io.Closer, error)
+	openThruVirtual func(name string, onMsg func([]byte)) (io.Closer, error)
 }
 
 func NewApp() *App {
@@ -84,6 +96,12 @@ func NewApp() *App {
 		openMIDI:        transport.Open,
 		openSerial:      transport.OpenSerial,
 		listSerialPorts: transport.ListSerialPorts,
+		openThruIn: func(port string, onMsg func([]byte)) (io.Closer, error) {
+			return transport.OpenMidiInListener(port, onMsg)
+		},
+		openThruVirtual: func(name string, onMsg func([]byte)) (io.Closer, error) {
+			return transport.OpenVirtualMidiIn(name, onMsg)
+		},
 	}
 }
 
@@ -179,6 +197,12 @@ func (a *App) ConnectSerial(port string, baud int) error {
 // closeTransportLocked releases any open transport and clears the
 // derived state. Caller must hold a.mu.
 func (a *App) closeTransportLocked() {
+	// MIDI-thru depends on the serial transport; tear it down first
+	// so the forward callback can't race a closing port. Runs even
+	// when tport is already nil — a stale thru session must never
+	// survive into a new connection (it would forward into the
+	// fresh transport, double-triggering on a MIDI session).
+	a.stopThruLocked()
 	if a.tport != nil {
 		_ = a.tport.Close()
 		a.tport = nil
@@ -225,6 +249,9 @@ func (a *App) Disconnect() error {
 	if a.tport == nil {
 		return nil
 	}
+	// Stop MIDI-thru before the port goes away (same rationale as
+	// closeTransportLocked).
+	a.stopThruLocked()
 	err := a.tport.Close()
 	a.tport = nil
 	a.dev = nil

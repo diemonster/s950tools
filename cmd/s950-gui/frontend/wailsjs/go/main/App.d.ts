@@ -33,6 +33,12 @@ export function InspectSlicing(arg1:main.SlicingRequest):Promise<main.SlicingPre
 
 export function ListPorts():Promise<main.PortList>;
 
+export function MidiThruStart(arg1:string,arg2:boolean):Promise<main.MidiThruState>;
+
+export function MidiThruStatus():Promise<main.MidiThruState>;
+
+export function MidiThruStop():Promise<main.MidiThruState>;
+
 export function OpenProgramJSON():Promise<protocol.ProgramJSON>;
 
 export function PreviewMidi(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;

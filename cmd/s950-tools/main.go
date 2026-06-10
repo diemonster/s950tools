@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -249,21 +250,21 @@ func newGetProgramCmd() *cobra.Command {
 			defer cleanup()
 			d.RequestTimeout = 8 * time.Second // programs are bigger than catalog
 
-			w := cmd.OutOrStdout()
-			if outPath != "" {
-				f, err := os.Create(outPath)
-				if err != nil {
-					return fmt.Errorf("create %s: %w", outPath, err)
-				}
-				defer f.Close()
-				w = f
+			if outPath == "" {
+				return runGetProgram(cmd.OutOrStdout(), d, num)
 			}
-			if err := runGetProgram(w, d, num); err != nil {
+			// Buffer the fetch+encode and only touch the output file
+			// once both succeeded — os.Create truncates, and a flaky
+			// link mid-fetch must not zero out the user's previous
+			// export at the same path.
+			var buf bytes.Buffer
+			if err := runGetProgram(&buf, d, num); err != nil {
 				return err
 			}
-			if outPath != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s\n", outPath)
+			if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", outPath, err)
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s\n", outPath)
 			return nil
 		},
 	}
@@ -309,6 +310,15 @@ func newPutProgramCmd() *cobra.Command {
 			var pj protocol.ProgramJSON
 			if err := json.Unmarshal(buf, &pj); err != nil {
 				return fmt.Errorf("parse JSON: %w", err)
+			}
+			// Structural pre-validation BEFORE the transport opens —
+			// FromJSON is what rejects corrupt _raw_header_hex /
+			// keygroup hex, and a hand-edited kit file should fail
+			// with that diagnostic, not a port error when no device
+			// is attached. runPutProgram re-decodes internally; the
+			// duplicate decode is microseconds against a wire write.
+			if err := (&protocol.Program{}).FromJSON(&pj); err != nil {
+				return fmt.Errorf("decode program: %w", err)
 			}
 
 			d, cleanup, err := newDevice()

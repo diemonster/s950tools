@@ -5,6 +5,9 @@ import {
   zohRenderPCM,
   effectivePreviewOffset,
   bufferParamsFor,
+  normalizeLoopRegion,
+  currentWordFor,
+  type PlaybackSession,
 } from './preview';
 import { newLocalSample } from './state/samples';
 
@@ -252,6 +255,157 @@ describe('effectivePreviewOffset — best-of-both-worlds pitch math', () => {
     // A caller that only knows the note can't prove single-key —
     // recorded pitch is the safe default.
     expect(effectivePreviewOffset({ source: 'device', mappingNote: 36 })).toBe(0);
+  });
+
+  it('drops the key-tracking term for CONSTANT-PITCH keygroups', () => {
+    // The S950's transpose-off flag: a const-pitch keygroup plays
+    // its sample at recorded pitch on EVERY key — the standard
+    // slice-kit shape (one key per slice, const-pitch on, so slice
+    // 18 at key 77 doesn't chipmunk on the hardware). Host preview
+    // must not apply (77 - 60) = +17 semitones the device never
+    // plays.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 77, mappingLowKey: 77, mappingHighKey: 77,
+      mappingConstPitch: true,
+    })).toBe(0);
+    // ...but the layer's fixed transpose still applies — the device
+    // honours it on every key even with tracking off.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 77, mappingLowKey: 77, mappingHighKey: 77,
+      mappingConstPitch: true, mappingTranspose: -5,
+    })).toBe(-5);
+    // Pitch-tracking single-key mapping still gets the tracking term.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 77, mappingLowKey: 77, mappingHighKey: 77,
+      mappingConstPitch: false,
+    })).toBe(17);
+  });
+
+  it('adds the layer transpose to the tracking term (compensated slice kits)', () => {
+    // The OTHER standard slice-kit shape: pitch-tracking single-key
+    // zones, each carrying a compensating transpose so the slice
+    // plays at recorded pitch at its own trigger key. Tracking
+    // (73 - 60 = +13) + transpose (-13) must net to 0 — the device
+    // plays recorded pitch and host preview must match.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 73, mappingLowKey: 73, mappingHighKey: 73,
+      mappingConstPitch: false, mappingTranspose: -13,
+    })).toBe(0);
+    // Partial compensation nets to the residual the device plays.
+    expect(effectivePreviewOffset({
+      source: 'device', mappingNote: 73, mappingLowKey: 73, mappingHighKey: 73,
+      mappingConstPitch: false, mappingTranspose: -1,
+    })).toBe(12);
+  });
+});
+
+// normalizeLoopRegion resolves "looping mode, empty loop region" —
+// the config every Translator/one-shot slice lands in when the user
+// flips the MODE button to LOOP or PING-PONG (SPRM LoopLength stays
+// 0). Audio and playhead must agree on the interpretation.
+describe('normalizeLoopRegion — degenerate loop-region defaulting', () => {
+  it('expands an empty region to the whole play range for loop mode', () => {
+    expect(normalizeLoopRegion('loop', 0, 0, 71111))
+      .toEqual({ loopStartWord: 0, loopLengthWord: 71111 });
+  });
+
+  it('expands an empty region for ping-pong mode', () => {
+    expect(normalizeLoopRegion('ping-pong', 0, 0, 4076))
+      .toEqual({ loopStartWord: 0, loopLengthWord: 4076 });
+  });
+
+  it('resets a nonzero loopStart when the region is empty', () => {
+    // A stale loopStart with zero length is still "no region".
+    expect(normalizeLoopRegion('loop', 500, 0, 1000))
+      .toEqual({ loopStartWord: 0, loopLengthWord: 1000 });
+  });
+
+  it('passes well-formed loop regions through untouched', () => {
+    expect(normalizeLoopRegion('loop', 100, 200, 1000))
+      .toEqual({ loopStartWord: 100, loopLengthWord: 200 });
+    expect(normalizeLoopRegion('ping-pong', 0, 71111, 71111))
+      .toEqual({ loopStartWord: 0, loopLengthWord: 71111 });
+  });
+
+  it('leaves one-shot mode alone even with an empty region', () => {
+    // One-shot has no loop — inventing one would change the audible
+    // behaviour (the source would stop honouring its duration).
+    expect(normalizeLoopRegion('one-shot', 0, 0, 1000))
+      .toEqual({ loopStartWord: 0, loopLengthWord: 0 });
+  });
+});
+
+// currentWordFor drives the playhead cursor. These tests pin the
+// regression the user reported: with a (now normalized) loop region,
+// the cursor must keep wrapping instead of parking at the region end
+// (loop) or start (ping-pong) where the 2px line is clipped by the
+// waveform's overflow:hidden.
+describe('currentWordFor — playhead position math', () => {
+  // A whole-sample loop session at 48 kHz, unity playback rate —
+  // the user's exact shape after normalizeLoopRegion.
+  const loopSession: PlaybackSession = {
+    sampleSlot: 0,
+    startWord: 0,
+    lengthWords: 71111,
+    loopMode: 'loop',
+    loopStartWord: 0,
+    loopLengthWord: 71111,
+    reverse: false,
+    rate: 1,
+    sampleRateHz: 48000,
+    startedAt: 0,
+  };
+  const passDur = 71111 / 48000; // ≈ 1.4815 s per pass
+
+  it('sweeps forward during the first pass', () => {
+    expect(currentWordFor(loopSession, 0)).toBe(0);
+    expect(currentWordFor(loopSession, passDur / 2)).toBeCloseTo(71111 / 2, 0);
+  });
+
+  it('wraps back into the loop region after the first pass (regression)', () => {
+    // 1.25 passes in: cursor must be at 25% of the loop, NOT parked
+    // at the end.
+    const word = currentWordFor(loopSession, passDur * 1.25);
+    expect(word).toBeCloseTo(71111 * 0.25, 0);
+    // Ten passes in — still wrapping.
+    const word10 = currentWordFor(loopSession, passDur * 10.5);
+    expect(word10).toBeCloseTo(71111 * 0.5, 0);
+    expect(word10).toBeLessThan(71111);
+    expect(word10).toBeGreaterThan(0);
+  });
+
+  it('one-shot clamps at the region end', () => {
+    const oneShot: PlaybackSession = { ...loopSession, loopMode: 'one-shot' };
+    expect(currentWordFor(oneShot, passDur * 2)).toBe(71111);
+  });
+
+  it('ping-pong: pre-roll sweep, then triangle oscillation', () => {
+    const pp: PlaybackSession = { ...loopSession, loopMode: 'ping-pong' };
+    // Pre-roll (first pass) sweeps forward.
+    expect(currentWordFor(pp, passDur * 0.5)).toBeCloseTo(71111 * 0.5, 0);
+    // After the pre-roll: reverse half first (loopEnd → loopStart).
+    expect(currentWordFor(pp, passDur * 1.5)).toBeCloseTo(71111 * 0.5, 0);
+    // Then the forward half (loopStart → loopEnd).
+    expect(currentWordFor(pp, passDur * 2.5)).toBeCloseTo(71111 * 0.5, 0);
+    // Never escapes the region.
+    for (const mult of [1.1, 1.9, 2.3, 3.7, 8.2]) {
+      const w = currentWordFor(pp, passDur * mult);
+      expect(w).toBeGreaterThanOrEqual(0);
+      expect(w).toBeLessThanOrEqual(71111);
+    }
+  });
+
+  it('playback rate scales cursor speed', () => {
+    // +12 semitones = 2× rate: one pass completes in half the time.
+    const fast: PlaybackSession = { ...loopSession, rate: 2 };
+    expect(currentWordFor(fast, passDur / 2)).toBeCloseTo(71111, 0);
+  });
+
+  it('reverse sweeps from the end and clamps at the start', () => {
+    const rev: PlaybackSession = { ...loopSession, loopMode: 'one-shot', reverse: true };
+    expect(currentWordFor(rev, 0)).toBe(71111);
+    expect(currentWordFor(rev, passDur / 2)).toBeCloseTo(71111 / 2, 0);
+    expect(currentWordFor(rev, passDur * 3)).toBe(0);
   });
 });
 

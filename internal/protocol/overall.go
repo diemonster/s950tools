@@ -29,7 +29,10 @@ const OVSPayloadSize = 80
 // AKAI header. The DB / DW comments document the codec each field
 // uses; widths match the codec's wire size.
 const (
-	ovsOffPRONAME  = 7 - 7  // 0  : DB × 10  → 20 wire bytes
+	// PRONAME sits at envelope offset 7, i.e. payload offset 7-7 —
+	// written as a literal 0 because staticcheck (SA4000) rejects
+	// the self-documenting `7 - 7` the rest of the table uses.
+	ovsOffPRONAME  = 0      // 0  : DB × 10  → 20 wire bytes
 	ovsOffMDXTCH   = 39 - 7 // 32 : DB
 	ovsOffRSCHNL   = 47 - 7 // 40 : DW
 	ovsOffRSKEY    = 51 - 7 // 44 : DW

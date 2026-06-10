@@ -94,6 +94,15 @@ type serialTransport struct {
 	stream  bool            // true = stream mode active
 	rawQ    []byte          // raw bytes queued during stream mode
 	rawM    []chan struct{} // RecvBytes waiters
+
+	// txMu serialises writes to the port. Historically Send had a
+	// single caller (the device layer, serialised by the App lock),
+	// but MIDI-thru forwarding introduced a second writer goroutine
+	// (the rtmidi listen callback). Without this lock, a 3-byte note
+	// message could interleave INSIDE a SysEx envelope's bytes — a
+	// non-realtime status byte mid-envelope terminates the SysEx per
+	// the MIDI spec, corrupting uploads.
+	txMu sync.Mutex
 }
 
 // OpenSerial opens the named serial port and starts the inbound byte
@@ -356,6 +365,25 @@ func (t *serialTransport) Send(b []byte) error {
 		copy(cp, b)
 		t.opts.OnWire("tx", cp)
 	}
+	t.txMu.Lock()
+	defer t.txMu.Unlock()
+	_, err := t.port.Write(b)
+	return err
+}
+
+// SendQuiet writes bytes to the port without the wire-log callback.
+// Used by the MIDI-thru forwarder: live performance traffic at note
+// rates would flood the GUI's wire-log panel and bury the SysEx
+// conversation the panel exists to show. Same tx serialisation as
+// Send. Accessed via type assertion (see cmd/s950-gui/midithru.go)
+// so the Transport interface — and every test fake implementing it —
+// stays unchanged.
+func (t *serialTransport) SendQuiet(b []byte) error {
+	if t.opts.Verbose && t.opts.LogFunc != nil {
+		t.opts.LogFunc("TX-thru (%d bytes): % X\n", len(b), prefixForLog(b))
+	}
+	t.txMu.Lock()
+	defer t.txMu.Unlock()
 	_, err := t.port.Write(b)
 	return err
 }

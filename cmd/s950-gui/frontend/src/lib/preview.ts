@@ -51,7 +51,7 @@ const extras: AudioBufferSourceNode[] = [];
 // starts a source. The rAF tracker reads it to map elapsed
 // wall-clock time → current word index, accounting for the loop
 // mode and direction. Cleared in stop().
-type PlaybackSession = {
+export type PlaybackSession = {
   sampleSlot: number;
   startWord: number;
   lengthWords: number;
@@ -116,17 +116,36 @@ function tuneToRate(tune: number): number {
 //     for no reason the user could see. Recorded pitch is the only
 //     honest answer.
 //
+//   • CONSTANT-PITCH keygroups (the S950's "transpose off"
+//     ControlBits flag) → offset = the layer's transpose alone.
+//     The device plays a const-pitch keygroup at recorded pitch
+//     (plus any fixed per-layer transpose) on every key — that's
+//     how slice kits avoid chipmunking — so the key-tracking
+//     (note - 60) term never applies.
+//
+//   • Pitch-tracking SINGLE-KEY keygroups → (note - 60) plus the
+//     layer's transpose. The transpose term matters: the other
+//     standard slice-kit shape is tracking zones with a
+//     compensating per-keygroup transpose (key 73 zone carries
+//     -13 st), which nets to recorded pitch on the device. Host
+//     preview must compute the same sum, not just the tracking
+//     half.
+//
 // Exported so Sample.svelte can hand the right value to
 // previewSample without recomputing the rule at every call site,
 // AND so the unit test can lock the contract in.
 export function effectivePreviewOffset(args: {
   source: 'device' | 'local';
   mappingNote?: number;    // MIDI note, undefined when no mapping found
-  mappingLowKey?: number;  // keygroup range — offset only applies when
-  mappingHighKey?: number; // low === high (unambiguous single-key map)
+  mappingLowKey?: number;  // keygroup range — tracking term only applies
+  mappingHighKey?: number; // when low === high (unambiguous single-key map)
+  mappingConstPitch?: boolean; // keygroup transpose-off flag
+  mappingTranspose?: number;   // matched layer's transpose, semitones
 }): number {
   if (args.source !== 'device') return 0;
   if (args.mappingNote === undefined) return 0;
+  const transpose = args.mappingTranspose ?? 0;
+  if (args.mappingConstPitch) return transpose;
   if (
     args.mappingLowKey === undefined ||
     args.mappingHighKey === undefined ||
@@ -134,7 +153,27 @@ export function effectivePreviewOffset(args: {
   ) {
     return 0;
   }
-  return args.mappingNote - 60;
+  return (args.mappingNote - 60) + transpose;
+}
+
+// normalizeLoopRegion resolves the degenerate "looping replay mode
+// with an empty loop region" config into something both the audio
+// graph and the playhead model can execute identically: loop the
+// whole play region. One-shot mode and well-formed loop regions pass
+// through untouched. Pure — exported for unit tests, because the
+// failure mode it prevents (cursor parked at 0%/100% where the 2px
+// line is clipped by overflow:hidden while audio keeps playing) is
+// invisible in code review and very visible to users.
+export function normalizeLoopRegion(
+  loopMode: 'one-shot' | 'loop' | 'ping-pong',
+  loopStartWord: number,
+  loopLengthWord: number,
+  lengthWords: number,
+): { loopStartWord: number; loopLengthWord: number } {
+  if (loopMode !== 'one-shot' && loopLengthWord <= 0) {
+    return { loopStartWord: 0, loopLengthWord: lengthWords };
+  }
+  return { loopStartWord, loopLengthWord };
 }
 
 function makeFadeInGain(ac: AudioContext, target: number): GainNode {
@@ -344,8 +383,9 @@ export function isPlaying(): boolean {
 // playhead UI cursor reads this every animation frame; accuracy
 // matters most at loop boundaries (a slow tick at the seam looks
 // like the cursor "snags"). Returned word is clamped to the
-// playback range — callers can render it directly.
-function currentWordFor(s: PlaybackSession, elapsedSec: number): number {
+// playback range — callers can render it directly. Pure — exported
+// for unit tests (sessions are plain objects).
+export function currentWordFor(s: PlaybackSession, elapsedSec: number): number {
   const wordsAdvanced = elapsedSec * s.rate * s.sampleRateHz;
 
   if (s.reverse) {
@@ -458,6 +498,22 @@ export function previewRegion(
 ): boolean {
   stop();
   const ac = audioContext();
+
+  // Normalize a degenerate loop config up front: REPLAY mode LOOP /
+  // PING-PONG with LoopLength 0. Common in practice — slices and
+  // one-shot drums carry LoopLength 0 in their SPRM, and flipping
+  // the MODE button doesn't invent a loop region. Without this the
+  // audio and the playhead model diverge: Web Audio treats
+  // loopEnd <= loopStart as "loop the whole buffer" (audio keeps
+  // playing) while currentWordFor clamps the cursor at the region
+  // end (loop — parks at 100%, clipped off-screen) or pins it at
+  // the region start (ping-pong falls through to a no-loop source
+  // — parks at 0%, also clipped). Treating "loop with no region"
+  // as "loop the whole play region" keeps sound and cursor honest
+  // and matches what the user meant by pressing LOOP.
+  const normalized = normalizeLoopRegion(loopMode, loopStartWord, loopLengthWord, lengthWords);
+  loopStartWord = normalized.loopStartWord;
+  loopLengthWord = normalized.loopLengthWord;
 
   // For reverse playback, build a one-off reversed buffer over the
   // play region and treat the source coordinates as if start=0.

@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,19 +33,21 @@ func newGetOverallCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			// --output implies --json; redirect the writer to the file
-			// and let the run core not care which sink it's writing to.
-			w := cmd.OutOrStdout()
-			if outPath != "" {
-				f, err := os.Create(outPath)
-				if err != nil {
-					return fmt.Errorf("create %s: %w", outPath, err)
-				}
-				defer f.Close()
-				w = f
-				asJSON = true
+			if outPath == "" {
+				return runGetOverall(cmd.OutOrStdout(), d, asJSON)
 			}
-			return runGetOverall(w, d, asJSON)
+			// --output implies --json. Buffer the fetch+encode and
+			// only touch the output file once both succeeded —
+			// os.Create truncates, and a timeout mid-fetch must not
+			// zero out an existing settings backup at the same path.
+			var buf bytes.Buffer
+			if err := runGetOverall(&buf, d, true); err != nil {
+				return err
+			}
+			if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", outPath, err)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of a table")

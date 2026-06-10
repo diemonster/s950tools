@@ -196,6 +196,18 @@ export async function connect() {
       return;
     }
     await refreshStatus();
+    // Auto-start MIDI thru on serial sessions (defaults to the
+    // virtual port so DAWs can target the S950 with zero setup; the
+    // user's chip choice persists — "off" stays off). Fire-and-
+    // forget: thru is a convenience layer, never a connect blocker.
+    if (get(status).kind === 'serial') {
+      void (async () => {
+        try {
+          const { autoStartThru } = await import('./midithru');
+          await autoStartThru();
+        } catch {}
+      })();
+    }
     // Pull the device catalog immediately so the sidebars reflect
     // what's actually on the S950, not the dev-time stubs. Failures
     // here don't break the connection — surface as a soft error so

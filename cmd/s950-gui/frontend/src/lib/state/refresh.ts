@@ -205,9 +205,9 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
         const pcm = wordsToPcm(words);
         // Override the SPRM rate with the dump header's rate — the
         // dump is authoritative for the audio bytes that just landed.
-        // Falls back to the row's existing s.rate when the backend
-        // didn't supply one (defensive against a mid-migration build).
-        const rate = copied?.sampleRateHz ?? s.rate;
+        // `||` (not ??) so both a missing and a zero rate fall back
+        // to the row's SPRM rate — 0 would poison duration math.
+        const rate = copied?.sampleRateHz || s.rate;
         samples.update((xs) => xs.map((x) =>
           x.slot === s.slot ? { ...x, words12: words, pcm, rate } : x,
         ));

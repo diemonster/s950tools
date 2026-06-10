@@ -474,8 +474,12 @@
       // Persist to the disk cache so the next session re-attaches
       // without another round-trip. Uses the same path as Apply
       // Slicing — keyed by words.length (the cache truth, not the
-      // sample's possibly-stale length field).
-      try { await (App as any).PutCachedWaveform(slot, name, words.length, words, dumpRate ?? 0); } catch {}
+      // sample's possibly-stale length field). Rate falls back to
+      // the SPRM rate (never 0 — a zero rate in the cache would
+      // resurface as division-by-zero duration math on hydrate).
+      try {
+        await (App as any).PutCachedWaveform(slot, name, words.length, words, dumpRate || smp.rate);
+      } catch {}
       copyPhase = 'done';
     } catch (e: any) {
       copyError = String(e?.message ?? e);
@@ -800,14 +804,23 @@
         // real signal instead of a synthetic envelope.
         if (capturedAudio.size > 0) {
           samples.update((xs) => attachAudioToSamples(xs, capturedAudio));
-          // Phase 1B: also persist to the on-disk cache so the next
-          // session can re-attach without a re-upload. Fire-and-
-          // forget — a cache write failure degrades to the
-          // pre-1B world (synthetic waveform on relaunch), not a
-          // crash or partial state.
-          void persistSamplesToCache(Array.from(capturedAudio.keys()));
         }
         try { await scanMemory(); } catch {}
+        // Phase 1B: persist host audio to the on-disk cache so the
+        // next session can re-attach without a re-upload. MUST run
+        // after scanMemory: refreshCatalog reset every row to a
+        // skinny stub (rate 26040, length 1) and the cache entry
+        // now carries the rate — persisting before the SPRM scan
+        // would freeze the stub rate into the cache, and the next
+        // session's hydration would overwrite the real SPRM rate
+        // with it (wrong preview pitch, and a subsequent SPRM
+        // live-sync would even write the bogus rate to the device).
+        // Fire-and-forget — a cache write failure degrades to the
+        // pre-1B world (synthetic waveform on relaunch), not a
+        // crash or partial state.
+        if (capturedAudio.size > 0) {
+          void persistSamplesToCache(Array.from(capturedAudio.keys()));
+        }
       })();
     } catch (e: any) {
       sliceError = String(e?.message ?? e);
@@ -996,6 +1009,8 @@
         mappingNote: deviceMapping?.note,
         mappingLowKey: deviceMapping?.lowKey,
         mappingHighKey: deviceMapping?.highKey,
+        mappingConstPitch: deviceMapping?.constPitch,
+        mappingTranspose: deviceMapping?.transpose,
       });
       preview.previewSample(smp, offset);
     }
@@ -1012,6 +1027,8 @@
     note: number;
     lowKey: number;
     highKey: number;
+    constPitch: boolean;
+    transpose: number;
   };
   $: deviceMapping = ((): DeviceMapping | null => {
     if (!smp || smp.source !== 'device') return null;
@@ -1019,7 +1036,8 @@
     if (!targetName) return null;
     for (const p of $programs) {
       for (const k of p.keygroups) {
-        if (k.soft.sample.trim() === targetName || k.loud.sample.trim() === targetName) {
+        const softMatch = k.soft.sample.trim() === targetName;
+        if (softMatch || k.loud.sample.trim() === targetName) {
           return {
             programSlot: p.slot,
             programName: p.name || `slot ${p.slot}`,
@@ -1027,14 +1045,21 @@
             // Use the keygroup's centre key — most kits map a
             // sample to a single key, in which case low == high.
             // For ranged keygroups, the middle is the least-
-            // surprising MIDI trigger note. The raw range is
-            // carried alongside so effectivePreviewOffset can tell
+            // surprising MIDI trigger note. The raw range +
+            // const-pitch flag are carried alongside so
+            // effectivePreviewOffset can tell pitch-tracking
             // single-key maps (apply pitch offset) apart from
-            // ranged keygroups (no single device pitch — host
-            // preview stays at recorded pitch).
+            // ranged keygroups and constant-pitch slice kits
+            // (no device transpose — host preview stays at
+            // recorded pitch).
             note: Math.floor((k.lowKey + k.highKey) / 2),
             lowKey: k.lowKey,
             highKey: k.highKey,
+            constPitch: k.constPitch,
+            // The matched layer's per-keygroup transpose — part of
+            // the device's pitch math alongside key tracking. Use
+            // whichever layer the name matched on.
+            transpose: softMatch ? k.soft.transpose : k.loud.transpose,
           };
         }
       }
@@ -1901,12 +1926,10 @@
              Click the empty track to centre the view on that point;
              drag the thumb to pan. Sits above the ruler. -->
         {#if $slicing.zoom > 1 && smp.length > 0}
-          <!-- svelte-ignore a11y-no-static-element-interactions -->
           <div
             class="waveform__scroll"
             bind:this={sbTrackEl}
             on:pointerdown={onScrollTrackDown}>
-            <!-- svelte-ignore a11y-no-static-element-interactions -->
             <div
               class="waveform__scroll-thumb"
               style="left: {(viewStart / smp.length) * 100}%; width: {(visibleN / smp.length) * 100}%;"

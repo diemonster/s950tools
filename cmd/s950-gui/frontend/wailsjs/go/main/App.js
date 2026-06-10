@@ -62,6 +62,18 @@ export function ListPorts() {
   return window['go']['main']['App']['ListPorts']();
 }
 
+export function MidiThruStart(arg1, arg2) {
+  return window['go']['main']['App']['MidiThruStart'](arg1, arg2);
+}
+
+export function MidiThruStatus() {
+  return window['go']['main']['App']['MidiThruStatus']();
+}
+
+export function MidiThruStop() {
+  return window['go']['main']['App']['MidiThruStop']();
+}
+
 export function OpenProgramJSON() {
   return window['go']['main']['App']['OpenProgramJSON']();
 }

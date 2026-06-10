@@ -55,7 +55,10 @@ export async function hydrateSampleFromCache(
     return {
       words12: words,
       pcm: wordsToPcm(words),
-      rate: cached.sampleRateHz ?? s.rate,
+      // `||` (not ??) — a legacy/corrupt entry could carry rate 0,
+      // which must fall back to the SPRM rate rather than poisoning
+      // duration math with division by zero.
+      rate: cached.sampleRateHz || s.rate,
     };
   } catch (e) {
     console.warn(`waveformcache: get(${s.slot}, ${s.name}) failed:`, e);

@@ -5,7 +5,7 @@
   import {
     inputPorts, outputPorts, serialPortsList,
     selectedIn, selectedOut, channel,
-    transportKind, baud, SERIAL_BAUDS,
+    transportKind, baud, SERIAL_BAUDS, status,
     phase, linkError, serialUnresponsive, dismissSerialUnresponsive,
     refreshPorts, refreshStatus, connect, disconnect,
     pickSerial, pickMidi,
@@ -15,6 +15,10 @@
     refreshState, refreshAllFromDevice, cancelRefresh, resetRefresh,
   } from './state/refresh';
   import { theme, toggleTheme } from './state/theme';
+  import {
+    midiThru, midiThruError, startThru, stopThru, initMidiThruEvents,
+    syncThruStatus, setThruPref,
+  } from './state/midithru';
   import * as App from '../../wailsjs/go/main/App';
 
   // Picker option values are prefixed so a single <select> can hold
@@ -57,6 +61,53 @@
   }
   function currentOutValue(): string {
     return $transportKind === 'serial' ? pickerValue('serial', $selectedOut) : pickerValue('midi', $selectedOut);
+  }
+
+  // ---------- MIDI thru ----------
+  // Select-option encoding mirrors the port picker: a sentinel for
+  // the virtual port, a prefix for physical inputs, '' for off.
+  const THRU_VIRTUAL = '__virtual__';
+  const THRU_PORT = 'port:';
+
+  $: thruSelectValue = !$midiThru.active
+    ? ''
+    : $midiThru.virtual ? THRU_VIRTUAL : THRU_PORT + $midiThru.source;
+  // Chip-width-friendly source label: the virtual port's full name
+  // is long; physical names pass through (ellipsised by CSS).
+  $: thruSourceShort = $midiThru.virtual ? 'virtual' : $midiThru.source;
+
+  // thruBusy serialises chip interactions: two quick picks would
+  // otherwise interleave their stop/start round-trips (same hazard
+  // the `probing` flag guards in runProbe). The select is disabled
+  // while a round-trip is in flight.
+  let thruBusy = false;
+  async function onThruChange(e: Event) {
+    const sel = e.currentTarget as HTMLSelectElement;
+    const raw = sel.value;
+    // Snap back visually; the reactive thruSelectValue re-asserts
+    // the real state once the binding round-trip lands (mirrors the
+    // probe option's pattern).
+    sel.value = thruSelectValue;
+    if (thruBusy) return;
+    thruBusy = true;
+    try {
+      // Persist the choice so the next serial connect restores it
+      // (autoStartThru in connection.ts; 'virtual' is the default).
+      setThruPref(raw === THRU_VIRTUAL ? 'virtual' : raw === '' ? '' : raw);
+      // Always stop first, regardless of the store's view — after a
+      // frontend reload the store can lag the backend, and Stop on
+      // an idle backend is a harmless no-op. This is what makes the
+      // chip self-correcting instead of dead-ending on the
+      // backend's "already running" error.
+      await stopThru();
+      if (raw === THRU_VIRTUAL) {
+        await startThru('', true);
+      } else if (raw.startsWith(THRU_PORT)) {
+        await startThru(raw.slice(THRU_PORT.length), false);
+      }
+    } finally {
+      thruBusy = false;
+    }
   }
 
   function onPickIn(e: Event) {
@@ -225,10 +276,23 @@
   export let slotNoun: string = '';
 
   onMount(async () => {
+    // MIDI-thru state pushes (counter updates while forwarding).
+    // Wired here rather than at module load so the store module is
+    // importable in tests without a Wails runtime.
+    try {
+      const rt = await import('../../wailsjs/runtime/runtime');
+      initMidiThruEvents(rt.EventsOn as any);
+    } catch {
+      // Headless test render — events stay unwired, chip still works
+      // through the binding round-trip.
+    }
     // Enumerate ports on mount + reflect any pre-existing connection
     // (the Wails backend keeps state across hot reloads in dev).
     await refreshPorts();
     await refreshStatus();
+    // Same reload-survival for MIDI thru: the backend keeps
+    // forwarding across a webview reload; reseed the chip from it.
+    await syncThruStatus();
   });
 
   // The status chip merges link phase + per-tab edit state. Link
@@ -362,6 +426,36 @@
       <select bind:value={$channel}>
         {#each Array(16) as _, i}
           <option value={i}>{i}</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
+
+  <!-- MIDI thru: forwards live MIDI down the serial wire. The S950
+       ignores its DIN jacks entirely while controller-select is on
+       RS-232C (hardware-verified), so this is the only way to play
+       it from a DAW/keyboard mid-session. "Virtual port" publishes
+       a CoreMIDI destination DAWs can target directly; the other
+       entries tap existing inputs.
+       Gated on the ACTUAL session kind ($status.kind), not the
+       picker selection ($transportKind) — browsing the port picker
+       flips the latter without disconnecting, and the chip must not
+       vanish while forwarding is live. -->
+  {#if $phase === 'connected' && $status.kind === 'serial'}
+    <label
+      class="chip chip--select"
+      class:chip--thru-active={$midiThru.active}
+      title={$midiThruError
+        || ($midiThru.active
+            ? `Forwarding ${$midiThru.source} → RS-232 (${$midiThru.forwarded} msgs${$midiThru.dropped ? `, ${$midiThru.dropped} dropped during transfers` : ''})`
+            : 'Forward a MIDI input (or a virtual port your DAW can target) to the S950 over RS-232')}>
+      <span class="chip__label">Thru</span>
+      <span class="chip__value">{$midiThru.active ? `♪ ${thruSourceShort}` : 'off'}</span>
+      <select value={thruSelectValue} disabled={thruBusy} on:change={onThruChange}>
+        <option value="">off</option>
+        <option value={THRU_VIRTUAL}>Virtual port (for DAWs)</option>
+        {#each $inputPorts as p}
+          <option value={THRU_PORT + p.name}>{p.name}</option>
         {/each}
       </select>
     </label>
@@ -652,7 +746,7 @@
             {:else if cachePhase === 'clearing'}
               <span class="modal__waitnote">clearing…</span>
             {:else if cachePhase === 'done'}
-              <span class="cache-tools__done">✓ cache cleared — next session re-pulls from the S950</span>
+              <span class="cache-tools__done">✓ cache cleared — run Refresh (with audio) to re-pull from the S950</span>
             {:else if cachePhase === 'error'}
               <div class="modal__step modal__step--error">{cacheError || 'Unknown error'}</div>
             {:else}
@@ -698,6 +792,16 @@
        through to the transparent select underneath, so this span is
        inert. */
     pointer-events: none;
+  }
+  /* THRU chip while forwarding — accent border + value so "live
+     MIDI is flowing down the wire" reads at a glance, same visual
+     language as the synced status dot. */
+  :global(.chip--thru-active) {
+    border-color: var(--rb-yellow);
+  }
+  :global(.chip--thru-active .chip__value) {
+    color: var(--rb-yellow);
+    font-weight: 700;
   }
   :global(.chip--select select) {
     /* Strip the OS-native dropdown rendering and stretch the

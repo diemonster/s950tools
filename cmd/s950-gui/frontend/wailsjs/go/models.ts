@@ -148,6 +148,26 @@ export namespace main {
 	        this.words = source["words"];
 	    }
 	}
+	export class MidiThruState {
+	    active: boolean;
+	    source: string;
+	    virtual: boolean;
+	    forwarded: number;
+	    dropped: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new MidiThruState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.active = source["active"];
+	        this.source = source["source"];
+	        this.virtual = source["virtual"];
+	        this.forwarded = source["forwarded"];
+	        this.dropped = source["dropped"];
+	    }
+	}
 	export class OccupiedSlot {
 	    kind: string;
 	    slot: number;
