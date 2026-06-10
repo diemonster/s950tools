@@ -116,7 +116,19 @@ export async function refreshCatalog(): Promise<void> {
 // call repeatedly — second call for the same slot is a no-op unless
 // `force` is set (e.g. the user explicitly hit "Get from S950" to
 // re-pull the latest after a front-panel edit).
-export async function ensureProgramLoaded(slot: number, force = false): Promise<void> {
+//
+// `rescanMemory` controls the post-Get memory-chip refresh that a
+// forced load normally triggers. Callers that force-load programs in
+// a LOOP (refreshAllFromDevice) pass false: the refresh already ran
+// its own scanMemory pass, and one fire-and-forget full-SPRM scan
+// per program is N× redundant wire traffic — worse, the un-awaited
+// scans race the refresh's later audio phase and can overwrite the
+// fresher rate it writes into the samples store.
+export async function ensureProgramLoaded(
+  slot: number,
+  force = false,
+  rescanMemory = true,
+): Promise<void> {
   if (!force && loadedPrograms.has(slot)) return;
   try {
     const json = await App.GetProgram(slot);
@@ -127,7 +139,7 @@ export async function ensureProgramLoaded(slot: number, force = false): Promise<
     // memory chip: the user may have manually edited the device
     // since Connect (deleted samples on the front panel, etc.),
     // and the chip should reflect that without forcing a reconnect.
-    if (force) void scanMemory();
+    if (force && rescanMemory) void scanMemory();
   } catch (e) {
     console.error(`GetProgram(${slot}) failed:`, e);
     throw e;

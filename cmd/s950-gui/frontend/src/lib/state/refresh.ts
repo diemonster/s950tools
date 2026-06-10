@@ -13,7 +13,11 @@ import { refreshCatalog, ensureProgramLoaded } from './catalog';
 import { scanMemory } from './memory';
 import { programs } from './programs';
 import { samples } from './samples';
-import { wordsToPcm, persistSampleToCache } from './waveformcache';
+import {
+  wordsToPcm,
+  persistSampleToCache,
+  hydrateAllSamplesFromCache,
+} from './waveformcache';
 import * as App from '../../../wailsjs/go/main/App';
 
 export type RefreshPhase = 'idle' | 'catalog' | 'samples' | 'programs' | 'audio' | 'done' | 'error';
@@ -89,6 +93,18 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
     await scanMemory();
     if (get(refreshState).cancelled) return finishCancelled();
 
+    // Re-attach disk-cached audio BEFORE the audio phase decides
+    // what to download. refreshCatalog replaced every device row
+    // with a skinny stub (wiping in-memory pcm/words12), so without
+    // this step the needsAudio filter below would see every sample
+    // as audio-less and re-pull ALL SDATA on every refresh — the
+    // "cached audio is skipped" promise in the modal copy was a lie
+    // for anything but the first session. Must run after scanMemory:
+    // the cache key is (slot, name, totalWords) and only the SPRM
+    // scan gives the stubs their real names + lengths. Local disk
+    // reads — fast, no wire traffic, safe even when cancelling.
+    await hydrateAllSamplesFromCache();
+
     // refreshCatalog populates `programs` with skinny stubs; loop
     // through and force-pull each PRGM. ensureProgramLoaded is the
     // same code path Connect uses, so cached entries from before
@@ -117,7 +133,11 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
         progress: 25 + (i / Math.max(1, total)) * 35,
       }));
       try {
-        await ensureProgramLoaded(p.slot, true);
+        // rescanMemory=false: the refresh ran its own scanMemory
+        // pass above; per-program fire-and-forget rescans would be
+        // N× redundant SPRM traffic AND race the audio phase's
+        // rate writes (see ensureProgramLoaded's doc comment).
+        await ensureProgramLoaded(p.slot, true, false);
       } catch (e) {
         // Log and continue — a single failed program shouldn't
         // abort the whole refresh. The user sees the final state
@@ -150,11 +170,13 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
     }
 
     // Audio pass: pull SDATA for every device sample that doesn't
-    // already have host-side PCM. Phase 1B's disk cache means
-    // subsequent refreshes skip everything (~instant) — only the
-    // first refresh per session has to pay for the wire transfer.
-    // Worst case: a fully-loaded EXM005 (~1.57M words) over 50000-
-    // baud serial = ~10 min total; typical case is well under.
+    // already have host-side PCM. The hydration step above re-
+    // attached everything the disk cache had, so this only pays
+    // wire time for samples that are genuinely new or whose
+    // (slot, name, totalWords) identity changed since they were
+    // cached. Worst case (cold cache + fully-loaded EXM005,
+    // ~1.57M words over 50000-baud serial) ≈ 10 min; warm-cache
+    // refreshes skip the wire entirely.
     const needsAudio = get(samples).filter((s) => s.source === 'device' && (!s.pcm || s.pcm.length === 0));
     refreshState.update((r) => ({
       ...r,
@@ -192,8 +214,13 @@ export async function refreshAllFromDevice(withAudio = true): Promise<void> {
         // Persist immediately so a cancelled refresh still keeps
         // whatever we managed to download. Next session re-attaches
         // from the cache without re-fetching, with the rate intact.
+        // Read the row back from the store rather than reusing the
+        // pre-loop `s` snapshot — the cache key includes the name,
+        // and a concurrent SPRM merge could have refreshed it
+        // between the snapshot and now.
         try {
-          await persistSampleToCache({ ...s, words12: words, pcm, rate });
+          const fresh = get(samples).find((x) => x.slot === s.slot);
+          if (fresh) await persistSampleToCache(fresh);
         } catch (e) {
           console.warn(`refresh: cache write for slot ${s.slot} failed:`, e);
         }

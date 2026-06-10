@@ -14,6 +14,7 @@ vi.mock('../../../wailsjs/go/main/App', () => ({
   GetProgram:        vi.fn(),
   GetSampleParams:   vi.fn(),
   CopySampleAudio:   vi.fn(),
+  GetCachedWaveform: vi.fn().mockResolvedValue(null), // clean miss by default
   PutCachedWaveform: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -73,10 +74,12 @@ describe('refreshAllFromDevice — phase progression', () => {
     expect(final.phase).toBe('done');
     expect(final.progress).toBe(100);
 
-    // Each step ran exactly once.
+    // Each step ran exactly once. The third ensureProgramLoaded arg
+    // (rescanMemory=false) suppresses the per-program fire-and-forget
+    // SPRM rescan — the refresh runs its own scanMemory pass.
     expect(catalog.refreshCatalog).toHaveBeenCalledTimes(1);
     expect(catalog.ensureProgramLoaded).toHaveBeenCalledTimes(1);
-    expect(catalog.ensureProgramLoaded).toHaveBeenCalledWith(0, true);
+    expect(catalog.ensureProgramLoaded).toHaveBeenCalledWith(0, true, false);
     expect((App as any).CopySampleAudio).toHaveBeenCalledTimes(1);
     expect((App as any).CopySampleAudio).toHaveBeenCalledWith(5);
   });
@@ -128,6 +131,50 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
 
     await refreshAllFromDevice();
     expect((App as any).CopySampleAudio).not.toHaveBeenCalled();
+  });
+
+  it('hydrates from the disk cache instead of re-downloading (post-catalog-wipe case)', async () => {
+    // The regression this locks out: refreshCatalog replaces device
+    // rows with skinny stubs (no pcm/words12), so an in-memory
+    // "already has audio" check alone re-downloads EVERYTHING on
+    // every refresh. The refresh flow must consult the disk cache
+    // (hydrateAllSamplesFromCache) after the SPRM scan; a cache hit
+    // means no CopySampleAudio for that slot.
+    //
+    // Simulate the post-refreshCatalog state directly: device row,
+    // no host audio attached (that's what the wipe leaves behind).
+    samples.set([deviceSample(7, 'WARM', 3)]);
+
+    // Disk cache has this sample's audio (v2 entry: words + rate).
+    ((App as any).GetCachedWaveform as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ words: [0x800, 0xC00, 0x400], sampleRateHz: 40000 });
+
+    await refreshAllFromDevice();
+
+    // Audio came from disk, not the wire.
+    expect((App as any).CopySampleAudio).not.toHaveBeenCalled();
+    const s = get(samples).find((x) => x.slot === 7);
+    expect(s?.words12).toEqual([0x800, 0xC00, 0x400]);
+    expect(s?.pcm?.length).toBe(3);
+    // The cached rate (captured from the dump header at copy time)
+    // rides along with the audio.
+    expect(s?.rate).toBe(40000);
+    expect(get(refreshState).phase).toBe('done');
+  });
+
+  it('cache miss still downloads over the wire (cold-cache case)', async () => {
+    // Default GetCachedWaveform mock returns null (miss) — the
+    // audio phase must fall through to CopySampleAudio.
+    samples.set([deviceSample(8, 'COLD', 3)]);
+    ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ words: [0x800, 0x900, 0xA00], sampleRateHz: 26040 });
+
+    await refreshAllFromDevice();
+
+    expect((App as any).CopySampleAudio).toHaveBeenCalledTimes(1);
+    expect((App as any).CopySampleAudio).toHaveBeenCalledWith(8);
+    const s = get(samples).find((x) => x.slot === 8);
+    expect(s?.words12).toEqual([0x800, 0x900, 0xA00]);
   });
 
   it('skips the entire audio phase when called with withAudio=false', async () => {
