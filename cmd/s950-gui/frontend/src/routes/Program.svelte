@@ -206,23 +206,13 @@
     setSync('dirty', 'Unsaved');
   }
 
-  // Save / Open .json: minimal scope — programs only, no embedded
-  // sample audio. The on-disk shape matches the CLI's put-program
-  // / get-program, so a JSON saved here uploads with `s950-tools
-  // put-program file.json` and vice versa. Bundled-sample "patch"
-  // archives are an unbuilt larger feature; the user manages WAVs
-  // separately for now.
-  async function saveProgramJSON() {
-    if (!hasProgram) return;
-    try {
-      const json = programToJSON(prog);
-      const suggested = (prog.name || `program-${prog.slot}`).trim() + '.json';
-      const written = await App.SaveProgramJSON(json as any, suggested);
-      if (written) setSync('synced', 'Saved');
-    } catch (e: any) {
-      setSync('error', 'Save failed: ' + String(e?.message ?? e));
-    }
-  }
+  // The Gotek/FlashFloppy .img IS the app's patch format: it
+  // captures programs + keygroups + samples + overall settings
+  // bit-exact in the device's own serialization, loads back here,
+  // boots a real S950, and reads in akaiutil. Program-only JSON
+  // save/open used to live here too — removed deliberately (a
+  // program without its samples is half a patch); the JSON shape
+  // remains a CLI-only interop format (put-program / get-program).
   // Open Gotek image: load a floppy image's programs + samples into
   // the app as LOCAL entries (they're on a disk file, not on the
   // device — Send/Apply commits them to hardware, or Export writes
@@ -328,26 +318,19 @@
     }
   }
 
-  async function openProgramJSON() {
-    try {
-      const json = await App.OpenProgramJSON();
-      if (!json) return; // user cancelled
-      const list = get(programs);
-      const slot = pickFreeProgramSlot(list);
-      if (slot < 0) {
-        setSync('error', 'All 100 program slots are occupied');
-        return;
-      }
-      const loaded = programJSONToProgram(json as any, slot, 'local');
-      programs.update((xs) => [...xs, loaded].sort((a, b) => a.slot - b.slot));
-      selectedSlot.set(slot);
-      selectedKeygroupN.set(1);
-      // Mark dirty — JSON was loaded into a LOCAL slot, not pulled
-      // from the device. Send to S950 (or Save .json again to a
-      // different file) commits the user's intent from here.
-      setSync('dirty', 'Loaded from JSON · unsaved on device');
-    } catch (e: any) {
-      setSync('error', 'Open failed: ' + String(e?.message ?? e));
+  // Page-level shortcuts, matching the statusbar hints (which were
+  // decorative mockup text until now): ⌘S saves the patch image,
+  // ⌘↵ opens the send preflight. Suppressed while a modal is up so
+  // ⌘↵ can't stack a second flow on top of an open one.
+  function onPageKeydown(e: KeyboardEvent) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (modalKind !== 'closed') return;
+    if (e.key === 's' || e.key === 'S') {
+      e.preventDefault();
+      void exportGotekImage();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      openSend();
     }
   }
 
@@ -379,6 +362,8 @@
   }
 </script>
 
+<svelte:window on:keydown={onPageKeydown} />
+
 <div class="app app--3row">
   <Topbar slotCount={`${$programs.length} / 100`} slotNoun="programs" />
 
@@ -409,7 +394,7 @@
         {/if}
       </div>
       <div class="sidebar__hint">
-        drop .json program file here<br/>or click + to create
+        open a patch (.img) to load programs<br/>or click + to create
       </div>
     </div>
   </aside>
@@ -425,11 +410,14 @@
       <div class="empty-state">
         <div class="empty-state__title">No programs yet</div>
         <p class="empty-state__hint">
-          Connect to your S950 to load its program catalog, or start a
-          new program from scratch.
+          Connect to your S950 to load its program catalog, open a
+          patch (.img), or start a new program from scratch.
         </p>
         <button type="button" class="btn btn--primary" on:click={newProgram}>
           New program
+        </button>
+        <button type="button" class="btn" on:click={openGotekImage} disabled={importBusy}>
+          {importBusy ? 'Opening…' : 'Open patch (.img)...'}
         </button>
       </div>
     {:else}
@@ -615,26 +603,21 @@
         </div>
         <div class="actions__row">
           <div class="actions__group">
-            <button type="button" class="btn" on:click={openProgramJSON}>Open .json...</button>
-            <button type="button" class="btn" on:click={saveProgramJSON} disabled={!hasProgram}>Save .json...</button>
-          </div>
-          <div class="actions__sep"></div>
-          <div class="actions__group">
             <button
               type="button"
               class="btn"
               on:click={openGotekImage}
               disabled={importBusy}
-              title="Load a Gotek/FlashFloppy S950 image's programs + samples into the app as local entries.">
-              {importBusy ? 'Opening…' : 'Open Gotek .img...'}
+              title="Load a patch — an S950 floppy image's programs + samples — into the app as local entries. Works with any Gotek/FlashFloppy or Translator-built .img.">
+              {importBusy ? 'Opening…' : 'Open patch (.img)...'}
             </button>
             <button
               type="button"
               class="btn"
               on:click={exportGotekImage}
               disabled={exportBusy}
-              title="Write all current programs + samples (with host audio) as a bootable S950 floppy image for a Gotek/FlashFloppy drive. The image's settings file boots the sampler with controller-select on RS-232C.">
-              {exportBusy ? 'Exporting…' : 'Export Gotek .img...'}
+              title="Save everything — all programs, keygroups, and samples with host audio — as a bootable S950 floppy image. Works in a Gotek/FlashFloppy drive standalone; the image's settings file boots the sampler with controller-select on RS-232C.">
+              {exportBusy ? 'Saving…' : 'Save patch (.img)...'}
             </button>
           </div>
         </div>
@@ -646,7 +629,7 @@
   <Statusbar
     hints={[
       { key: '↵',  label: 'edit name' },
-      { key: '⌘S', label: 'save .json' },
+      { key: '⌘S', label: 'save patch' },
       { key: '⌘↵', label: 'send to s950' },
     ]}
     status={hasProgram

@@ -195,8 +195,6 @@ export async function ProbeForS950() {
 }
 
 // ---------- File ops (no-op stubs) ----------
-export async function SaveProgramJSON(_p: any, _path: string) { return _path || '/tmp/program.json'; }
-export async function OpenProgramJSON() { return PROGRAM_FIXTURE; }
 export async function SaveSampleWav(_path: string, _rate: number, _words: number[]) { return _path || '/tmp/sample.wav'; }
 export async function ImportSample(_path: string) {
   return {

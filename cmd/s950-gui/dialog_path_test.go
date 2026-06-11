@@ -7,15 +7,12 @@ import (
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
-
-	"github.com/bivers/s950/internal/protocol"
 )
 
 // Tests for the path-taking cores extracted from the Wails-dialog
-// bindings (importSampleFromPath, writeProgramJSON, loadProgramJSON,
-// writeSampleWav). Each function used to be tangled with
-// wruntime.OpenFileDialog / SaveFileDialog; now they take a path and
-// can be driven from a tempdir.
+// bindings (importSampleFromPath, writeSampleWav). Each function
+// used to be tangled with wruntime.OpenFileDialog / SaveFileDialog;
+// now they take a path and can be driven from a tempdir.
 
 // makeTestWAV writes a minimal mono int16 WAV at `rate` for the
 // importer test. Returns the path. The PCM is a simple ramp — the
@@ -84,67 +81,6 @@ func TestImportSampleFromPath_ErrorsOnMissingFile(t *testing.T) {
 	}
 }
 
-func TestWriteAndLoadProgramJSON_RoundTrip(t *testing.T) {
-	// Build a minimal ProgramJSON, write it, read it back, and confirm
-	// the fields survive the JSON round-trip. Pins the wire shape
-	// (snake_case keys), which the CLI's put-program also consumes.
-	want := &protocol.ProgramJSON{
-		Name:              "MYPROG",
-		KeyTilt:           -12,
-		PositionalXFade:   true,
-		NumKeygroups:      2,
-		MidiProgramNumber: 5,
-		EnableMidiProgram: true,
-	}
-	path := filepath.Join(t.TempDir(), "prog.json")
-	if err := writeProgramJSON(path, want); err != nil {
-		t.Fatalf("writeProgramJSON: %v", err)
-	}
-	// File must exist with indented JSON (smoke check — readable).
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if len(raw) == 0 {
-		t.Fatal("written file is empty")
-	}
-
-	got, err := loadProgramJSON(path)
-	if err != nil {
-		t.Fatalf("loadProgramJSON: %v", err)
-	}
-	if got.Name != want.Name {
-		t.Errorf("Name = %q, want %q", got.Name, want.Name)
-	}
-	if got.KeyTilt != want.KeyTilt {
-		t.Errorf("KeyTilt = %d, want %d", got.KeyTilt, want.KeyTilt)
-	}
-	if got.PositionalXFade != want.PositionalXFade {
-		t.Errorf("PositionalXFade = %v, want %v", got.PositionalXFade, want.PositionalXFade)
-	}
-	if got.MidiProgramNumber != want.MidiProgramNumber {
-		t.Errorf("MidiProgramNumber = %d, want %d", got.MidiProgramNumber, want.MidiProgramNumber)
-	}
-	if got.EnableMidiProgram != want.EnableMidiProgram {
-		t.Errorf("EnableMidiProgram = %v, want %v", got.EnableMidiProgram, want.EnableMidiProgram)
-	}
-}
-
-func TestLoadProgramJSON_ErrorsOnInvalidJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bad.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
-		t.Fatalf("seed bad file: %v", err)
-	}
-	if _, err := loadProgramJSON(path); err == nil {
-		t.Fatal("expected JSON parse error")
-	}
-}
-
-func TestLoadProgramJSON_ErrorsOnMissingFile(t *testing.T) {
-	if _, err := loadProgramJSON(filepath.Join(t.TempDir(), "missing.json")); err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
 
 func TestWriteSampleWav_RoundTripsThroughWavDecoder(t *testing.T) {
 	// Write a known PCM via writeSampleWav, decode the file back with
