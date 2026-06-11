@@ -32,17 +32,17 @@ const (
 	// PRONAME sits at envelope offset 7, i.e. payload offset 7-7 —
 	// written as a literal 0 because staticcheck (SA4000) rejects
 	// the self-documenting `7 - 7` the rest of the table uses.
-	ovsOffPRONAME  = 0      // 0  : DB × 10  → 20 wire bytes
-	ovsOffMDXTCH   = 39 - 7 // 32 : DB
-	ovsOffRSCHNL   = 47 - 7 // 40 : DW
-	ovsOffRSKEY    = 51 - 7 // 44 : DW
-	ovsOffRSVEL    = 55 - 7 // 48 : DW
-	ovsOffBASMCH   = 61 - 7 // 54 : DB (high bit = omni)
-	ovsOffMLEN     = 63 - 7 // 56 : DB (0/1 — loudness on CC7)
-	ovsOffM1RS2    = 65 - 7 // 58 : DB (1=MIDI, 2=RS-232 — read-only on the wire)
-	ovsOffMPEN     = 67 - 7 // 60 : DB (0=disable, non-zero=enable)
-	ovsOffPWRANGE  = 77 - 7 // 70 : DB (0..12 semitones)
-	ovsOffRSBAUD   = 79 - 7 // 72 : DW (baud / 10)
+	ovsOffPRONAME = 0      // 0  : DB × 10  → 20 wire bytes
+	ovsOffMDXTCH  = 39 - 7 // 32 : DB
+	ovsOffRSCHNL  = 47 - 7 // 40 : DW
+	ovsOffRSKEY   = 51 - 7 // 44 : DW
+	ovsOffRSVEL   = 55 - 7 // 48 : DW
+	ovsOffBASMCH  = 61 - 7 // 54 : DB (high bit = omni)
+	ovsOffMLEN    = 63 - 7 // 56 : DB (0/1 — loudness on CC7)
+	ovsOffM1RS2   = 65 - 7 // 58 : DB (1=MIDI, 2=RS-232 — read-only on the wire)
+	ovsOffMPEN    = 67 - 7 // 60 : DB (program-change enable; 0=off)
+	ovsOffPWRANGE = 77 - 7 // 70 : DB (0..12 semitones)
+	ovsOffRSBAUD  = 79 - 7 // 72 : DW (baud / 10)
 	// OSCONST1 / OSCONST2 (envelope offsets 69 / 73) are reserved
 	// constants — the device expects 20727 and 7238 respectively.
 	// We don't expose them as fields but ParseOverallSettings
@@ -80,16 +80,17 @@ type OverallSettings struct {
 	// MIDI menu to flip controller mode. See
 	// project-ovs-write-restriction for the discovery context.
 	ControllerSelect uint8
-	// MPEN is a boolean byte (0 = off, non-zero = on) at OVS offset 60.
-	// The mnemonic comes from dxzl/akai-s950's OverallSettingsForm.h
-	// but the field's *purpose* is not documented in any published
-	// Akai S950 SysEx reference — early speculation that it was MIDI
-	// Polyphonic Expression is wrong (MPE was formalised in 2018; the
-	// S950 shipped in 1988). Decoded + encoded for completeness, but
-	// the GUI deliberately does NOT expose it: until someone confirms
-	// what the byte actually toggles, flipping it from a user-facing
-	// UI risks changing unknown device behaviour. Round-trips
-	// unchanged via Raw when neither side touches it.
+	// MPEN — MIDI Program-change ENable — is a boolean byte (0 = off)
+	// at OVS offset 60, mirroring the front panel's MIDI page 04
+	// "Prog change ON/OFF" toggle. Identified 2026-06: akaiutil's
+	// on-disk OVS struct (akai_ovs900_s) maps the SAME RAM byte
+	// (disk offset 30 = wire offset 67 → payload 60) as `progchange`,
+	// and the disk format is byte-identical to the de-DB'd SysEx
+	// payload. The old guess that it related to MIDI Polyphonic
+	// Expression was wrong (MPE postdates the S950 by 30 years).
+	// When false, the device ignores Program Change messages — the
+	// follow-selection feature checks this before promising remote
+	// program activation will work.
 	MPEN bool
 	// PitchWheelRange is the bender's ± range in semitones (0..12).
 	PitchWheelRange uint8

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/bivers/s950/internal/device"
 	"github.com/bivers/s950/internal/protocol"
@@ -251,7 +250,7 @@ func (a *App) ApplySlicing(req SlicingRequest) error {
 			Percent:     (i * samplesShare) / total,
 			Message:     fmt.Sprintf("Uploading %s → slot %02d", p.Name, slot),
 		})
-		_, drain, err := d.PutSampleOpenLoop(p.Words, p.Opts)
+		sent, _, err := d.PutSampleOpenLoop(p.Words, p.Opts)
 		if err != nil {
 			a.emitSlicingProgress(SlicingProgress{
 				Phase: "error", SliceIndex: i, TotalSlices: total,
@@ -259,10 +258,11 @@ func (a *App) ApplySlicing(req SlicingRequest) error {
 			})
 			return fmt.Errorf("upload slice %d: %w", i+1, err)
 		}
-		// Wait for the bytes we just queued to actually leave the OS
-		// MIDI buffer before sending more — rtmidi.Send is fire-and-
-		// forget. The returned drain is bytes/(MIDI baud) + 10% margin.
-		time.Sleep(drain)
+		// Wait for the bytes we just queued to actually reach the
+		// wire before sending more. Exact on serial (tcdrain);
+		// worst-case-estimate sleep on MIDI, where Send is
+		// fire-and-forget into the OS buffer.
+		d.WaitTX(sent)
 
 		// Set the SPRM name for the freshly-uploaded slice. The dump
 		// itself doesn't carry the name — SPRM does.

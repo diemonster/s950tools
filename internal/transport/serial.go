@@ -371,6 +371,29 @@ func (t *serialTransport) Send(b []byte) error {
 	return err
 }
 
+// WaitTX blocks until the OS has actually transmitted everything
+// queued on the port (termios tcdrain / FlushFileBuffers). This is
+// the exact replacement for the MIDI path's sleep-an-estimate drain:
+// serial callers wait precisely as long as the UART needs, instead
+// of a worst-case guess at MIDI's 3125 B/s. Discovered via the
+// device layer's optional-capability assertion, so the Transport
+// interface (and every test fake) stays unchanged.
+func (t *serialTransport) WaitTX() error {
+	return t.port.Drain()
+}
+
+// WireRate reports the line's payload throughput in bytes/sec
+// (8N1: 10 bits on the wire per data byte). Lets the device layer
+// compute honest progress estimates instead of assuming MIDI's
+// 31250 baud.
+func (t *serialTransport) WireRate() int {
+	baud := t.opts.Baud
+	if baud <= 0 {
+		baud = 38400
+	}
+	return baud / 10
+}
+
 // SendQuiet writes bytes to the port without the wire-log callback.
 // Used by the MIDI-thru forwarder: live performance traffic at note
 // rates would flood the GUI's wire-log panel and bury the SysEx

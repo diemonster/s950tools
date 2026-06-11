@@ -69,19 +69,36 @@ func New(t transport.Transport, channel byte) *Device {
 // difference from "all good"), the dialog reports success and the
 // upload never landed.
 //
-// We don't validate the reply contents — any inbound SysEx counts
-// as "device is alive on the wire." A response means the bytes
-// can flow both directions; absence means the device isn't seeing
-// our traffic (wrong controller-select mode, cable issue, etc.).
+// Only an AKAI exclusive (F0 47 …) counts as the pong. "Any inbound
+// SysEx" used to be enough — until a hardware crash log showed the
+// flaw: the S950 streams per-block ACK handshakes (F0 7E 7F F7)
+// throughout an open-loop dump, and a stale ACK from the PREVIOUS
+// upload satisfied the next upload's ping, green-lighting a second
+// dump while the device was still mid-bookkeeping on the first.
+// Requiring a real catalog reply turns Ping into a device-ready
+// barrier: the S950 only answers RCAT once it has finished
+// processing, so back-to-back uploads pace themselves naturally.
 func (d *Device) Ping(timeout time.Duration) error {
 	d.T.Drain()
 	if err := d.T.Send(protocol.BuildAkaiRequest(d.Channel, protocol.FuncRCAT, 0)); err != nil {
 		return fmt.Errorf("send ping: %w", err)
 	}
-	if _, err := d.T.RecvSysEx(timeout); err != nil {
-		return fmt.Errorf("no reply within %v: %w", timeout, err)
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("no AKAI reply within %v", timeout)
+		}
+		msg, err := d.T.RecvSysEx(remaining)
+		if err != nil {
+			return fmt.Errorf("no reply within %v: %w", timeout, err)
+		}
+		if len(msg) >= 2 && msg[1] == 0x47 {
+			return nil
+		}
+		// Handshake noise (ACK/NAK stragglers from an earlier dump)
+		// — keep listening for the catalog.
 	}
-	return nil
 }
 
 // Catalog requests the device's program and sample list.
@@ -142,7 +159,7 @@ func (d *Device) SetProgram(num byte, p *protocol.Program) error {
 	if err := d.T.Send(msg); err != nil {
 		return fmt.Errorf("send PRGM: %w", err)
 	}
-	time.Sleep(ExpectedDrainTime(len(msg)))
+	d.WaitTX(len(msg))
 	return nil
 }
 
@@ -170,7 +187,7 @@ func (d *Device) SetParams(num byte, p *protocol.SampleParams) error {
 	}
 	// The S950 doesn't reply to SPRM writes, but the bytes still take wall-
 	// clock time to drain at MIDI rate (129 bytes ~= 41 ms).
-	time.Sleep(ExpectedDrainTime(len(msg)))
+	d.WaitTX(len(msg))
 	return nil
 }
 
@@ -204,7 +221,7 @@ func (d *Device) SetOverall(o *protocol.OverallSettings) error {
 	if err := d.T.Send(msg); err != nil {
 		return fmt.Errorf("send OVS: %w", err)
 	}
-	time.Sleep(ExpectedDrainTime(len(msg)))
+	d.WaitTX(len(msg))
 	return nil
 }
 
@@ -236,7 +253,7 @@ func (d *Device) SetDrum(s *protocol.DrumSettings) error {
 	if err := d.T.Send(msg); err != nil {
 		return fmt.Errorf("send DRS: %w", err)
 	}
-	time.Sleep(ExpectedDrainTime(len(msg)))
+	d.WaitTX(len(msg))
 	return nil
 }
 
@@ -306,14 +323,89 @@ func ExpectedDrainTime(n int) time.Duration {
 	return d
 }
 
+// txWaiter is the optional transport capability for an exact
+// flushed-to-the-wire wait (the serial transport implements it via
+// tcdrain). When present, sleep-based drain estimates become
+// display-only.
+type txWaiter interface{ WaitTX() error }
+
+// wireRater is the optional transport capability reporting payload
+// throughput in bytes/sec, for honest progress estimates.
+type wireRater interface{ WireRate() int }
+
+// ExactDrain reports whether the transport can wait for actual
+// transmission completion instead of sleeping an estimate.
+func (d *Device) ExactDrain() bool {
+	_, ok := d.T.(txWaiter)
+	return ok
+}
+
+// DrainEstimate is the transport-aware version of ExpectedDrainTime:
+// it uses the line's real byte rate when the transport reports one
+// (serial = baud/10), falling back to MIDI's rate. The 200 ms floor
+// only applies to the MIDI fallback — it exists for CoreMIDI's
+// asynchronous buffering, which the serial path doesn't have.
+func (d *Device) DrainEstimate(n int) time.Duration {
+	r, ok := d.T.(wireRater)
+	if !ok {
+		return ExpectedDrainTime(n)
+	}
+	rate := r.WireRate()
+	if rate <= 0 {
+		return ExpectedDrainTime(n)
+	}
+	est := time.Duration(n) * time.Second / time.Duration(rate)
+	return est * 11 / 10
+}
+
+// WaitTX blocks until n just-sent bytes are actually on the wire.
+//
+// Serial: sleeps the honest wire-time estimate (real baud + 10%),
+// THEN tcdrain as a mop-up. The estimate floor is load-bearing:
+// hardware-observed (2026-06-10 crash log) that tcdrain on USB-
+// serial adapters returns up to seconds early on large dumps — it
+// only waits for the KERNEL buffer, not the adapter's internal
+// FIFO. An 81 KB dump "completed" 1.4 s before its bytes finished
+// leaving the FTDI chip, the host ran ahead, and the back-to-back
+// follow-up traffic crashed the sampler mid-bookkeeping. A UART
+// can't beat baud-rate math, so the estimate is a safe floor and
+// tcdrain covers any driver-side remainder.
+//
+// MIDI: sleeps the historical worst-case estimate (3125 B/s, 200 ms
+// floor), preserving the timing that path was hardware-tuned for.
+func (d *Device) WaitTX(n int) {
+	if _, ok := d.T.(txWaiter); ok {
+		time.Sleep(d.DrainEstimate(n))
+		if w, ok := d.T.(txWaiter); ok {
+			_ = w.WaitTX()
+		}
+		return
+	}
+	time.Sleep(ExpectedDrainTime(n))
+}
+
+// NAKWindow is how long callers should listen for NAKs after an
+// upload. 500 ms was tuned for MIDI, where driver buffering blurs
+// when the device actually finished receiving; over serial, WaitTX
+// returns at true TX completion and the S950 answers within ~30 ms,
+// so a shorter window keeps step-to-step latency down with generous
+// headroom left.
+func (d *Device) NAKWindow() time.Duration {
+	if d.ExactDrain() {
+		return 250 * time.Millisecond
+	}
+	return 500 * time.Millisecond
+}
+
 // PutSampleOpenLoop uploads a sample to the device in open-loop mode: the
 // whole dump goes out as a single big SysEx without waiting for per-block
 // ACKs. The S950 doc allows this and recommends it for v1 uploads.
 //
-// Returns the number of MIDI bytes queued and the wall-clock time the OS will
-// actually take to transmit them at MIDI's 31250-baud line rate. The caller is
-// responsible for waiting at least that long before issuing the next request,
-// since rtmidi's Send returns as soon as the bytes are queued into the OS.
+// Returns the number of wire bytes queued and a transport-aware estimate of
+// the transmission time (DrainEstimate — real baud for serial, MIDI's 31250
+// for MIDI). The estimate is for PROGRESS DISPLAY; to actually wait, callers
+// should use d.WaitTX(sent), which is exact on serial (tcdrain) and falls
+// back to the conservative sleep on MIDI.
 func (d *Device) PutSampleOpenLoop(words []uint16, opts PutSampleOpts) (sent int, drain time.Duration, err error) {
 	if uint32(len(words)) < sample.MinTotalWords {
 		return 0, 0, sample.ErrLengthTooShort
@@ -367,7 +459,7 @@ func (d *Device) PutSampleOpenLoop(words []uint16, opts PutSampleOpts) (sent int
 	if err := d.T.Send(buf); err != nil {
 		return 0, 0, err
 	}
-	return len(buf), ExpectedDrainTime(len(buf)), nil
+	return len(buf), d.DrainEstimate(len(buf)), nil
 }
 
 // GetSampleAudio requests the audio for sample `num` from the S950 (Phase 1C

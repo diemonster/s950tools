@@ -39,6 +39,14 @@ function isConnected(): boolean {
 
 export function scheduleProgramWriteback(slot: number) {
   if (!isConnected()) return;
+  // Only live-sync programs that exist on the device. A 'local' row
+  // (New Program, Open .json, Open Gotek .img) occupies a slot the
+  // sampler may use for something else — auto-writing it would
+  // clobber device state the user never asked to replace. Local
+  // programs reach the device only via the explicit Send button
+  // (which promotes them to 'device' on success).
+  const p = get(programs).find((x) => x.slot === slot);
+  if (!p || p.source !== 'device') return;
   programPendingSlot = slot;
   setSync('dirty', 'Editing...');
   if (programTimer) clearTimeout(programTimer);
@@ -60,6 +68,9 @@ export async function flushProgramWriteback() {
 
   const p = get(programs).find((x) => x.slot === slot);
   if (!p) return;
+  // Re-check at flush time (mirrors flushSampleWriteback): the row
+  // can flip to 'local' inside the debounce window.
+  if (p.source !== 'device') return;
 
   setSync('sending', 'Sending...');
   try {

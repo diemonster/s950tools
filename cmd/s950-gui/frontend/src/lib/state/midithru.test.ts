@@ -17,6 +17,7 @@ import * as App from '../../../wailsjs/go/main/App';
 import {
   midiThru, midiThruError, startThru, stopThru, initMidiThruEvents,
   syncThruStatus, thruPref, setThruPref, autoStartThru, thruCaps,
+  thruHeld, thruBlips,
   type MidiThruState,
 } from './midithru';
 
@@ -172,17 +173,61 @@ describe('thru auto-start preference', () => {
 });
 
 describe('initMidiThruEvents', () => {
+  // initMidiThruEvents wires once per module load (idempotent), so
+  // the handler map is shared across these tests — captured by the
+  // first registration.
+  const handlers = new Map<string, (data: any) => void>();
+  const eventsOn = vi.fn((name: string, cb: (data: any) => void) => {
+    handlers.set(name, cb);
+  });
+
   it('subscribes once and mirrors backend pushes into the store', () => {
-    let handler: ((st: MidiThruState) => void) | null = null;
-    const eventsOn = vi.fn((name: string, cb: (st: MidiThruState) => void) => {
-      expect(name).toBe('midithru:state');
-      handler = cb;
-    });
     initMidiThruEvents(eventsOn as any);
     initMidiThruEvents(eventsOn as any); // idempotent — second call no-ops
-    expect(eventsOn).toHaveBeenCalledTimes(1);
-    expect(handler).toBeTruthy();
-    handler!({ ...ACTIVE, forwarded: 214 });
+    expect(eventsOn).toHaveBeenCalledTimes(2); // state + note, once each
+    handlers.get('midithru:state')!({ ...ACTIVE, forwarded: 214 });
     expect(get(midiThru).forwarded).toBe(214);
+  });
+
+  it('note events drive held-note + blip state; stop clears the lights', async () => {
+    vi.useFakeTimers();
+    try {
+      initMidiThruEvents(eventsOn as any); // no-op; handlers already wired
+      const note = handlers.get('midithru:note')!;
+      const state = handlers.get('midithru:state')!;
+
+      note({ note: 60, channel: 0, velocity: 100, on: true });
+      note({ note: 64, channel: 0, velocity: 40, on: true });
+      expect(get(thruHeld).get(60)).toBe(100);
+      expect(get(thruHeld).get(64)).toBe(40);
+      expect(get(thruBlips)).toHaveLength(2);
+      expect(get(thruBlips)[0]).toMatchObject({ note: 60, velocity: 100 });
+
+      // Note off releases the key but the blip fades on its own clock.
+      note({ note: 60, channel: 0, velocity: 0, on: false });
+      expect(get(thruHeld).has(60)).toBe(false);
+      expect(get(thruBlips)).toHaveLength(2);
+
+      // Blips self-remove after their fade lifetime.
+      vi.advanceTimersByTime(1000);
+      expect(get(thruBlips)).toHaveLength(0);
+
+      // Thru stopping clears everything still held — no stuck lights.
+      note({ note: 72, channel: 0, velocity: 90, on: true });
+      state({ active: false, source: '', virtual: false, forwarded: 0, dropped: 0 });
+      expect(get(thruHeld).size).toBe(0);
+      expect(get(thruBlips)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps the blip backlog under bursts', () => {
+    initMidiThruEvents(eventsOn as any); // no-op; handlers already wired
+    const note = handlers.get('midithru:note')!;
+    for (let i = 0; i < 100; i++) {
+      note({ note: 21 + (i % 88), channel: 0, velocity: 100, on: true });
+    }
+    expect(get(thruBlips).length).toBeLessThanOrEqual(48);
   });
 });

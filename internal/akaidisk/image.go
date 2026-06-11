@@ -61,6 +61,7 @@ func (im *Image) Entries() []Entry {
 			Type:       e[16],
 			Size:       int(e[17]) | int(e[18])<<8 | int(e[19])<<16,
 			StartBlock: int(binary.LittleEndian.Uint16(e[20:22])),
+			Compressed: e[16] == TypeSample && binary.LittleEndian.Uint16(e[22:24]) != 0,
 		})
 	}
 	return out

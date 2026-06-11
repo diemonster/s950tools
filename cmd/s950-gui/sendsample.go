@@ -17,12 +17,10 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// sendSampleNAKWindow is how long we wait after the dump's wire-time
-// drain before checking the inbound queue for NAKs. Most NAKs land
-// near-immediately after the offending block, but the device's
-// internal accounting can lag by a few hundred ms. 500ms is the
-// same value the CLI's put-sample flow uses.
-const sendSampleNAKWindow = 500 * time.Millisecond
+// NAK listening after the drain is transport-aware via
+// Device.NAKWindow(): 250 ms on serial (exact tcdrain means the
+// device has truly received everything), 500 ms on MIDI (driver
+// buffering blurs completion; value hardware-tuned).
 
 // SendSampleProgress is the payload of the "sendsample:progress"
 // Wails event. The frontend's progress modal subscribes to this so
@@ -99,14 +97,18 @@ func (a *App) SendSample(slot int, words []uint16, sampleRateHz uint32, params p
 
 	a.emitSendProgress(SendSampleProgress{
 		Phase: "waiting_drain", Slot: slot, Sent: sent, DrainMs: int(drain.Milliseconds()),
-		Message: fmt.Sprintf("Queued %d bytes; draining (%s)…", sent, drain.Round(100*time.Millisecond)),
+		Message: fmt.Sprintf("Queued %d bytes; draining (~%s)…", sent, drain.Round(100*time.Millisecond)),
 	})
-	time.Sleep(drain)
+	// Exact on serial (tcdrain returns when the UART finishes);
+	// sleeps the worst-case estimate on MIDI. The `drain` value
+	// above is display-only.
+	d.WaitTX(sent)
 
 	// NAK check before SPRM: if the dump itself was rejected, the
 	// SPRM write would land on a half-populated slot. Surface that
-	// to the user before they assume the upload succeeded.
-	if naks := d.CollectNAKs(sendSampleNAKWindow); naks > 0 {
+	// to the user before they assume the upload succeeded. Window is
+	// transport-aware: 250 ms on serial, 500 ms on MIDI.
+	if naks := d.CollectNAKs(d.NAKWindow()); naks > 0 {
 		msg := fmt.Sprintf("%d NAK%s during upload — sample may be truncated; please retry",
 			naks, plural(naks))
 		a.emitSendProgress(SendSampleProgress{Phase: "error", Slot: slot, Message: msg})

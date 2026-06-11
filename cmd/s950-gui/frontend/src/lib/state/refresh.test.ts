@@ -62,7 +62,7 @@ function deviceSample(slot: number, name = 'KICK', length = 1000): Sample {
 
 describe('refreshAllFromDevice — phase progression', () => {
   it('starts idle, goes through catalog → samples → programs → audio → done', async () => {
-    programs.set([{ slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] }]);
+    programs.set([{ slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const }]);
     samples.set([deviceSample(5)]);
 
     ((App as any).CopySampleAudio as ReturnType<typeof vi.fn>)
@@ -86,9 +86,9 @@ describe('refreshAllFromDevice — phase progression', () => {
 
   it('counts programs in subTotal/subCurrent while iterating', async () => {
     programs.set([
-      { slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
-      { slot: 1, name: 'P1', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
-      { slot: 2, name: 'P2', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
+      { slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
+      { slot: 1, name: 'P1', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
+      { slot: 2, name: 'P2', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
     ]);
 
     // Capture the message at the moment ensureProgramLoaded is
@@ -185,7 +185,7 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
     // "audio skipped" branch fires (the empty-device path has a
     // different message).
     programs.set([
-      { slot: 0, name: 'P', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
+      { slot: 0, name: 'P', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
     ]);
     samples.set([deviceSample(5, 'WOULD-PULL')]);
     await refreshAllFromDevice(false);
@@ -218,7 +218,7 @@ describe('refreshAllFromDevice — audio skip-when-cached', () => {
 describe('refreshAllFromDevice — cancel + error', () => {
   it('cancel between phases stops the run and reports cancelled', async () => {
     programs.set([
-      { slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
+      { slot: 0, name: 'P0', midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
     ]);
     samples.set([]);
 
@@ -249,9 +249,9 @@ describe('refreshAllFromDevice — cancel + error', () => {
 
   it('continues past a failing program (logged, not fatal)', async () => {
     programs.set([
-      { slot: 0, name: 'OK',   midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
-      { slot: 1, name: 'BAD',  midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
-      { slot: 2, name: 'OK2',  midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [] },
+      { slot: 0, name: 'OK',   midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
+      { slot: 1, name: 'BAD',  midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
+      { slot: 2, name: 'OK2',  midiProg: 1, respondPC: false, keyTilt: 0, positionalXfade: false, keygroups: [], source: 'device' as const },
     ]);
 
     (catalog.ensureProgramLoaded as ReturnType<typeof vi.fn>).mockImplementation(async (slot: number) => {

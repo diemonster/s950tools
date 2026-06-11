@@ -3,6 +3,8 @@
 import {main} from '../models';
 import {protocol} from '../models';
 
+export function ActivateProgram(arg1:number,arg2:number):Promise<void>;
+
 export function ApplySlicing(arg1:main.SlicingRequest):Promise<void>;
 
 export function Catalog():Promise<main.Catalog>;
@@ -42,6 +44,8 @@ export function MidiThruStart(arg1:string,arg2:boolean):Promise<main.MidiThruSta
 export function MidiThruStatus():Promise<main.MidiThruState>;
 
 export function MidiThruStop():Promise<main.MidiThruState>;
+
+export function OpenGotekImage():Promise<main.ImportImageResult>;
 
 export function OpenProgramJSON():Promise<protocol.ProgramJSON>;
 

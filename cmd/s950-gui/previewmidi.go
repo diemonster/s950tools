@@ -51,6 +51,33 @@ func (a *App) PreviewMidi(note, velocity, channel, durationMs int) error {
 	return nil
 }
 
+// ActivateProgram sends a MIDI Program Change so the S950 loads the
+// program mapped to `midiProgNumber` (each program's MIDI prog # —
+// NOT its slot). Works over both transports: DIN in MIDI mode,
+// channel-messages-over-serial in RS-232 mode (hardware-verified).
+//
+// Fire-and-forget by hardware design: the S950 has no mechanism to
+// report its active program (no SysEx primitive; transmits nothing
+// on front-panel changes), so this can COMMAND a switch but never
+// confirm one. The frontend gates calls to provably-unambiguous
+// cases (unique prog #, RESPOND TO PC on, device-side program) and
+// reports the action, never a "synced" state.
+func (a *App) ActivateProgram(midiProgNumber int, channel int) error {
+	if midiProgNumber < 0 || midiProgNumber > 127 {
+		return fmt.Errorf("MIDI program number %d out of range (0..127)", midiProgNumber)
+	}
+	d, err := a.lockDevice()
+	if err != nil {
+		return err
+	}
+	defer a.mu.Unlock()
+	pc := []byte{0xC0 | byte(channel&0x0F), byte(midiProgNumber & 0x7F)}
+	if err := d.T.Send(pc); err != nil {
+		return fmt.Errorf("send program change: %w", err)
+	}
+	return nil
+}
+
 // noteOnBytes returns the 3-byte MIDI Note-On message for the given
 // note/velocity/channel. Pure helper — splits out the byte-shaping
 // from PreviewMidi so the clamp semantics are unit-testable without

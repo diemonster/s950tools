@@ -321,6 +321,17 @@ body {
      transition and shove Memory/EXM/System/slot left or right. */
   min-width: 11ch;
   justify-content: flex-start;
+  /* …and a max-width so verbose one-shot messages (import/export
+     summaries) ellipsize inside the chip instead of pushing the
+     topbar's right-side chips off-screen. The ellipsis lives on the
+     inner label span — flex containers don't truncate bare text
+     nodes; the full text stays available via the chip's title. */
+  max-width: 34ch;
+}
+.chip--status__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .status-dot {
   width: 8px; height: 8px;
@@ -944,6 +955,7 @@ body.modal-open .modal-backdrop { display: flex; }
 .log__row.ok      { color: var(--rb-green); }
 .log__row.run     { color: var(--rb-yellow); }
 .log__row.warn    { color: var(--rb-orange); }
+.log__row.fail    { color: var(--rb-red); }
 .log__row.pending { color: var(--grey-medium); }
 .modal__foot {
   display: flex;

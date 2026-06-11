@@ -20,6 +20,21 @@ import { sampleParamsToSample, sampleToSampleParams } from './converters';
 // (e.g. via a future "Refresh" button).
 const loadedPrograms = new Set<number>();
 const loadedSamples  = new Set<number>();
+// In-flight GetProgram promises, keyed by slot — late callers join
+// the pending fetch instead of issuing a duplicate (see the join
+// logic in ensureProgramLoaded). Declared here, NOT near its user:
+// the selectedSlot subscriber below runs synchronously at module
+// init and reaches ensureProgramLoaded before later consts exist.
+const inflightPrograms = new Map<number, Promise<void>>();
+
+// isProgramHydrated reports whether a device program's full header
+// has been fetched. Until then the store row is a skinnyProgram stub
+// whose midiProg/respondPC are fabricated defaults — anything making
+// decisions on those fields (the follow-selection gate) must check
+// this first rather than trust the stub.
+export function isProgramHydrated(slot: number): boolean {
+  return loadedPrograms.has(slot);
+}
 
 // Wire selection changes to lazy-fetch. Subscribed once at module
 // load — fires whenever the user clicks a different sidebar entry,
@@ -31,6 +46,11 @@ selectedSlot.subscribe((slot) => {
   // Defer so the rest of the module has finished initialising —
   // ensureProgramLoaded calls App.GetProgram which can resolve
   // asynchronously without interfering with anything.
+  // NOTE: follow-selection (followsync.onProgramSelected) is
+  // deliberately NOT wired here — selectedSlot is also written
+  // programmatically (refresh migration, New/Duplicate/Open, send
+  // slot-swaps), and none of those should ever push a Program
+  // Change at the hardware. Only the sidebar click site calls it.
   void ensureProgramLoaded(slot);
 });
 selectedSampleSlot.subscribe((slot) => {
@@ -65,6 +85,9 @@ function skinnyProgram(slot: number, name: string): Program {
     midiProg: 1, respondPC: true,
     keyTilt: 0, positionalXfade: false,
     keygroups: [],
+    // Only produced from a device catalog entry — the slot exists
+    // on the S950.
+    source: 'device',
   };
 }
 
@@ -80,6 +103,12 @@ export async function refreshCatalog(): Promise<void> {
 
   loadedPrograms.clear();
   loadedSamples.clear();
+  inflightPrograms.clear();
+
+  // A refresh re-stubs every row — any "→ PC sent" claim or blocked
+  // reason from before it refers to programs that may no longer be
+  // in those slots. Lazy import avoids a module cycle.
+  void import('./followsync').then((m) => m.resetFollowState());
 
   if (newSamples.length > 0) {
     // Preserve local-only imports through a Connect — they're audio
@@ -101,10 +130,38 @@ export async function refreshCatalog(): Promise<void> {
     }
   }
   if (newPrograms.length > 0) {
-    programs.set(newPrograms);
+    // Same local-preservation policy as the samples branch above:
+    // programs built or imported in the app survive a refresh; on a
+    // slot collision the device wins (it's the source of truth for
+    // its own slots).
+    const localProgs = get(programs).filter((p) => p.source === 'local');
+    const deviceSlots = new Set(newPrograms.map((p) => p.slot));
+    const survivors = localProgs.filter((p) => !deviceSlots.has(p.slot));
+    const mergedProgs = [...newPrograms, ...survivors].sort((a, b) => a.slot - b.slot);
+    programs.set(mergedProgs);
     const curSlot = get(selectedSlot);
-    if (!newPrograms.find((p) => p.slot === curSlot)) {
-      selectedSlot.set(newPrograms[0].slot);
+    if (!mergedProgs.find((p) => p.slot === curSlot)) {
+      selectedSlot.set(mergedProgs[0].slot);
+    }
+    // Hydrate every device program header in the background (fire and
+    // forget — refresh itself stays fast). The refresh above already
+    // reads every SAMPLE header eagerly; programs were lazy-only,
+    // which left stub rows carrying fabricated midiProg/respondPC
+    // that the follow-selection uniqueness gate could mistake for
+    // real data. Sequential on purpose: the device lock serialises
+    // anyway, and one outstanding request at a time keeps the S950's
+    // input buffer predictable.
+    void hydrateAllPrograms(newPrograms.map((p) => p.slot));
+  }
+}
+
+async function hydrateAllPrograms(slots: number[]): Promise<void> {
+  for (const slot of slots) {
+    try {
+      await ensureProgramLoaded(slot, false, false);
+    } catch {
+      // Already logged inside ensureProgramLoaded; keep going so one
+      // bad slot doesn't strand the rest unhydrated.
     }
   }
 }
@@ -130,20 +187,46 @@ export async function ensureProgramLoaded(
   rescanMemory = true,
 ): Promise<void> {
   if (!force && loadedPrograms.has(slot)) return;
-  try {
-    const json = await App.GetProgram(slot);
-    const full = programJSONToProgram(json, slot);
-    programs.update((list) => list.map((p) => (p.slot === slot ? full : p)));
-    loadedPrograms.add(slot);
-    // A user-initiated Get is the right moment to refresh the
-    // memory chip: the user may have manually edited the device
-    // since Connect (deleted samples on the front panel, etc.),
-    // and the chip should reflect that without forcing a reconnect.
-    if (force && rescanMemory) void scanMemory();
-  } catch (e) {
-    console.error(`GetProgram(${slot}) failed:`, e);
-    throw e;
+  // Join an in-flight fetch instead of issuing a second one — the
+  // sidebar-click load and the background hydrateAllPrograms pass
+  // routinely race for the same slot, and loadedPrograms only gets
+  // the slot AFTER the round-trip resolves. (Forced loads bypass the
+  // join: "Get from S950" means fetch NOW, not whatever an earlier
+  // call returns.)
+  if (!force) {
+    const pending = inflightPrograms.get(slot);
+    if (pending) return pending;
   }
+  // Never clobber LOCAL programs with device state. A local row
+  // (New Program, Open .json, Open Gotek .img) occupies a slot the
+  // device may use for something else entirely — fetching here
+  // would silently replace the user's work with whatever the
+  // sampler holds (the imported-kit-renamed-to-TONE-PRGRM bug).
+  // `force` (the explicit "Get from S950" button) is the deliberate
+  // override: the user is asking for the device's version.
+  const existing = get(programs).find((p) => p.slot === slot);
+  if (!existing) return;
+  if (existing.source === 'local' && !force) return;
+  const fetchOnce = (async () => {
+    try {
+      const json = await App.GetProgram(slot);
+      const full = programJSONToProgram(json, slot);
+      programs.update((list) => list.map((p) => (p.slot === slot ? full : p)));
+      loadedPrograms.add(slot);
+      // A user-initiated Get is the right moment to refresh the
+      // memory chip: the user may have manually edited the device
+      // since Connect (deleted samples on the front panel, etc.),
+      // and the chip should reflect that without forcing a reconnect.
+      if (force && rescanMemory) void scanMemory();
+    } catch (e) {
+      console.error(`GetProgram(${slot}) failed:`, e);
+      throw e;
+    } finally {
+      inflightPrograms.delete(slot);
+    }
+  })();
+  inflightPrograms.set(slot, fetchOnce);
+  return fetchOnce;
 }
 
 export async function ensureSampleLoaded(slot: number, force = false): Promise<void> {
@@ -181,6 +264,17 @@ export async function ensureSampleLoaded(slot: number, force = false): Promise<v
     console.error(`GetSampleParams(${slot}) failed:`, e);
     throw e;
   }
+}
+
+// markProgramOnDevice promotes a slot to 'device' after a successful
+// explicit Send to S950 — from that point the slot reflects the
+// sampler's state, the lazy loader may refresh it, and live-sync
+// writebacks are allowed again.
+export function markProgramOnDevice(slot: number): void {
+  programs.update((list) => list.map((p) =>
+    p.slot === slot ? { ...p, source: 'device' as const } : p,
+  ));
+  loadedPrograms.add(slot);
 }
 
 // revertSampleToDevice discards local edits on a sample that was
@@ -245,9 +339,15 @@ export async function revertSampleToDevice(slot: number): Promise<void> {
 // protocol.ProgramJSON into the frontend's Program type, with its
 // nested layers + modulation block. voiceOut labels default to 'ALL'
 // when the byte doesn't match a known assignment.
-// Exported so the Program tab's Open .json flow can convert a
-// loaded JSON without re-implementing the field mapping.
-export function programJSONToProgram(j: any, slot: number): Program {
+// Exported so the Program tab's Open .json / Open Gotek .img flows
+// can convert without re-implementing the field mapping — those
+// callers pass source='local' (the program exists only in the app);
+// the device-fetch path uses the 'device' default.
+export function programJSONToProgram(
+  j: any,
+  slot: number,
+  source: Program['source'] = 'device',
+): Program {
   const keygroups: Keygroup[] = (j.keygroups ?? []).map((k: any, i: number) => ({
     n: i + 1,
     lowKey: k.lower_key ?? 36,
@@ -274,6 +374,7 @@ export function programJSONToProgram(j: any, slot: number): Program {
     positionalXfade: Boolean(j.positional_xfade),
     keygroups,
     rawHeaderHex: j._raw_header_hex ?? '',
+    source,
   };
 }
 

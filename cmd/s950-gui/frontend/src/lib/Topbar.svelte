@@ -482,8 +482,8 @@
     </button>
   {/if}
 
-  <span class={statusChipClass}>
-    <span class="status-dot"></span>{statusChipLabel}
+  <span class={statusChipClass} title={statusChipLabel}>
+    <span class="status-dot"></span><span class="chip--status__label">{statusChipLabel}</span>
   </span>
   {#if $phase === 'connected'}
     <!-- Memory chip — visible only while connected; auto-populated

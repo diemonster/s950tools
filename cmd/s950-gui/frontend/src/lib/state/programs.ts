@@ -97,6 +97,15 @@ export type Program = {
   // Round-trip cache: the 76-byte program-header wire payload as hex.
   // Same purpose as Keygroup.rawBytesHex — see comment there.
   rawHeaderHex?: string;
+  // Origin marker, mirroring Sample.source. 'device' rows reflect a
+  // slot on the connected S950; 'local' rows exist only in the app
+  // (New Program, Open .json, Open Gotek .img) and occupy a slot the
+  // DEVICE may use for something else entirely. The lazy loader and
+  // the live-sync writeback both gate on this: fetching would clobber
+  // local work with device state (the imported-programs-renamed-to-
+  // TONE-PRGRM bug), and writing would clobber device state with
+  // local work. Send to S950 is the explicit promotion to 'device'.
+  source: 'device' | 'local';
 };
 
 // Default modulation block — same values as examples/program.json's
@@ -142,6 +151,7 @@ export function newLocalProgram(slot: number, name = ''): Program {
     keyTilt: 0,
     positionalXfade: false,
     keygroups: [newKeygroup(1)],
+    source: 'local',
   };
 }
 

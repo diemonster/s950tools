@@ -369,6 +369,37 @@ func (a *App) forwardThru(msg []byte) {
 		}
 	}
 	a.thruMu.Unlock()
+
+	// Note visualisation: one compact event per FORWARDED note so
+	// the keygroup grid can light up what the sampler is actually
+	// hearing (dropped notes never reach it, so they don't render —
+	// honest by construction). Unthrottled: human playing rates are
+	// trivial for the IPC bridge, and per-note latency matters for
+	// the visual to feel live.
+	if sendErr == nil && (isOn || isOff) {
+		a.emitThruNote(ThruNoteEvent{
+			Note:     int(noteKey & 0x7F),
+			Channel:  int(noteKey >> 8),
+			Velocity: int(msg[2]),
+			On:       isOn,
+		})
+	}
+}
+
+// ThruNoteEvent is the "midithru:note" payload — a forwarded note
+// for the keygroup grid's live MIDI visualisation.
+type ThruNoteEvent struct {
+	Note     int  `json:"note"`
+	Channel  int  `json:"channel"`
+	Velocity int  `json:"velocity"`
+	On       bool `json:"on"`
+}
+
+func (a *App) emitThruNote(ev ThruNoteEvent) {
+	if a.ctx == nil {
+		return
+	}
+	wruntime.EventsEmit(a.ctx, "midithru:note", ev)
 }
 
 // sendSilence writes control releases then note-offs. No locking —

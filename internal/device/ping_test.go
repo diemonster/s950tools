@@ -51,10 +51,11 @@ func (p *pingTransport) OutName() string  { return "fake" }
 // plugged in serial, controller-select on MIDI → bytes vanished,
 // no NAK came back, dialog reported success, upload never landed.
 
-func TestPing_HappyPath_SendsRCATAndAcceptsReply(t *testing.T) {
-	// Any inbound envelope counts as proof of life — we don't
-	// validate contents. Use a short F0..F7 ack-shaped reply.
-	fake := &pingTransport{reply: []byte{0xF0, 0x7E, 0x7F, 0xF7}}
+func TestPing_HappyPath_SendsRCATAndAcceptsAkaiReply(t *testing.T) {
+	// Only an AKAI exclusive (F0 47 …) counts as the pong — see
+	// Device.Ping's comment for the hardware crash that disproved
+	// the old "any SysEx counts" contract.
+	fake := &pingTransport{reply: []byte{0xF0, 0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0xF7}}
 	d := New(fake, 0)
 	if err := d.Ping(500 * time.Millisecond); err != nil {
 		t.Fatalf("Ping returned error on responsive transport: %v", err)
@@ -66,6 +67,47 @@ func TestPing_HappyPath_SendsRCATAndAcceptsReply(t *testing.T) {
 	got := fake.sent[0]
 	if len(got) < 8 || got[0] != protocol.SOX || got[3] != protocol.FuncRCAT {
 		t.Errorf("Ping sent % X, want RCAT-shaped request", got)
+	}
+}
+
+// ackThenCatalogTransport simulates the post-dump reality: the
+// device is still streaming per-block ACK handshakes; the catalog
+// reply only arrives once it has finished its bookkeeping.
+type ackThenCatalogTransport struct {
+	pingTransport
+	acksLeft int
+}
+
+func (p *ackThenCatalogTransport) RecvSysEx(_ time.Duration) ([]byte, error) {
+	if p.acksLeft > 0 {
+		p.acksLeft--
+		return []byte{0xF0, 0x7E, 0x7F, 0xF7}, nil // SDS ACK
+	}
+	return []byte{0xF0, 0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0xF7}, nil
+}
+
+func TestPing_IgnoresHandshakeNoiseUntilAkaiReply(t *testing.T) {
+	// The exact crash scenario from the 2026-06-10 wire log: a
+	// stale ACK from the previous dump must NOT satisfy the next
+	// upload's ping — Ping keeps listening until a real AKAI reply,
+	// making it a device-ready barrier between uploads.
+	fake := &ackThenCatalogTransport{acksLeft: 5}
+	d := New(fake, 0)
+	if err := d.Ping(500 * time.Millisecond); err != nil {
+		t.Fatalf("Ping should skip ACK noise and accept the catalog: %v", err)
+	}
+	if fake.acksLeft != 0 {
+		t.Errorf("Ping accepted a reply before draining the ACK noise (%d left)", fake.acksLeft)
+	}
+}
+
+func TestPing_TimesOutOnPureHandshakeNoise(t *testing.T) {
+	// A device that only ever streams ACKs (still mid-dump-
+	// bookkeeping, never answering RCAT) must time out, not pass.
+	fake := &ackThenCatalogTransport{acksLeft: 1 << 30}
+	d := New(fake, 0)
+	if err := d.Ping(150 * time.Millisecond); err == nil {
+		t.Fatal("Ping must not succeed on handshake noise alone")
 	}
 }
 

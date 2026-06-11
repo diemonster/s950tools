@@ -95,6 +95,12 @@ type Entry struct {
 	Size int
 	// StartBlock is the first FAT block of the file's chain.
 	StartBlock int
+	// Compressed reports the S900 compressed sample format. The
+	// directory's osver field is zero for everything EXCEPT
+	// compressed samples, where it holds the un-compressed block
+	// count. ParseSampleFile only handles non-compressed data —
+	// callers skip (and surface) compressed entries.
+	Compressed bool
 }
 
 // SanitizeName maps a string into the S900 name charset, uppercased

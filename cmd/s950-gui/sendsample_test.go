@@ -84,7 +84,7 @@ func TestSendSample_ProceedsPastPreflight_WhenDeviceResponds(t *testing.T) {
 	// don't validate the full upload here — too much fake plumbing
 	// — but observing the SDATA bytes hit the wire is enough to
 	// prove the pre-flight didn't block.
-	reply := []byte{0xF0, 0x7E, 0x7F, 0xF7} // proof-of-life shape
+	reply := []byte{0xF0, 0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0xF7} // AKAI catalog-shaped pong
 	app, fake := newAppWithFake(reply)
 	words := make([]uint16, 1000)
 	_ = app.SendSample(5, words, 22050, protocol.SampleParams{})

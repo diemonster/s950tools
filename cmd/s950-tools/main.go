@@ -424,7 +424,7 @@ func runPutProgram(status io.Writer, d *device.Device, pj *protocol.ProgramJSON,
 	if err := d.SetProgram(opts.Slot, p); err != nil {
 		return fmt.Errorf("write program: %w", err)
 	}
-	naks := d.CollectNAKs(500 * time.Millisecond)
+	naks := d.CollectNAKs(d.NAKWindow())
 	if naks > 0 {
 		return fmt.Errorf("write received %d NAK(s) — program may not have stored cleanly; please retry (and consider power-cycling the S950 if the target slot was already populated)", naks)
 	}
@@ -524,11 +524,19 @@ func uploadSample(status io.Writer, d *device.Device, o uploadSampleOpts) (byte,
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
-	fmt.Fprintf(status, "  queued %d bytes; waiting %s for MIDI drain...\n",
-		sent, drain.Round(100*time.Millisecond))
-	waitWithProgressTo(status, drain, time.Second)
+	if d.ExactDrain() {
+		// Serial: tcdrain blocks until the UART actually finishes —
+		// no progress dots needed, the wait is exact.
+		fmt.Fprintf(status, "  queued %d bytes; draining (~%s)...\n",
+			sent, drain.Round(100*time.Millisecond))
+		d.WaitTX(sent)
+	} else {
+		fmt.Fprintf(status, "  queued %d bytes; waiting %s for MIDI drain...\n",
+			sent, drain.Round(100*time.Millisecond))
+		waitWithProgressTo(status, drain, time.Second)
+	}
 
-	if naks := d.CollectNAKs(500 * time.Millisecond); naks > 0 {
+	if naks := d.CollectNAKs(d.NAKWindow()); naks > 0 {
 		return 0, fmt.Errorf("%d NAK(s) from S950 — sample may be truncated; please retry", naks)
 	}
 

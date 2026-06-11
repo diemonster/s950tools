@@ -60,17 +60,78 @@ export async function loadThruCaps(): Promise<void> {
   }
 }
 
+// ---------- Live note visualisation ----------
+// One event per FORWARDED note (the sampler's actual input). The
+// keygroup grid renders these Renoise-style: held notes light the
+// keyboard, and each hit drops a fading blip at its (note, velocity)
+// point on the zone canvas — which is already note×velocity space.
+
+export type ThruNoteEvent = {
+  note: number;
+  channel: number;
+  velocity: number;
+  on: boolean;
+};
+
+export type ThruBlip = { id: number; note: number; velocity: number };
+
+// thruHeld: note → velocity for currently-sounding notes.
+export const thruHeld = writable<Map<number, number>>(new Map());
+// thruBlips: recent note-on hits; each self-removes after its fade.
+export const thruBlips = writable<ThruBlip[]>([]);
+
+const BLIP_LIFETIME_MS = 900;
+const BLIP_CAP = 48; // burst guard — oldest drop first
+let blipSeq = 0;
+
+function onThruNote(ev: ThruNoteEvent): void {
+  if (ev.on) {
+    thruHeld.update((m) => {
+      const next = new Map(m);
+      next.set(ev.note, ev.velocity);
+      return next;
+    });
+    const blip: ThruBlip = { id: ++blipSeq, note: ev.note, velocity: ev.velocity };
+    thruBlips.update((bs) => {
+      const next = [...bs, blip];
+      return next.length > BLIP_CAP ? next.slice(next.length - BLIP_CAP) : next;
+    });
+    setTimeout(() => {
+      thruBlips.update((bs) => bs.filter((b) => b.id !== blip.id));
+    }, BLIP_LIFETIME_MS);
+  } else {
+    thruHeld.update((m) => {
+      if (!m.has(ev.note)) return m;
+      const next = new Map(m);
+      next.delete(ev.note);
+      return next;
+    });
+  }
+}
+
+function clearThruNotes(): void {
+  thruHeld.set(new Map());
+  thruBlips.set([]);
+}
+
 let eventsWired = false;
 
 // initMidiThruEvents subscribes to backend state pushes (throttled
-// counter updates while forwarding). Idempotent.
+// counter updates while forwarding) and per-note visualisation
+// events. Idempotent.
 export function initMidiThruEvents(
-  eventsOn: (name: string, cb: (data: MidiThruState) => void) => void,
+  eventsOn: (name: string, cb: (data: any) => void) => void,
 ): void {
   if (eventsWired) return;
   eventsWired = true;
-  eventsOn('midithru:state', (st) => {
+  eventsOn('midithru:state', (st: MidiThruState) => {
     midiThru.set(st ?? { ...INACTIVE });
+    // Thru stopped → nothing is sounding anymore; clear the lights
+    // so a key can't stay lit across sessions.
+    if (!st?.active) clearThruNotes();
+  });
+  eventsOn('midithru:note', (ev: ThruNoteEvent) => {
+    if (ev) onThruNote(ev);
   });
 }
 

@@ -21,6 +21,8 @@
     selectedSampleSlot,
   } from '../lib/state/samples';
   import { rangeLabel, noteName, midiX, midiW, midiBandClipped } from '../lib/midi';
+  import { midiThru, thruHeld, thruBlips } from '../lib/state/midithru';
+  import { followEnabled, lastActivation, followBlockedReason } from '../lib/state/followsync';
   import { onMount } from 'svelte';
 
   // Keygroup tab live-syncs (~400ms debounce in real impl). Stub
@@ -63,6 +65,7 @@
   const EMPTY_PROGRAM: Program = {
     slot: -1, name: '', midiProg: 1, respondPC: false,
     keyTilt: 0, positionalXfade: false, keygroups: [],
+    source: 'local',
   };
   const EMPTY_KEYGROUP: Keygroup = newKeygroup(1);
 
@@ -312,6 +315,34 @@
             if (n !== null) selectedKeygroupN.set(n);
           }}>+ Add Zone</button>
       </div>
+      <!-- Live-MIDI context: the blips show what the SAMPLER hears,
+           rendered against the program selected HERE — and the S950
+           can't report its active program, so this line states what
+           we know honestly. "→ PC sent" = we pointed the hardware at
+           this program (action, not a verified state); the warning
+           variants mean the hardware may be playing something else. -->
+      {#if $midiThru.active}
+        <div class="live-context">
+          <span class="live-context__dot"></span>
+          live hits vs <strong>{prog.name || `slot ${prog.slot.toString().padStart(2, '0')}`}</strong>
+          {#if $lastActivation?.slot === prog.slot}
+            <span class="live-context__ok" title="A Program Change for this program was sent to the S950 (channel {$lastActivation.channel + 1}) when you selected it — your ears confirm the rest.">· → PC {$lastActivation.midiProg} sent</span>
+          {:else if $followBlockedReason}
+            <span class="live-context__warn" title={$followBlockedReason}>· ⚠ not activated — hover</span>
+          {:else}
+            <span class="live-context__warn" title="The S950 cannot report its active program; make sure it matches what you see here.">· verify active program on S950</span>
+          {/if}
+          <button
+            type="button"
+            class="live-context__toggle"
+            title={$followEnabled
+              ? 'Follow ON: selecting a device program sends its Program Change to the S950 (when unambiguous). Click to turn off.'
+              : 'Follow OFF: program selection never touches the hardware. Click to turn on.'}
+            on:click={() => followEnabled.update((v) => !v)}>
+            follow {$followEnabled ? 'on' : 'off'}
+          </button>
+        </div>
+      {/if}
     </div>
 
     <div class="y-axis left">
@@ -322,6 +353,20 @@
     </div>
 
     <div class="grid" bind:this={gridEl}>
+      <!-- Live MIDI blips (Renoise-style): each forwarded note-on
+           drops a fading dot at its (note, velocity) point — the
+           canvas IS note×velocity space, so the mapping is exact.
+           Y uses the same /128 convention as the zone vel-switch.
+           Only rendered while the thru bridge is active; only
+           FORWARDED notes appear (what the sampler actually hears). -->
+      {#if $midiThru.active}
+        {#each $thruBlips as b (b.id)}
+          <span
+            class="midi-blip"
+            style="left: {midiX(b.note).toFixed(2)}%; top: {(100 - (b.velocity * 100) / 128).toFixed(1)}%; --vel: {(b.velocity / 127).toFixed(2)};"
+          ></span>
+        {/each}
+      {/if}
       {#each prog.keygroups as k (k.n)}
         {@const style = zoneStyle(k)}
         {#if style}
@@ -374,6 +419,18 @@
           {/if}
         {/each}
       </div>
+      <!-- Held-note lighting: keys currently sounding through the
+           thru bridge, intensity scaled by velocity. -->
+      {#if $midiThru.active && $thruHeld.size > 0}
+        <div class="keyboard__live" aria-hidden="true">
+          {#each [...$thruHeld] as [note, vel] (note)}
+            {@const band = midiBandClipped(note, note)}
+            {#if band}
+              <span style="left: {band.left.toFixed(2)}%; width: {band.width.toFixed(2)}%; opacity: {(0.45 + (vel / 127) * 0.55).toFixed(2)};"></span>
+            {/if}
+          {/each}
+        </div>
+      {/if}
     </div>
     <div class="kb-pad-r"></div>
   </section>
@@ -930,6 +987,76 @@
     top: 50%; bottom: 0;
     background: var(--zone-bg, var(--rb-yellow));
     opacity: 0.5;
+  }
+
+  /* ---------- Live MIDI visualisation (thru bridge) ---------- */
+  /* Context line in the canvas header: which program the blips are
+     rendered against + the honesty marker (PC sent vs verify). */
+  .live-context {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--grey-dark);
+  }
+  .live-context__dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--rb-yellow);
+    border: 1px solid var(--black);
+    animation: status-pulse 1.2s infinite;
+  }
+  .live-context__ok   { color: var(--rb-green); }
+  .live-context__warn { color: var(--rb-orange); cursor: help; }
+  .live-context__toggle {
+    font: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    border: 1px solid var(--grey-medium);
+    border-radius: 10px;
+    background: transparent;
+    color: inherit;
+    padding: 1px 8px;
+    cursor: pointer;
+  }
+  .live-context__toggle:hover { border-color: var(--black); }
+
+  /* Held-note key lighting: full-height key highlight, opacity set
+     inline from velocity. Sits above the assigned bands. */
+  .keyboard__live {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .keyboard__live :global(span) {
+    position: absolute;
+    top: 0; bottom: 0;
+    background: var(--rb-yellow);
+    mix-blend-mode: multiply;
+  }
+  /* Note blip on the zone canvas: a dot at (note, velocity) that
+     pings outward and fades — Renoise-style hit indicator. --vel
+     (0..1) scales the dot so hard hits read bigger. */
+  .midi-blip {
+    position: absolute;
+    width: calc(8px + 8px * var(--vel, 0.5));
+    height: calc(8px + 8px * var(--vel, 0.5));
+    margin: -6px 0 0 -4px;
+    border-radius: 50%;
+    background: var(--rb-yellow);
+    box-shadow: 0 0 10px rgba(255, 222, 0, 0.8);
+    pointer-events: none;
+    z-index: 3;
+    animation: blip-fade 0.9s ease-out forwards;
+  }
+  @keyframes blip-fade {
+    0%   { opacity: 1; transform: scale(0.6); }
+    35%  { opacity: 0.9; transform: scale(1.15); }
+    100% { opacity: 0; transform: scale(1.5); }
   }
 
   /* ---------- Properties panel ----------

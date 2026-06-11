@@ -69,3 +69,67 @@ func TestRealImageAudioMatchesOracle(t *testing.T) {
 	}
 	t.Logf("verified %d samples of %q byte-exact vs oracle", slen, target.Name)
 }
+
+// TestRealImageFullImport pushes EVERY file on a real disk through
+// the typed parsers — the exact path the GUI's "Open Gotek image"
+// flow uses. Catches real-world program/sample/OVS shapes the
+// synthetic round-trip tests can't anticipate.
+func TestRealImageFullImport(t *testing.T) {
+	imgPath := os.Getenv("REAL_IMG")
+	if imgPath == "" {
+		t.Skip("set REAL_IMG to a real S950 image")
+	}
+	data, err := os.ReadFile(imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nS, nP, nO, nSkipped int
+	for _, e := range im.Entries() {
+		f, err := im.ReadFile(e)
+		if err != nil {
+			t.Fatalf("ReadFile %q: %v", e.Name, err)
+		}
+		switch e.Type {
+		case TypeSample:
+			if e.Compressed {
+				nSkipped++
+				continue
+			}
+			p, w, err := ParseSampleFile(f)
+			if err != nil {
+				t.Errorf("sample %q: %v", e.Name, err)
+				continue
+			}
+			if int(p.TotalWords) != len(w) {
+				t.Errorf("sample %q: header %d words, unpacked %d", e.Name, p.TotalWords, len(w))
+			}
+			nS++
+		case TypeProgram:
+			p, err := ParseProgramFile(f)
+			if err != nil {
+				t.Errorf("program %q: %v", e.Name, err)
+				continue
+			}
+			if len(p.Keygroups) == 0 {
+				t.Errorf("program %q: no keygroups", e.Name)
+			}
+			nP++
+		case TypeOverall:
+			if _, err := ParseOverallFile(f); err != nil {
+				t.Errorf("OVS: %v", err)
+				continue
+			}
+			nO++
+		default:
+			nSkipped++ // FIXUPS etc — expected
+		}
+	}
+	t.Logf("imported %d samples, %d programs, %d OVS; skipped %d", nS, nP, nO, nSkipped)
+	if nS == 0 || nP == 0 {
+		t.Error("expected at least one sample and one program on a library disk")
+	}
+}

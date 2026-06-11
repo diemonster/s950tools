@@ -14,7 +14,7 @@
     isAssignedSample,
     type Program,
   } from '../lib/state/programs';
-  import { ensureProgramLoaded, programJSONToProgram } from '../lib/state/catalog';
+  import { ensureProgramLoaded, programJSONToProgram, markProgramOnDevice } from '../lib/state/catalog';
   import { status as connectionStatus } from '../lib/state/connection';
   import { rangeLabel, midiX, midiW } from '../lib/midi';
   import { get } from 'svelte/store';
@@ -22,7 +22,15 @@
   import * as App from '../../wailsjs/go/main/App';
   import { programToJSON } from '../lib/state/livesync';
   import { samples } from '../lib/state/samples';
-  import { sampleToSampleParams } from '../lib/state/converters';
+  import { sampleToSampleParams, sampleParamsToSample } from '../lib/state/converters';
+  import { wordsToPcm } from '../lib/state/waveformcache';
+  import { planProgramSend, type SendPlan } from '../lib/state/sendplan';
+  import {
+    onProgramSelected, invalidateActivation,
+    lastActivation, followBlockedReason, followEnabled,
+  } from '../lib/state/followsync';
+  import { memoryUsage, totalWords } from '../lib/state/memory';
+  import { baud } from '../lib/state/connection';
 
   // Connection identifier for modal subtitles / log lines. Mirrors
   // the same helper in Sample.svelte: "<port> · Ch <n>" on MIDI,
@@ -42,9 +50,107 @@
   // ---------- Modal flow ----------
   type ModalKind = 'closed' | 'preflight' | 'transfer';
   let modalKind: ModalKind = 'closed';
-  function openSend()     { modalKind = 'preflight'; }
-  function continueSend() { modalKind = 'transfer'; }
   function cancel()       { modalKind = 'closed'; }
+
+  // openSend computes the REAL preflight plan from the stores —
+  // never-overwrite policy, missing-sample detection, free-memory
+  // check — and shows it. Continue is disabled while plan.ok is
+  // false. (This modal used to be static mockup with dead
+  // Overwrite/Use-slot buttons; overwriting occupied S950 slots is
+  // unreliable on hardware, so the planner re-targets instead of
+  // asking.)
+  let sendPlan: SendPlan | null = null;
+  function openSend() {
+    if (!hasProgram) return;
+    sendPlan = planProgramSend(
+      prog,
+      get(programs),
+      get(samples),
+      Math.max(0, get(totalWords) - get(memoryUsage).usedWords),
+      get(baud) || 50000,
+    );
+    modalKind = 'preflight';
+  }
+
+  // continueSend executes the plan: upload each missing referenced
+  // sample to its assigned FREE slot, then write the program to its
+  // resolved slot, then promote everything to 'device' so the lazy
+  // loader / live-sync apply again. Per-step progress renders in
+  // the transfer modal.
+  type SendStep = { label: string; status: 'pending' | 'run' | 'ok' | 'fail' };
+  let sendSteps: SendStep[] = [];
+  type SendPhase = 'sending' | 'done' | 'error';
+  let sendPhase: SendPhase = 'sending';
+  let sendError = '';
+
+  async function continueSend() {
+    if (!sendPlan || !sendPlan.ok) return;
+    const plan = sendPlan;
+    modalKind = 'transfer';
+    sendPhase = 'sending';
+    sendError = '';
+    sendSteps = [
+      ...plan.uploads.map((u) => ({
+        label: `Sample ${u.name} → slot ${padSlot(u.toSlot)}`,
+        status: 'pending' as const,
+      })),
+      { label: `Program ${prog.name || '(unnamed)'} → slot ${padSlot(plan.programSlot)}`, status: 'pending' as const },
+    ];
+    const setStep = (i: number, status: SendStep['status']) => {
+      sendSteps = sendSteps.map((s, j) => (j === i ? { ...s, status } : s));
+    };
+
+    try {
+      for (let i = 0; i < plan.uploads.length; i++) {
+        const u = plan.uploads[i];
+        setStep(i, 'run');
+        const row = get(samples).find((s) => s.slot === u.fromSlot);
+        if (!row || !row.words12) throw new Error(`sample ${u.name} disappeared from the store`);
+        // Reassign the row to its device slot first so the SPRM we
+        // send carries consistent state. The device slot is the
+        // LOWEST free one (the S950 appends there regardless of
+        // what the dump header asks for), which may collide with
+        // another local row in the store — swap the two rows so
+        // both survive with unique slots.
+        if (u.toSlot !== u.fromSlot) {
+          samples.update((xs) => xs.map((s) => {
+            if (s.slot === u.fromSlot) return { ...s, slot: u.toSlot };
+            if (s.slot === u.toSlot) return { ...s, slot: u.fromSlot };
+            return s;
+          }));
+        }
+        const sent = get(samples).find((s) => s.slot === u.toSlot)!;
+        await (App as any).SendSample(u.toSlot, sent.words12, sent.rate, sampleToSampleParams(sent));
+        // Promote: this slot now mirrors the device.
+        samples.update((xs) => xs.map((s) =>
+          s.slot === u.toSlot ? { ...s, source: 'device' as const } : s));
+        setStep(i, 'ok');
+      }
+
+      const progStep = plan.uploads.length;
+      setStep(progStep, 'run');
+      // Apply the slot reassignment (never-overwrite policy) before
+      // encoding.
+      if (plan.slotReassigned && plan.programSlot !== prog.slot) {
+        const oldSlot = prog.slot;
+        programs.update((xs) => xs.map((p) =>
+          p.slot === oldSlot ? { ...p, slot: plan.programSlot } : p));
+        selectedSlot.set(plan.programSlot);
+      }
+      const toSend = get(programs).find((p) => p.slot === plan.programSlot);
+      if (!toSend) throw new Error('program disappeared from the store');
+      await App.SetProgram(plan.programSlot, programToJSON(toSend) as any);
+      markProgramOnDevice(plan.programSlot);
+      setStep(progStep, 'ok');
+      sendPhase = 'done';
+      setSync('synced', 'Synced');
+    } catch (e: any) {
+      sendSteps = sendSteps.map((s) => (s.status === 'run' ? { ...s, status: 'fail' } : s));
+      sendPhase = 'error';
+      sendError = String(e?.message ?? e);
+      setSync('error', 'Send failed');
+    }
+  }
 
   // Get from S950: re-pull the currently selected program from the
   // device. No modal — fast operation; surface progress via the
@@ -79,6 +185,7 @@
   const EMPTY_PROGRAM: Program = {
     slot: -1, name: '', midiProg: 1, respondPC: false,
     keyTilt: 0, positionalXfade: false, keygroups: [],
+    source: 'local',
   };
   $: prog = $selectedProgram ?? EMPTY_PROGRAM;
   $: hasProgram = !!$selectedProgram;
@@ -116,6 +223,71 @@
       setSync('error', 'Save failed: ' + String(e?.message ?? e));
     }
   }
+  // Open Gotek image: load a floppy image's programs + samples into
+  // the app as LOCAL entries (they're on a disk file, not on the
+  // device — Send/Apply commits them to hardware, or Export writes
+  // them back out). Free slots are assigned client-side; capacity
+  // is pre-checked so a too-full session fails before any store
+  // mutation instead of half-loading.
+  let importBusy = false;
+  async function openGotekImage() {
+    if (importBusy) return;
+    importBusy = true;
+    try {
+      const res = await (App as any).OpenGotekImage();
+      if (!res) return; // user cancelled
+      const sampleRows = get(samples);
+      const progRows = get(programs);
+      const usedSampleSlots = new Set(sampleRows.map((s) => s.slot));
+      const usedProgSlots = new Set(progRows.map((p) => p.slot));
+      const freeSamples: number[] = [];
+      const freeProgs: number[] = [];
+      for (let i = 0; i < 100; i++) {
+        if (!usedSampleSlots.has(i)) freeSamples.push(i);
+        if (!usedProgSlots.has(i)) freeProgs.push(i);
+      }
+      const nS = (res.samples ?? []).length;
+      const nP = (res.programs ?? []).length;
+      if (nS > freeSamples.length || nP > freeProgs.length) {
+        setSync('error',
+          `Image needs ${nS} sample + ${nP} program slots; only ${freeSamples.length}/${freeProgs.length} free`);
+        return;
+      }
+
+      const newSamples = (res.samples ?? []).map((imp: any, i: number) => {
+        const slot = freeSamples[i];
+        const row = sampleParamsToSample(imp.params, slot);
+        return {
+          ...row,
+          words12: imp.words as number[],
+          pcm: wordsToPcm(imp.words as number[]),
+          // On a disk file, not on the device.
+          source: 'local' as const,
+          originalSource: 'local' as const,
+        };
+      });
+      const newProgs = (res.programs ?? []).map((pj: any, i: number) =>
+        programJSONToProgram(pj, freeProgs[i], 'local'));
+
+      if (newSamples.length > 0) {
+        samples.update((xs) => [...xs, ...newSamples].sort((a, b) => a.slot - b.slot));
+      }
+      if (newProgs.length > 0) {
+        programs.update((xs) => [...xs, ...newProgs].sort((a, b) => a.slot - b.slot));
+        selectedSlot.set(newProgs[0].slot);
+        selectedKeygroupN.set(1);
+      }
+      const skipped = (res.skipped ?? []).length;
+      // Keep this short — it renders in the topbar status chip.
+      setSync('dirty',
+        `Loaded ${nS} samples, ${nP} programs` + (skipped ? ` (${skipped} skipped)` : ''));
+    } catch (e: any) {
+      setSync('error', 'Open image failed: ' + String(e?.message ?? e));
+    } finally {
+      importBusy = false;
+    }
+  }
+
   // Export Gotek image: snapshot ALL current programs + every
   // sample that has host audio into a bootable 800 KB floppy image.
   // Mirrors the device's own "save entire memory" mental model —
@@ -145,9 +317,10 @@
       const res = await (App as any).ExportGotekImage(req);
       if (!res) return; // user cancelled the dialog
       const skipped = get(samples).length - sampleRows.length;
+      // Keep this short — it renders in the topbar status chip.
       setSync('synced',
-        `Exported ${res.files} files (${res.freeBlocks} KB free)` +
-        (skipped > 0 ? ` · ${skipped} sample(s) without host audio skipped` : ''));
+        `Exported ${res.files} files, ${res.freeBlocks} KB free` +
+        (skipped > 0 ? ` (${skipped} skipped)` : ''));
     } catch (e: any) {
       setSync('error', 'Export failed: ' + String(e?.message ?? e));
     } finally {
@@ -165,7 +338,7 @@
         setSync('error', 'All 100 program slots are occupied');
         return;
       }
-      const loaded = programJSONToProgram(json as any, slot);
+      const loaded = programJSONToProgram(json as any, slot, 'local');
       programs.update((xs) => [...xs, loaded].sort((a, b) => a.slot - b.slot));
       selectedSlot.set(slot);
       selectedKeygroupN.set(1);
@@ -196,6 +369,9 @@
     dup.slot = slot;
     // Prepend "DUP " and clip to the S950's 10-char name limit.
     dup.name = ('DUP ' + (src.name ?? '')).slice(0, 10);
+    // The copy exists only in the app until explicitly Sent — even
+    // when duplicating a device program, the new slot is local.
+    dup.source = 'local';
     programs.update((xs) => [...xs, dup].sort((a, b) => a.slot - b.slot));
     selectedSlot.set(slot);
     selectedKeygroupN.set(1);
@@ -217,8 +393,8 @@
         {#each $programs as p (p.slot)}
           <div
             class="program {p.slot === $selectedSlot ? 'selected' : ''}"
-            on:click={() => selectedSlot.set(p.slot)}
-            on:keydown={(e) => e.key === 'Enter' && selectedSlot.set(p.slot)}
+            on:click={() => { selectedSlot.set(p.slot); onProgramSelected(p.slot); }}
+            on:keydown={(e) => { if (e.key === 'Enter') { selectedSlot.set(p.slot); onProgramSelected(p.slot); } }}
             role="button"
             tabindex="0">
             <span class="program__slot">{padSlot(p.slot)}</span>
@@ -263,6 +439,22 @@
         <div class="card__subtitle">
           slot {padSlot(prog.slot)} · {prog.keygroups.length} keygroups
         </div>
+        <!-- Follow-selection feedback. Action language only: a green
+             "sent PC n" states what we DID; the S950 can't confirm
+             what it's playing, so we never claim "synced". Blocked
+             reasons land here, next to the MIDI prog # / Respond to
+             PC fields that usually cause (and fix) them. -->
+        {#if $lastActivation?.slot === prog.slot}
+          <div
+            class="follow-note follow-note--ok"
+            title="Selecting this program sent MIDI Program Change {$lastActivation.midiProg} (channel {$lastActivation.channel + 1}) to the S950. The hardware can't confirm the switch — your ears do.">
+            → sent PC {$lastActivation.midiProg}
+          </div>
+        {:else if $followEnabled && $followBlockedReason}
+          <div class="follow-note follow-note--warn" title={$followBlockedReason}>
+            ⚠ follow: {$followBlockedReason}
+          </div>
+        {/if}
       </div>
 
       <div class="row">
@@ -285,18 +477,28 @@
       </div>
       <div class="row">
         <span class="row__label">MIDI prog #</span>
+        <!-- Raw wire value 0..127, matching the PC data byte the
+             device compares against (hardware-verified: programs
+             holding 0 respond to C0 00). The old 1..128 range made
+             real device programs at #0 unrepresentable. -->
         <NumField
           value={prog.midiProg}
-          min={1} max={128}
+          min={0} max={127}
           format={(v) => v.toString().padStart(3, '0')}
-          on:change={(e) => selectedProgram.update({ midiProg: e.detail })} />
+          on:change={(e) => {
+            selectedProgram.update({ midiProg: e.detail });
+            invalidateActivation(prog.slot);
+          }} />
       </div>
       <div class="row">
         <span class="row__label">Respond to PC</span>
         <button
           type="button"
           class="toggle {prog.respondPC ? 'on' : ''}"
-          on:click={() => selectedProgram.update({ respondPC: !prog.respondPC })}>
+          on:click={() => {
+            selectedProgram.update({ respondPC: !prog.respondPC });
+            invalidateActivation(prog.slot);
+          }}>
           {prog.respondPC ? 'Enabled' : 'Disabled'}
         </button>
       </div>
@@ -395,30 +597,47 @@
         <div class="card__title">Device</div>
         <div class="card__subtitle">{connectionLabel}</div>
       </div>
-      <div class="actions">
-        <div class="actions__group">
-          <button type="button" class="btn" on:click={getFromDevice}>Get from S950</button>
-          <button type="button" class="btn btn--primary" on:click={openSend}>Send to S950</button>
+      <!-- Two deliberate rows instead of one wrapping flex line:
+           device + program lifecycle on top, file I/O below. Keeps
+           the groups aligned at any width instead of wrapping
+           mid-row with dangling separators. -->
+      <div class="actions actions--rows">
+        <div class="actions__row">
+          <div class="actions__group">
+            <button type="button" class="btn" on:click={getFromDevice}>Get from S950</button>
+            <button type="button" class="btn btn--primary" on:click={openSend}>Send to S950</button>
+          </div>
+          <div class="actions__sep"></div>
+          <div class="actions__group">
+            <button type="button" class="btn" on:click={newProgram}>New program</button>
+            <button type="button" class="btn" on:click={duplicateProgram} disabled={!hasProgram}>Duplicate</button>
+          </div>
         </div>
-        <div class="actions__sep"></div>
-        <div class="actions__group">
-          <button type="button" class="btn" on:click={openProgramJSON}>Open .json...</button>
-          <button type="button" class="btn" on:click={saveProgramJSON} disabled={!hasProgram}>Save .json...</button>
-          <button
-            type="button"
-            class="btn"
-            on:click={exportGotekImage}
-            disabled={exportBusy}
-            title="Write all current programs + samples (with host audio) as a bootable S950 floppy image for a Gotek/FlashFloppy drive. The image's settings file boots the sampler with controller-select on RS-232C.">
-            {exportBusy ? 'Exporting…' : 'Export Gotek .img...'}
-          </button>
+        <div class="actions__row">
+          <div class="actions__group">
+            <button type="button" class="btn" on:click={openProgramJSON}>Open .json...</button>
+            <button type="button" class="btn" on:click={saveProgramJSON} disabled={!hasProgram}>Save .json...</button>
+          </div>
+          <div class="actions__sep"></div>
+          <div class="actions__group">
+            <button
+              type="button"
+              class="btn"
+              on:click={openGotekImage}
+              disabled={importBusy}
+              title="Load a Gotek/FlashFloppy S950 image's programs + samples into the app as local entries.">
+              {importBusy ? 'Opening…' : 'Open Gotek .img...'}
+            </button>
+            <button
+              type="button"
+              class="btn"
+              on:click={exportGotekImage}
+              disabled={exportBusy}
+              title="Write all current programs + samples (with host audio) as a bootable S950 floppy image for a Gotek/FlashFloppy drive. The image's settings file boots the sampler with controller-select on RS-232C.">
+              {exportBusy ? 'Exporting…' : 'Export Gotek .img...'}
+            </button>
+          </div>
         </div>
-        <div class="actions__sep"></div>
-        <div class="actions__group">
-          <button type="button" class="btn" on:click={newProgram}>New program</button>
-          <button type="button" class="btn" on:click={duplicateProgram} disabled={!hasProgram}>Duplicate</button>
-        </div>
-        <span class="hint">last synced 2 min ago</span>
       </div>
     </section>
     {/if}
@@ -445,54 +664,35 @@
         <div class="modal__route">{connectionLabel}</div>
       </header>
       <div class="modal__body">
-        <ul class="preflight">
-          <li class="preflight__item preflight__item--ok">
-            <span class="preflight__icon">✓</span>
-            <div class="preflight__body">
-              <span class="preflight__title">Connection</span>
-              <span class="preflight__detail">{connectionLabel} · S950 responded to catalog request</span>
-            </div>
-          </li>
-          <li class="preflight__item preflight__item--ok">
-            <span class="preflight__icon">✓</span>
-            <div class="preflight__body">
-              <span class="preflight__title">Keygroup count</span>
-              <span class="preflight__detail">{prog.keygroups.length} keygroups · max 31</span>
-            </div>
-          </li>
-          <li class="preflight__item preflight__item--ok">
-            <span class="preflight__icon">✓</span>
-            <div class="preflight__body">
-              <span class="preflight__title">Free sample memory</span>
-              <span class="preflight__detail">52,400 / 475,020 words needed · 422,620 free after upload</span>
-            </div>
-          </li>
-          <li class="preflight__item preflight__item--warn">
-            <span class="preflight__icon">⚠</span>
-            <div class="preflight__body">
-              <span class="preflight__title">Slot {padSlot(prog.slot)} occupied (OLD KIT)</span>
-              <span class="preflight__detail">Overwriting will replace the existing program on the device.</span>
-              <div class="preflight__action">
-                <button type="button" class="btn">Overwrite</button>
-                <button type="button" class="btn">Use slot 07 (empty)</button>
-              </div>
-            </div>
-          </li>
-          <li class="preflight__item preflight__item--warn">
-            <span class="preflight__icon">⚠</span>
-            <div class="preflight__body">
-              <span class="preflight__title">Sample KICK referenced elsewhere</span>
-              <span class="preflight__detail">PIANO (slot 05) uses this sample. Overwriting it will change PIANO's sound.</span>
-            </div>
-          </li>
-        </ul>
-        <div class="preflight__estimate">
-          Estimated transfer: 4 samples · ~3m 04s
-        </div>
+        {#if sendPlan}
+          <ul class="preflight">
+            {#each sendPlan.items as item}
+              <li class="preflight__item preflight__item--{item.kind === 'error' ? 'error' : item.kind}">
+                <span class="preflight__icon">{item.kind === 'ok' ? '✓' : item.kind === 'warn' ? '⚠' : '✕'}</span>
+                <div class="preflight__body">
+                  <span class="preflight__title">{item.title}</span>
+                  <span class="preflight__detail">{item.detail}</span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+          <div class="preflight__estimate">
+            {#if sendPlan.uploads.length > 0}
+              Estimated transfer: {sendPlan.uploads.length} sample{sendPlan.uploads.length === 1 ? '' : 's'}
+              + program · ~{Math.floor(sendPlan.estSeconds / 60)}m {String(sendPlan.estSeconds % 60).padStart(2, '0')}s
+            {:else}
+              Estimated transfer: program only · a few seconds
+            {/if}
+          </div>
+        {/if}
       </div>
       <footer class="modal__foot">
         <button type="button" class="btn" on:click={cancel}>Cancel</button>
-        <button type="button" class="btn btn--primary" on:click={continueSend}>Continue ▶</button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          disabled={!sendPlan?.ok}
+          on:click={continueSend}>Continue ▶</button>
       </footer>
     </div>
   </div>
@@ -500,32 +700,35 @@
   <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
     <div class="modal">
       <header class="modal__head">
-        <h2 class="modal__title">Sending <strong>{prog.name}</strong> to S950</h2>
+        <h2 class="modal__title">
+          {#if sendPhase === 'done'}Sent <strong>{prog.name}</strong> to S950
+          {:else if sendPhase === 'error'}Send failed
+          {:else}Sending <strong>{prog.name}</strong> to S950
+          {/if}
+        </h2>
         <div class="modal__route">{connectionLabel}</div>
       </header>
       <div class="modal__body">
-        <div class="modal__step">
-          Step 2 of 4 · Uploading sample
-          <strong>SNARE → slot 03 (12.4 / 24.1 KB)</strong>
-        </div>
-        <div class="progress">
-          <div class="progress__bar" style="width: 51%;"></div>
-          <div class="progress__label">51%</div>
-        </div>
-        <div class="modal__times">
-          <span>Elapsed 1m 12s</span>
-          <span>~2m 18s remaining</span>
-        </div>
         <div class="log">
-          <div class="log__row ok">✓ Connected to S950 on {connectionLabel}</div>
-          <div class="log__row ok">✓ Sample KICK uploaded to slot 02 (1m 04s)</div>
-          <div class="log__row run">▶ Sample SNARE in progress</div>
-          <div class="log__row pending">· Sample RIM pending</div>
-          <div class="log__row pending">· Program {prog.name} pending</div>
+          {#each sendSteps as step}
+            <div class="log__row {step.status === 'ok' ? 'ok' : step.status === 'run' ? 'run' : step.status === 'fail' ? 'fail' : 'pending'}">
+              {step.status === 'ok' ? '✓' : step.status === 'run' ? '▶' : step.status === 'fail' ? '✕' : '·'}
+              {step.label}
+            </div>
+          {/each}
         </div>
+        {#if sendPhase === 'done'}
+          <div class="modal__step">✓ Everything landed — these slots now mirror the device.</div>
+        {:else if sendPhase === 'error'}
+          <div class="modal__step modal__step--error">{sendError || 'Unknown error'}</div>
+        {/if}
       </div>
       <footer class="modal__foot">
-        <button type="button" class="btn" on:click={cancel}>Cancel transfer</button>
+        {#if sendPhase === 'sending'}
+          <span class="modal__waitnote">do not close · in progress</span>
+        {:else}
+          <button type="button" class="btn btn--primary" on:click={cancel}>Close</button>
+        {/if}
       </footer>
     </div>
   </div>
@@ -534,6 +737,23 @@
 <style>
   /* Page-specific only — shared shell + cards + form + modals come
      from shared.css. */
+  /* Follow-selection feedback in the identity card head. Matches
+     .card__subtitle's mono/uppercase look; pushed to the right edge
+     so it reads as status, not part of the slot/keygroup line. */
+  .follow-note {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: help;
+  }
+  .follow-note--ok   { color: var(--rb-green); }
+  .follow-note--warn { color: var(--rb-orange); }
   .main {
     grid-area: main;
     overflow: auto;
@@ -675,25 +895,24 @@
     gap: 8px;
     flex-wrap: wrap;
   }
+  /* Stacked layout: each .actions__row is one aligned line of
+     groups. Replaces a single wrapping line whose breaks landed
+     mid-group with dangling separators. */
+  .actions--rows {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .actions__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   .actions__group { display: inline-flex; gap: 6px; }
   .actions__sep {
     width: 1px;
     height: 24px;
     background: var(--grey-medium);
     margin: 0 4px;
-  }
-  .hint {
-    /* Always land on its own row at the right edge instead of fighting
-       for inline space with the action buttons — margin-left: auto
-       used to push it solo to a wrapped row anyway, which read as
-       broken. Pin it explicitly so the layout intent is clear. */
-    flex-basis: 100%;
-    text-align: right;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--grey-dark);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
   }
 
   details.advanced { margin-top: 8px; }

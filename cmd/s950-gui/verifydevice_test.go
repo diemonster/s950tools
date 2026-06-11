@@ -28,14 +28,15 @@ func TestVerifyDevice_Errors_WhenDeviceSilent(t *testing.T) {
 }
 
 func TestVerifyDevice_Succeeds_WhenDeviceResponds(t *testing.T) {
-	// Any inbound SysEx envelope counts as proof-of-life — Ping
-	// deliberately doesn't validate the contents (see the comment
-	// on Device.Ping). The shape here is the device-inquiry reply
-	// from a non-AKAI device; even that is enough.
-	reply := []byte{0xF0, 0x7E, 0x7F, 0xF7}
+	// Only an AKAI exclusive (F0 47 …) counts as the pong. The old
+	// "any SysEx counts" contract was disproven by a hardware crash:
+	// the S950 streams ACK handshakes (F0 7E 7F F7) during open-loop
+	// dumps, and a stale ACK satisfying the next upload's ping let a
+	// second dump start while the device was mid-bookkeeping.
+	reply := []byte{0xF0, 0x47, 0x00, 0x0B, 0x40, 0x00, 0x00, 0xF7}
 	app, _ := newAppWithFake(reply)
 	if err := app.VerifyDevice(); err != nil {
-		t.Fatalf("VerifyDevice should succeed when device replies; got %v", err)
+		t.Fatalf("VerifyDevice should succeed on an AKAI reply; got %v", err)
 	}
 }
 
