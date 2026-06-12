@@ -79,7 +79,12 @@ jobs:
       # Secrets aren't allowed directly in step `if:`; surfacing the
       # presence check as env is the standard workaround.
       HAVE_MAC_SIGNING: ${{ secrets.MACOS_CERTIFICATE != '' }}
+    outputs:
+      # Lets the smoke job assert signatures only when they exist.
+      signed: ${{ steps.sig.outputs.signed }}
     steps:
+      - id: sig
+        run: echo "signed=$HAVE_MAC_SIGNING" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -150,7 +155,9 @@ jobs:
 
       - name: Package
         run: |
-          STAGE=/tmp/stage && mkdir -p "$STAGE"
+          # The zip's top-level dir is what users see after extract —
+          # name it for the app, not the build step.
+          STAGE=/tmp/s950-tools && mkdir -p "$STAGE"
           cp -R cmd/s950-gui/build/bin/s950-gui.app "$STAGE/"
           cp dist/s950-tools "$STAGE/"
           ditto -c -k --keepParent "$STAGE" "s950-tools_${VERSION}_macos_arm64.zip"
@@ -249,13 +256,146 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------
+  # Artifact smoke tests: each job downloads the archive a user
+  # would, extracts it the way a user would, and runs the binaries.
+  # Deliberately separate from the build jobs — this is what catches
+  # packaging bugs (lost exec bits, signature-stripping zips, deps
+  # that existed on the build runner but not on a clean box).
+  # testdata/smoke.img is a synthetic fixture (our own builders).
+  # ---------------------------------------------------------------
+  smoke-macos:
+    runs-on: macos-14
+    needs: build-macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+      - name: Extract like a user
+        run: ditto -x -k s950-tools_*_macos_arm64.zip extracted
+      - name: CLI smoke
+        run: |
+          extracted/s950-tools/s950-tools --help > /dev/null
+          extracted/s950-tools/s950-tools image-inspect testdata/smoke.img
+      - name: Signature + notarization assertions
+        if: needs.build-macos.outputs.signed == 'true'
+        run: |
+          codesign --verify --deep --strict extracted/s950-tools/s950-gui.app
+          spctl --assess --type execute -vv extracted/s950-tools/s950-gui.app
+          xcrun stapler validate extracted/s950-tools/s950-gui.app
+          codesign --verify --strict extracted/s950-tools/s950-tools
+
+  smoke-windows:
+    runs-on: windows-latest
+    needs: build-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+      - name: Extract + CLI smoke
+        shell: bash
+        run: |
+          7z x s950-tools_*_windows_amd64.zip -oextracted
+          extracted/s950-tools.exe --help > /dev/null
+          extracted/s950-tools.exe image-inspect testdata/smoke.img
+
+  smoke-linux:
+    runs-on: ubuntu-latest
+    needs: build-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+      - name: Install runtime deps (what a user's desktop would have)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-0 libwebkit2gtk-4.1-0 libasound2t64 \
+            xvfb dbus-x11
+      - name: Extract + CLI smoke
+        run: |
+          mkdir extracted && tar -C extracted -xzf s950-tools_*_linux_amd64.tar.gz
+          extracted/s950-tools --help > /dev/null
+          extracted/s950-tools image-inspect testdata/smoke.img
+      - name: GUI links cleanly
+        run: |
+          ldd extracted/s950-gui | tee /tmp/ldd.out
+          ! grep "not found" /tmp/ldd.out
+      # Launch smoke under a virtual display: surviving the timeout
+      # (124) or exiting on SIGTERM (143/0) means the app booted its
+      # webview without crashing. Informational until it's proven
+      # stable across a few runs — flip continue-on-error off then.
+      - name: GUI launch smoke (xvfb)
+        continue-on-error: true
+        run: |
+          set +e
+          timeout --signal=TERM 10 dbus-run-session -- xvfb-run -a extracted/s950-gui
+          rc=$?
+          echo "exit code: $rc"
+          [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 0 ]
+
+  # ---------------------------------------------------------------
+  # Linux distro matrix: the same binary against different userlands
+  # via Docker (containers share the kernel, so this is Linux-only —
+  # it can't validate Windows/macOS). Catches glibc-floor breaks and
+  # runtime package naming drift. The older distros are canaries
+  # (continue-on-error): the binary is built on ubuntu-24.04 / glibc
+  # 2.39, so they're EXPECTED to fail until the support floor is
+  # deliberately lowered (build in an older container to fix).
+  # ---------------------------------------------------------------
+  smoke-linux-distros:
+    runs-on: ubuntu-latest
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The ALSA runtime package was renamed libasound2 →
+          # libasound2t64 in the time64 transition; the fallback
+          # install covers both spellings per distro.
+          - image: ubuntu:24.04
+            setup: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 && (apt-get install -y --no-install-recommends libasound2t64 || apt-get install -y --no-install-recommends libasound2)
+            required: true
+          - image: debian:13
+            setup: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 && (apt-get install -y --no-install-recommends libasound2t64 || apt-get install -y --no-install-recommends libasound2)
+            required: true
+          - image: fedora:latest
+            setup: dnf install -y alsa-lib gtk3 webkit2gtk4.1
+            required: true
+          - image: ubuntu:22.04
+            setup: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 libasound2
+            required: false
+          - image: debian:12
+            setup: apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 libasound2
+            required: false
+    continue-on-error: ${{ !matrix.required }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+      - name: Extract
+        run: mkdir extracted && tar -C extracted -xzf s950-tools_*_linux_amd64.tar.gz
+      - name: CLI + linkage smoke in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work ${{ matrix.image }} bash -ec '
+            ${{ matrix.setup }}
+            extracted/s950-tools --help > /dev/null
+            extracted/s950-tools image-inspect testdata/smoke.img
+            ldd extracted/s950-gui | tee /tmp/ldd.out
+            ! grep "not found" /tmp/ldd.out
+          '
+
+  # ---------------------------------------------------------------
   # Publish: one release with every platform's archive + checksums.
   # A single job (rather than per-build release steps) avoids three
   # concurrent create-release races. Skipped on workflow_dispatch.
   # ---------------------------------------------------------------
   release:
     runs-on: ubuntu-latest
-    needs: [build-macos, build-windows, build-linux]
+    needs: [smoke-macos, smoke-windows, smoke-linux, smoke-linux-distros]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v4

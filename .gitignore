@@ -33,3 +33,7 @@ go.work.sum
 *.IMG
 *.hfe
 *.HFE
+# Exception: the release smoke-test fixture is SYNTHETIC (generated
+# by our own builders — no library content), so the copyright reason
+# for the blanket ignore doesn't apply to it.
+!/testdata/smoke.img
