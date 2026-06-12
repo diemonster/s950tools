@@ -6,11 +6,15 @@
   import AdsrEditor from '../lib/AdsrEditor.svelte';
   import { setSync } from '../lib/sync';
   import {
+    programs,
+    selectedSlot,
     selectedProgram,
     selectedKeygroupN,
     selectedKeygroup,
     newKeygroup,
     isAssignedSample,
+    keygroupsUsingSample,
+    nextKeygroupN,
     MAX_KEYGROUPS,
     type Keygroup,
     type Program,
@@ -19,10 +23,14 @@
   import {
     samples,
     selectedSampleSlot,
+    type Sample,
   } from '../lib/state/samples';
   import { rangeLabel, noteName, midiX, midiW, midiBandClipped } from '../lib/midi';
   import { midiThru, thruHeld, thruBlips } from '../lib/state/midithru';
-  import { followEnabled, lastActivation, followBlockedReason } from '../lib/state/followsync';
+  import {
+    onProgramSelected, followEnabled, lastActivation, followBlockedReason,
+  } from '../lib/state/followsync';
+  import { imgMode } from '../lib/state/imgmode';
   import { onMount } from 'svelte';
 
   // Keygroup tab live-syncs (~400ms debounce in real impl). Stub
@@ -91,6 +99,52 @@
     if (!e.dataTransfer) return;
     e.dataTransfer.setData(DT_TYPE, name);
     e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  // ---------- Program context in the sidebar ----------
+  // The sidebar is rooted at the SELECTED PROGRAM, with the sample
+  // list as its descendants: samples the program plays first, the
+  // rest of the bank below. The picker doubles as a program switcher
+  // so you don't have to hop back to the Program tab; switching here
+  // is the same user gesture as a sidebar click there, so it also
+  // runs follow-selection (outside IMG editor mode).
+  $: programOptions = $programs.map((p) => ({
+    label: p.name?.trim() || '(unnamed)',
+    value: String(p.slot),
+    meta: p.slot.toString().padStart(2, '0'),
+  }));
+  function onPickProgram(slotStr: string) {
+    const slot = Number(slotStr);
+    if (!Number.isFinite(slot)) return;
+    selectedSlot.set(slot);
+    if (!$imgMode) onProgramSelected(slot);
+  }
+  $: sampleGroups = (() => {
+    const inProg: Sample[] = [];
+    const rest: Sample[] = [];
+    for (const s of $samples) {
+      (keygroupsUsingSample(prog.keygroups, s.name).length > 0 ? inProg : rest).push(s);
+    }
+    const groups: Array<{ label: string; rows: Sample[] }> = [];
+    if (inProg.length > 0) {
+      groups.push({ label: `in ${prog.name?.trim() || 'program'}`, rows: inProg });
+    }
+    if (rest.length > 0) {
+      groups.push({ label: inProg.length > 0 ? 'other samples' : 'samples', rows: rest });
+    }
+    return groups;
+  })();
+
+  // ---------- Sample → keygroup correlation ----------
+  // Clicking a sample also jumps the keygroup selection to the zone
+  // that plays it, so the right-side params always show where the
+  // sample lives. A sample can be bound to several zones (and to
+  // both layers); repeated clicks cycle through every zone using it.
+  // Samples no zone uses just select normally.
+  function selectSample(slot: number, name: string) {
+    selectedSampleSlot.set(slot);
+    const next = nextKeygroupN(keygroupsUsingSample(prog.keygroups, name), $selectedKeygroupN);
+    if (next !== null) selectedKeygroupN.set(next);
   }
   function onZoneDragOver(e: DragEvent) {
     if (e.dataTransfer?.types.includes(DT_TYPE)) {
@@ -256,23 +310,47 @@
   <aside class="sidebar">
     <div class="sidebar__panel">
       <div class="sidebar__head">
-        <div class="sidebar__title">Samples</div>
-        <div class="sidebar__count">{$samples.length} / 100</div>
+        <div class="sidebar__title">Program</div>
+        <div class="sidebar__count">{$samples.length} smp</div>
+      </div>
+      <!-- Root node of the sidebar tree: the program these zones
+           belong to. Doubles as a switcher. -->
+      <div class="program-pick">
+        <Combobox
+          value={String(prog.slot)}
+          options={programOptions}
+          placeholder="(no program)"
+          allowNone={false}
+          on:change={(e) => onPickProgram(e.detail)} />
       </div>
       <div class="sample-list">
-        {#each $samples as smp (smp.slot)}
-          <div
-            class="sample {smp.slot === $selectedSampleSlot ? 'selected' : ''}"
-            draggable="true"
-            on:dragstart={(e) => onSampleDragStart(e, smp.name)}
-            on:click={() => selectedSampleSlot.set(smp.slot)}
-            on:keydown={(e) => e.key === 'Enter' && selectedSampleSlot.set(smp.slot)}
-            role="button"
-            tabindex="0">
-            <span class="sample__slot">{smp.slot.toString().padStart(2, '0')}</span>
-            <span class="sample__name">{smp.name}</span>
-            <span class="sample__rate">{Math.round(smp.rate / 1000)}k</span>
-          </div>
+        {#each sampleGroups as group (group.label)}
+          <div class="sample-group">{group.label} · {group.rows.length}</div>
+          {#each group.rows as smp (smp.slot)}
+            {@const users = keygroupsUsingSample(prog.keygroups, smp.name)}
+            <div
+              class="sample {smp.slot === $selectedSampleSlot ? 'selected' : ''}"
+              class:sample--inzone={hasKeygroup && users.some((k) => k.n === kg.n)}
+              draggable="true"
+              on:dragstart={(e) => onSampleDragStart(e, smp.name)}
+              on:click={() => selectSample(smp.slot, smp.name)}
+              on:keydown={(e) => e.key === 'Enter' && selectSample(smp.slot, smp.name)}
+              role="button"
+              tabindex="0">
+              <span class="sample__slot">{smp.slot.toString().padStart(2, '0')}</span>
+              <span class="sample__name">{smp.name}</span>
+              {#if users.length > 0}
+                <!-- Zone-colored dot ties the row to its zone on the
+                     grid; clicking cycles the selection through every
+                     zone that plays this sample. -->
+                <span
+                  class="sample__zone-dot"
+                  style="--dot: var({users[0].color});"
+                  title={`played by zone ${users.map((k) => k.n).join(', ')} — click to select${users.length > 1 ? ' (click again for the next zone)' : ''}`}></span>
+              {/if}
+              <span class="sample__rate">{Math.round(smp.rate / 1000)}k</span>
+            </div>
+          {/each}
         {/each}
       </div>
       <div class="sidebar__hint">
@@ -987,6 +1065,46 @@
     top: 50%; bottom: 0;
     background: var(--zone-bg, var(--rb-yellow));
     opacity: 0.5;
+  }
+
+  /* Program root node in the sidebar — the picker sits between the
+     panel head and the sample list, framed like a tree root the
+     grouped samples descend from. */
+  .program-pick {
+    padding: 10px 12px;
+    border-bottom: var(--bw) solid var(--black);
+  }
+  /* Group labels inside the sample list ("in TECHNO 2 · 9" /
+     "other samples · 7") — same small-mono voice as the panel
+     head, indenting nothing so slot numbers stay aligned. */
+  .sample-group {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--grey-dark);
+    padding: 8px 8px 4px;
+  }
+  .sample-group:not(:first-child) {
+    margin-top: 6px;
+    border-top: 1px dashed var(--grey-medium);
+  }
+
+  /* Sample ↔ zone correlation. The dot carries the zone's grid
+     color (first zone using the sample), so the sidebar reads
+     against the canvas at a glance; rows playing in the SELECTED
+     zone get a ring on the dot. */
+  .sample__zone-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--dot);
+    border: 1px solid var(--black);
+    justify-self: end;
+  }
+  .sample--inzone .sample__zone-dot {
+    box-shadow: 0 0 0 2px var(--rb-yellow);
   }
 
   /* ---------- Live MIDI visualisation (thru bridge) ---------- */

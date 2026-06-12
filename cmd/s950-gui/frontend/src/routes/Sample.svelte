@@ -33,6 +33,7 @@
   import { ensureSampleLoaded, refreshCatalog, revertSampleToDevice } from '../lib/state/catalog';
   import { scanMemory } from '../lib/state/memory';
   import { transportKind, status as connectionStatus } from '../lib/state/connection';
+  import { imgMode } from '../lib/state/imgmode';
   import { sampleToSampleParams } from '../lib/state/converters';
   import { programs } from '../lib/state/programs';
 
@@ -2267,8 +2268,10 @@
             <button
               type="button"
               class="btn"
-              disabled={smp.source === 'local' || copyPhase === 'copying'}
-              title={smp.source === 'local'
+              disabled={$imgMode || smp.source === 'local' || copyPhase === 'copying'}
+              title={$imgMode
+                ? 'IMG editor mode — device connection is disabled'
+                : smp.source === 'local'
                 ? 'Select an on-device sample to copy its audio from the S950'
                 : 'Pull SDATA for this slot from the S950 and cache it on disk'}
               on:click={copyFromDevice}>Copy from S950</button>
@@ -2292,8 +2295,10 @@
             <button
               type="button"
               class="btn btn--primary"
-              disabled={!smp.words12 || smp.words12.length === 0 || sendPhase === 'sending'}
-              title={!smp.words12 || smp.words12.length === 0
+              disabled={$imgMode || !smp.words12 || smp.words12.length === 0 || sendPhase === 'sending'}
+              title={$imgMode
+                ? 'IMG editor mode — device connection is disabled'
+                : !smp.words12 || smp.words12.length === 0
                 ? 'No host-side audio to upload — re-import the sample'
                 : 'Upload audio + SPRM to the chosen slot on the S950'}
               on:click={sendToDevice}>Send to S950</button>
@@ -2301,11 +2306,18 @@
             <button
               type="button"
               class="btn"
-              disabled={sendPhase === 'sending'}
-              title="Write the edited parameters back to this slot's SPRM block (audio unchanged)"
+              disabled={$imgMode || sendPhase === 'sending'}
+              title={$imgMode
+                ? 'IMG editor mode — device connection is disabled'
+                : 'Write the edited parameters back to this slot\'s SPRM block (audio unchanged)'}
               on:click={sendSPRMToDevice}>Send SPRM to S950</button>
           {/if}
-          <button type="button" class="btn" on:click={getSPRMFromDevice}>Get SPRM from S950</button>
+          <button
+            type="button"
+            class="btn"
+            disabled={$imgMode}
+            title={$imgMode ? 'IMG editor mode — device connection is disabled' : undefined}
+            on:click={getSPRMFromDevice}>Get SPRM from S950</button>
         </div>
       </div>
     </section>

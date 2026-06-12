@@ -90,10 +90,6 @@ export function OpenGotekImage() {
   return window['go']['main']['App']['OpenGotekImage']();
 }
 
-export function OpenProgramJSON() {
-  return window['go']['main']['App']['OpenProgramJSON']();
-}
-
 export function PreviewMidi(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['PreviewMidi'](arg1, arg2, arg3, arg4);
 }
@@ -108,10 +104,6 @@ export function PutCachedWaveform(arg1, arg2, arg3, arg4, arg5) {
 
 export function ResampleSample(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResampleSample'](arg1, arg2, arg3);
-}
-
-export function SaveProgramJSON(arg1, arg2) {
-  return window['go']['main']['App']['SaveProgramJSON'](arg1, arg2);
 }
 
 export function SaveSampleWav(arg1, arg2, arg3) {

@@ -34,6 +34,10 @@ type ExportImageRequest struct {
 	// ForceRS232 patches the OVERALL SE file's controller-select to
 	// RS-232C (the boot-default payload). Default-on in the UI.
 	ForceRS232 bool `json:"forceRS232"`
+	// SavePath, when non-empty, writes straight to that file with no
+	// dialog — the IMG-editor "Save" (as opposed to "Save as…") for
+	// re-saving the image the user opened. Empty keeps the prompt.
+	SavePath string `json:"savePath"`
 }
 
 // ExportImageResult reports what landed on disk.
@@ -57,18 +61,21 @@ func (a *App) ExportGotekImage(req ExportImageRequest) (*ExportImageResult, erro
 		return nil, err
 	}
 
-	path, err := wruntime.SaveFileDialog(a.ctx, wruntime.SaveDialogOptions{
-		Title:           "Export Gotek floppy image",
-		DefaultFilename: "s950-disk.img",
-		Filters: []wruntime.FileFilter{
-			{DisplayName: "Floppy image (.img)", Pattern: "*.img"},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("save dialog: %w", err)
-	}
+	path := req.SavePath
 	if path == "" {
-		return nil, nil // user cancelled
+		path, err = wruntime.SaveFileDialog(a.ctx, wruntime.SaveDialogOptions{
+			Title:           "Save patch image",
+			DefaultFilename: "s950-disk.img",
+			Filters: []wruntime.FileFilter{
+				{DisplayName: "Floppy image (.img)", Pattern: "*.img"},
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("save dialog: %w", err)
+		}
+		if path == "" {
+			return nil, nil // user cancelled
+		}
 	}
 	if err := os.WriteFile(path, im.Bytes(), 0o644); err != nil {
 		return nil, fmt.Errorf("write %s: %w", filepath.Base(path), err)

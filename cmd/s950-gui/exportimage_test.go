@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -200,5 +201,37 @@ func TestBuildGotekImage_ForcesTotalWordsConsistency(t *testing.T) {
 				t.Errorf("disk header slen = %d, want 1000", slen)
 			}
 		}
+	}
+}
+
+func TestExportGotekImage_SavePathSkipsDialog(t *testing.T) {
+	// IMG-editor "Save": a non-empty SavePath writes straight to the
+	// file. Run against a bare App (nil ctx, no device) — proving the
+	// direct path never touches the Wails dialog runtime, which would
+	// crash on nil ctx. The image must parse back.
+	app := &App{}
+	path := filepath.Join(t.TempDir(), "patch.img")
+	req := ExportImageRequest{
+		Samples:    []ExportImageSample{exportSample("KICK", 1000)},
+		ForceRS232: true,
+		SavePath:   path,
+	}
+	res, err := app.ExportGotekImage(req)
+	if err != nil {
+		t.Fatalf("ExportGotekImage: %v", err)
+	}
+	if res == nil || res.Path != path {
+		t.Fatalf("result = %+v, want path %s", res, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written image: %v", err)
+	}
+	im, err := akaidisk.Parse(data)
+	if err != nil {
+		t.Fatalf("written image doesn't parse: %v", err)
+	}
+	if got := len(im.Entries()); got != res.Files {
+		t.Errorf("entries = %d, want %d", got, res.Files)
 	}
 }

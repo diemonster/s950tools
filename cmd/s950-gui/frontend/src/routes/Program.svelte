@@ -29,6 +29,7 @@
     onProgramSelected, invalidateActivation,
     lastActivation, followBlockedReason, followEnabled,
   } from '../lib/state/followsync';
+  import { imgMode, imageFile, imageSkipped, forceRS232 } from '../lib/state/imgmode';
   import { memoryUsage, totalWords } from '../lib/state/memory';
   import { baud } from '../lib/state/connection';
 
@@ -48,7 +49,7 @@
   onMount(() => setSync('dirty', 'Unsaved'));
 
   // ---------- Modal flow ----------
-  type ModalKind = 'closed' | 'preflight' | 'transfer';
+  type ModalKind = 'closed' | 'preflight' | 'transfer' | 'dropwarn';
   let modalKind: ModalKind = 'closed';
   function cancel()       { modalKind = 'closed'; }
 
@@ -61,7 +62,7 @@
   // asking.)
   let sendPlan: SendPlan | null = null;
   function openSend() {
-    if (!hasProgram) return;
+    if (!hasProgram || $imgMode) return;
     sendPlan = planProgramSend(
       prog,
       get(programs),
@@ -267,6 +268,12 @@
         selectedSlot.set(newProgs[0].slot);
         selectedKeygroupN.set(1);
       }
+      // Remember the file + what couldn't be imported: IMG editor
+      // mode saves back to this path, and the skip list drives the
+      // "saving will drop these" warning (save rebuilds the image
+      // from app state, so skipped files don't survive a round-trip).
+      imageFile.set(res.path ?? null);
+      imageSkipped.set(res.skipped ?? []);
       const skipped = (res.skipped ?? []).length;
       // Keep this short — it renders in the topbar status chip.
       setSync('dirty',
@@ -286,7 +293,7 @@
   // are skipped client-side; the backend treats them as an error to
   // keep its contract strict.
   let exportBusy = false;
-  async function exportGotekImage() {
+  async function exportGotekImage(savePath?: string) {
     if (exportBusy) return;
     exportBusy = true;
     try {
@@ -302,20 +309,49 @@
           params: sampleToSampleParams(s),
           words: s.words12,
         })),
-        forceRS232: true,
+        forceRS232: get(forceRS232),
+        // Non-empty = write straight there (IMG-editor Save);
+        // empty = the backend prompts (Save As / plain export).
+        savePath: savePath ?? '',
       };
       const res = await (App as any).ExportGotekImage(req);
       if (!res) return; // user cancelled the dialog
+      // The written file is now THE image — Save targets it, and it
+      // contains exactly the app state, so there's nothing left for
+      // the drop warning to warn about.
+      imageFile.set(res.path ?? null);
+      imageSkipped.set([]);
       const skipped = get(samples).length - sampleRows.length;
       // Keep this short — it renders in the topbar status chip.
       setSync('synced',
-        `Exported ${res.files} files, ${res.freeBlocks} KB free` +
+        `Saved ${res.files} files, ${res.freeBlocks} KB free` +
         (skipped > 0 ? ` (${skipped} skipped)` : ''));
     } catch (e: any) {
-      setSync('error', 'Export failed: ' + String(e?.message ?? e));
+      setSync('error', 'Save failed: ' + String(e?.message ?? e));
     } finally {
       exportBusy = false;
     }
+  }
+
+  // savePatch is the mode-aware entry for every save gesture (⌘S,
+  // Save, Save As). In IMG editor mode, Save writes back to the
+  // opened file; anything the import had to skip (compressed
+  // samples, unknown types) would be silently dropped by that
+  // rebuild, so a warning modal intercepts first. Outside the
+  // editor — or with no file yet — it's a plain save dialog.
+  let pendingSavePath: string | undefined;
+  function savePatch(saveAs = false) {
+    const inPlace = $imgMode && !saveAs ? get(imageFile) ?? undefined : undefined;
+    if ($imgMode && get(imageSkipped).length > 0) {
+      pendingSavePath = inPlace;
+      modalKind = 'dropwarn';
+      return;
+    }
+    void exportGotekImage(inPlace);
+  }
+  function confirmDropSave() {
+    modalKind = 'closed';
+    void exportGotekImage(pendingSavePath);
   }
 
   // Page-level shortcuts, matching the statusbar hints (which were
@@ -327,7 +363,7 @@
     if (modalKind !== 'closed') return;
     if (e.key === 's' || e.key === 'S') {
       e.preventDefault();
-      void exportGotekImage();
+      savePatch(false);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       openSend();
@@ -378,8 +414,8 @@
         {#each $programs as p (p.slot)}
           <div
             class="program {p.slot === $selectedSlot ? 'selected' : ''}"
-            on:click={() => { selectedSlot.set(p.slot); onProgramSelected(p.slot); }}
-            on:keydown={(e) => { if (e.key === 'Enter') { selectedSlot.set(p.slot); onProgramSelected(p.slot); } }}
+            on:click={() => { selectedSlot.set(p.slot); if (!$imgMode) onProgramSelected(p.slot); }}
+            on:keydown={(e) => { if (e.key === 'Enter') { selectedSlot.set(p.slot); if (!$imgMode) onProgramSelected(p.slot); } }}
             role="button"
             tabindex="0">
             <span class="program__slot">{padSlot(p.slot)}</span>
@@ -410,8 +446,13 @@
       <div class="empty-state">
         <div class="empty-state__title">No programs yet</div>
         <p class="empty-state__hint">
-          Connect to your S950 to load its program catalog, open a
-          patch (.img), or start a new program from scratch.
+          {#if $imgMode}
+            Open a patch (.img) to edit its programs and samples, or
+            start a new program from scratch.
+          {:else}
+            Connect to your S950 to load its program catalog, open a
+            patch (.img), or start a new program from scratch.
+          {/if}
         </p>
         <button type="button" class="btn btn--primary" on:click={newProgram}>
           New program
@@ -432,13 +473,13 @@
              what it's playing, so we never claim "synced". Blocked
              reasons land here, next to the MIDI prog # / Respond to
              PC fields that usually cause (and fix) them. -->
-        {#if $lastActivation?.slot === prog.slot}
+        {#if $lastActivation?.slot === prog.slot && !$imgMode}
           <div
             class="follow-note follow-note--ok"
             title="Selecting this program sent MIDI Program Change {$lastActivation.midiProg} (channel {$lastActivation.channel + 1}) to the S950. The hardware can't confirm the switch — your ears do.">
             → sent PC {$lastActivation.midiProg}
           </div>
-        {:else if $followEnabled && $followBlockedReason}
+        {:else if $followEnabled && $followBlockedReason && !$imgMode}
           <div class="follow-note follow-note--warn" title={$followBlockedReason}>
             ⚠ follow: {$followBlockedReason}
           </div>
@@ -592,8 +633,18 @@
       <div class="actions actions--rows">
         <div class="actions__row">
           <div class="actions__group">
-            <button type="button" class="btn" on:click={getFromDevice}>Get from S950</button>
-            <button type="button" class="btn btn--primary" on:click={openSend}>Send to S950</button>
+            <button
+              type="button"
+              class="btn"
+              disabled={$imgMode}
+              title={$imgMode ? 'IMG editor mode — device connection is disabled' : undefined}
+              on:click={getFromDevice}>Get from S950</button>
+            <button
+              type="button"
+              class="btn btn--primary"
+              disabled={$imgMode}
+              title={$imgMode ? 'IMG editor mode — device connection is disabled' : undefined}
+              on:click={openSend}>Send to S950</button>
           </div>
           <div class="actions__sep"></div>
           <div class="actions__group">
@@ -611,15 +662,48 @@
               title="Load a patch — an S950 floppy image's programs + samples — into the app as local entries. Works with any Gotek/FlashFloppy or Translator-built .img.">
               {importBusy ? 'Opening…' : 'Open patch (.img)...'}
             </button>
-            <button
-              type="button"
-              class="btn"
-              on:click={exportGotekImage}
-              disabled={exportBusy}
-              title="Save everything — all programs, keygroups, and samples with host audio — as a bootable S950 floppy image. Works in a Gotek/FlashFloppy drive standalone; the image's settings file boots the sampler with controller-select on RS-232C.">
-              {exportBusy ? 'Saving…' : 'Save patch (.img)...'}
-            </button>
+            {#if $imgMode}
+              <button
+                type="button"
+                class="btn"
+                on:click={() => savePatch(false)}
+                disabled={exportBusy}
+                title={$imageFile ? `Save back to ${$imageFile}` : 'No image open yet — prompts for a location'}>
+                {exportBusy ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                class="btn"
+                on:click={() => savePatch(true)}
+                disabled={exportBusy}
+                title="Save the image to a new file.">
+                Save as...
+              </button>
+            {:else}
+              <button
+                type="button"
+                class="btn"
+                on:click={() => savePatch(false)}
+                disabled={exportBusy}
+                title="Save everything — all programs, keygroups, and samples with host audio — as a bootable S950 floppy image. Works in a Gotek/FlashFloppy drive standalone.">
+                {exportBusy ? 'Saving…' : 'Save patch (.img)...'}
+              </button>
+            {/if}
           </div>
+          {#if $imgMode}
+            <div class="actions__sep"></div>
+            <div class="actions__group">
+              <!-- Boot-default option, surfaced only in editor mode:
+                   our own patches always want it (this app's workflow
+                   is RS-232), but when editing someone else's disk,
+                   silently repointing their controller-select would
+                   be rude. -->
+              <label class="rs232-opt" title="Patch the image's OVERALL SE settings file so the S950 boots with controller-select on RS-232C. Turn off to leave the disk's boot behavior alone.">
+                <input type="checkbox" bind:checked={$forceRS232} />
+                boot RS-232
+              </label>
+            </div>
+          {/if}
         </div>
       </div>
     </section>
@@ -627,11 +711,16 @@
   </main>
 
   <Statusbar
-    hints={[
-      { key: '↵',  label: 'edit name' },
-      { key: '⌘S', label: 'save patch' },
-      { key: '⌘↵', label: 'send to s950' },
-    ]}
+    hints={$imgMode
+      ? [
+          { key: '↵',  label: 'edit name' },
+          { key: '⌘S', label: 'save image' },
+        ]
+      : [
+          { key: '↵',  label: 'edit name' },
+          { key: '⌘S', label: 'save patch' },
+          { key: '⌘↵', label: 'send to s950' },
+        ]}
     status={hasProgram
       ? `Program slot ${padSlot(prog.slot)} · ${prog.keygroups.length} / 31 keygroups used`
       : 'no program selected'}
@@ -639,7 +728,37 @@
 </div>
 
 <!-- Modals -->
-{#if modalKind === 'preflight'}
+{#if modalKind === 'dropwarn'}
+  <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header class="modal__head">
+        <h2 class="modal__title">Saving will drop {$imageSkipped.length} file{$imageSkipped.length === 1 ? '' : 's'}</h2>
+      </header>
+      <div class="modal__body">
+        <p class="dropwarn__lead">
+          These files were on the opened image but couldn't be
+          imported, and saving rebuilds the image from the app's
+          contents only — they will <strong>not</strong> be in the
+          saved file:
+        </p>
+        <ul class="dropwarn__list">
+          {#each $imageSkipped as f}
+            <li>{f}</li>
+          {/each}
+        </ul>
+        <p class="dropwarn__lead">
+          Use <em>Save as…</em> to keep the original image intact.
+        </p>
+      </div>
+      <footer class="modal__foot">
+        <button type="button" class="btn" on:click={cancel}>Cancel</button>
+        <button type="button" class="btn btn--primary" on:click={confirmDropSave}>
+          Save anyway ▶
+        </button>
+      </footer>
+    </div>
+  </div>
+{:else if modalKind === 'preflight'}
   <div class="modal-backdrop is-open" role="dialog" aria-modal="true">
     <div class="modal">
       <header class="modal__head">
@@ -737,6 +856,29 @@
   }
   .follow-note--ok   { color: var(--rb-green); }
   .follow-note--warn { color: var(--rb-orange); }
+  /* IMG-editor boot-default option in the actions row — match the
+     button row's mono/uppercase scale. */
+  .rs232-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    user-select: none;
+  }
+  /* Drop-warning modal body. */
+  .dropwarn__lead { margin: 0 0 8px; }
+  .dropwarn__list {
+    margin: 0 0 8px;
+    padding-left: 18px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    max-height: 180px;
+    overflow: auto;
+  }
   .main {
     grid-area: main;
     overflow: auto;

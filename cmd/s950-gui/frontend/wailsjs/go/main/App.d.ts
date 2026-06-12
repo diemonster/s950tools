@@ -47,8 +47,6 @@ export function MidiThruStop():Promise<main.MidiThruState>;
 
 export function OpenGotekImage():Promise<main.ImportImageResult>;
 
-export function OpenProgramJSON():Promise<protocol.ProgramJSON>;
-
 export function PreviewMidi(arg1:number,arg2:number,arg3:number,arg4:number):Promise<void>;
 
 export function ProbeForS950():Promise<main.ProbeResult>;
@@ -56,8 +54,6 @@ export function ProbeForS950():Promise<main.ProbeResult>;
 export function PutCachedWaveform(arg1:number,arg2:string,arg3:number,arg4:Array<number>,arg5:number):Promise<void>;
 
 export function ResampleSample(arg1:Array<number>,arg2:number,arg3:number):Promise<main.ResampledSample>;
-
-export function SaveProgramJSON(arg1:protocol.ProgramJSON,arg2:string):Promise<string>;
 
 export function SaveSampleWav(arg1:string,arg2:number,arg3:Array<number>):Promise<string>;
 

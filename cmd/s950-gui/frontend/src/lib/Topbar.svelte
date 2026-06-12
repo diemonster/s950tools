@@ -15,6 +15,7 @@
     refreshState, refreshAllFromDevice, cancelRefresh, resetRefresh,
   } from './state/refresh';
   import { theme, toggleTheme } from './state/theme';
+  import { imgMode, imageName, enterImgMode, exitImgMode } from './state/imgmode';
   import {
     midiThru, midiThruError, startThru, stopThru, initMidiThruEvents,
     syncThruStatus, setThruPref, thruCaps, loadThruCaps,
@@ -301,13 +302,21 @@
   // The status chip merges link phase + per-tab edit state. Link
   // problems dominate (no point showing "Unsaved" when the device is
   // gone). When the device is fine, the edit-state dot takes over.
+  // IMG editor mode is deliberately offline, so "Offline" would be
+  // noise there — the edit state speaks alone.
   $: statusChipLabel = (() => {
+    if ($imgMode)                  return $sync.label;
     if ($phase === 'connecting')   return 'Connecting...';
     if ($phase === 'error')        return 'Conn. error';
     if ($phase !== 'connected')    return 'Offline';
     return $sync.label;
   })();
   $: statusChipClass = (() => {
+    if ($imgMode) {
+      return $sync.state === 'synced'
+        ? 'chip chip--status'
+        : `chip chip--status chip--${$sync.state}`;
+    }
     if ($phase === 'connecting')   return 'chip chip--status chip--sending';
     if ($phase === 'error')        return 'chip chip--status chip--error';
     if ($phase !== 'connected')    return 'chip chip--status chip--error';
@@ -339,6 +348,25 @@
   </nav>
   <div class="spacer"></div>
 
+  {#if $imgMode}
+    <!-- IMG editor mode replaces the entire connection cluster:
+         no ports, no thru, no Connect — by design, so a mid-edit
+         Connect can't merge the device catalog into the image
+         being edited. -->
+    <span
+      class="chip chip--imgmode"
+      title="IMG editor mode — device connection disabled. Open, edit, and save Gotek/FlashFloppy patch images offline.">
+      <span class="chip__label">IMG editor</span>
+      <span class="chip__value">{$imageName || 'no image open'}</span>
+    </span>
+    <button
+      type="button"
+      class="chip chip--btn"
+      on:click={exitImgMode}
+      title="Leave IMG editor mode and restore the connection controls. Loaded programs and samples stay in the session.">
+      Exit editor
+    </button>
+  {:else}
   <!-- Port pickers. Two chips that each list MIDI ports + RS-232
        serial devices as alternatives. The native <select> is
        positioned absolute + opacity 0 over the chip so any pixel
@@ -480,6 +508,18 @@
       on:click={connect}>
       {$phase === 'connecting' ? 'Connecting...' : 'Connect'}
     </button>
+    <!-- Offline-only entry into IMG editor mode: open, edit, and
+         save patch images with no sampler attached. Hidden while
+         connected — the live session IS the editor then. -->
+    <button
+      type="button"
+      class="chip chip--btn"
+      disabled={$phase === 'connecting'}
+      on:click={enterImgMode}
+      title="Edit Gotek/FlashFloppy patch images offline — open, edit, save. No sampler needed.">
+      IMG editor
+    </button>
+  {/if}
   {/if}
 
   <span class={statusChipClass} title={statusChipLabel}>
@@ -799,6 +839,23 @@
        through to the transparent select underneath, so this span is
        inert. */
     pointer-events: none;
+  }
+  /* IMG editor mode chip — same accent language as the THRU chip:
+     a bordered "you are in a special state" marker, with the open
+     image's filename as the value. */
+  :global(.chip--imgmode) {
+    border-color: var(--rb-orange);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  :global(.chip--imgmode .chip__value) {
+    color: var(--rb-orange);
+    font-weight: 700;
+    max-width: 22ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* THRU chip while forwarding — accent border + value so "live
      MIDI is flowing down the wire" reads at a glance, same visual

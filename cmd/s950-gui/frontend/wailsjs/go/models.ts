@@ -162,6 +162,7 @@ export namespace main {
 	    programs: protocol.ProgramJSON[];
 	    samples: ExportImageSample[];
 	    forceRS232: boolean;
+	    savePath: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ExportImageRequest(source);
@@ -172,6 +173,7 @@ export namespace main {
 	        this.programs = this.convertValues(source["programs"], protocol.ProgramJSON);
 	        this.samples = this.convertValues(source["samples"], ExportImageSample);
 	        this.forceRS232 = source["forceRS232"];
+	        this.savePath = source["savePath"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

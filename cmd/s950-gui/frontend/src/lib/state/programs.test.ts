@@ -7,7 +7,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
   programs, selectedSlot, selectedProgram,
-  newLocalProgram, MAX_KEYGROUPS, ZONE_COLORS,
+  newLocalProgram, newKeygroup, MAX_KEYGROUPS, ZONE_COLORS,
+  keygroupsUsingSample, nextKeygroupN,
 } from './programs';
 
 // scheduleProgramWriteback fires off a backend SetProgram via a lazy
@@ -96,5 +97,40 @@ describe('selectedProgram.addKeygroup', () => {
     await Promise.resolve();
     const livesync = await import('./livesync');
     expect(livesync.scheduleProgramWriteback).toHaveBeenCalledWith(7);
+  });
+});
+
+describe('sample → keygroup correlation helpers', () => {
+  // kgWith builds a keygroup n with the given layer sample names.
+  function kgWith(n: number, soft = '', loud = '') {
+    const k = newKeygroup(n);
+    k.soft.sample = soft;
+    k.loud.sample = loud;
+    return k;
+  }
+
+  it('finds keygroups by soft or loud layer, trimming S950 padding', () => {
+    const kgs = [
+      kgWith(1, 'KICK      '),         // padded soft
+      kgWith(2, '', 'KICK'),           // loud
+      kgWith(3, 'SNARE'),
+    ];
+    expect(keygroupsUsingSample(kgs, 'KICK').map((k) => k.n)).toEqual([1, 2]);
+    expect(keygroupsUsingSample(kgs, 'KICK  ').map((k) => k.n)).toEqual([1, 2]);
+    expect(keygroupsUsingSample(kgs, 'HAT')).toEqual([]);
+  });
+
+  it('never matches empty or placeholder names', () => {
+    const kgs = [kgWith(1, ''), kgWith(2, '2 SAMPLE')];
+    expect(keygroupsUsingSample(kgs, '')).toEqual([]);
+    expect(keygroupsUsingSample(kgs, '2 SAMPLE')).toEqual([]);
+  });
+
+  it('cycles through zones on repeated selection', () => {
+    const users = [kgWith(2), kgWith(5), kgWith(9)];
+    expect(nextKeygroupN(users, 1)).toBe(2);  // outsider → first
+    expect(nextKeygroupN(users, 2)).toBe(5);  // advance
+    expect(nextKeygroupN(users, 9)).toBe(2);  // wrap
+    expect(nextKeygroupN([], 1)).toBeNull();  // unused sample
   });
 });

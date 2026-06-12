@@ -33,6 +33,30 @@ export function isAssignedSample(name: string): boolean {
   return !!name && !isPlaceholderSample(name);
 }
 
+// keygroupsUsingSample returns every keygroup whose soft or loud
+// layer plays the named sample. Names compare trimmed — the S950
+// space-pads to 10 chars, and device-parsed layer names can carry
+// that padding while the samples store trims it. Placeholder names
+// never match (they aren't real samples).
+export function keygroupsUsingSample(keygroups: Keygroup[], sampleName: string): Keygroup[] {
+  const name = sampleName.trim();
+  if (!name || isPlaceholderSample(name)) return [];
+  return keygroups.filter(
+    (k) => k.soft.sample.trim() === name || k.loud.sample.trim() === name,
+  );
+}
+
+// nextKeygroupN picks which of a sample's keygroups to select:
+// whatever follows the currently-selected one (wrapping), so
+// repeated clicks on the same sample cycle through every zone that
+// plays it. When the current selection isn't one of them, it starts
+// at the first. null when the sample is unused.
+export function nextKeygroupN(users: Keygroup[], currentN: number): number | null {
+  if (users.length === 0) return null;
+  const idx = users.findIndex((k) => k.n === currentN);
+  return users[(idx + 1) % users.length].n;
+}
+
 // Per-keygroup modulation values. Envelopes are ADSR (0..99 each),
 // LFO and velocity routing are 0..99 knobs. Filter routing collapses
 // the S950's env→VCF + key-tracking knobs.
