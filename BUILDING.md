@@ -4,6 +4,13 @@ This document covers builds beyond local development. For the dev
 loop (`wails dev`, `make test`, `make doctor`), see the README +
 `make help`.
 
+> **Releases are automated.** Pushing a `v*` tag builds macOS /
+> Windows / Linux archives in GitHub Actions and publishes them as a
+> GitHub release — including macOS signing + notarization when the
+> repo secrets are configured. See [RELEASING.md](RELEASING.md).
+> The manual steps below remain for local one-offs and as the
+> reference for what the workflow automates.
+
 ## Prerequisites
 
 `make doctor` verifies everything is installed at the right version.
